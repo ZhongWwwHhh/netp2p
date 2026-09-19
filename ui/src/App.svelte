@@ -14,6 +14,7 @@
   import Routes from './lib/pages/Routes.svelte';
   import Settings from './lib/pages/Settings.svelte';
   import SetupKeys from './lib/pages/SetupKeys.svelte';
+  import Users from './lib/pages/Users.svelte';
   import Zones from './lib/pages/Zones.svelte';
   import { defaultPath, navigate, router, startRouter } from './lib/router.svelte';
   import { network } from './lib/stores/network.svelte';
@@ -34,6 +35,7 @@
     '/policies': Policies,
     '/groups': Groups,
     '/setup-keys': SetupKeys,
+    '/users': Users,
     '/routes': Routes,
     '/budgets': Budgets,
     '/dns/nameservers': Nameservers,

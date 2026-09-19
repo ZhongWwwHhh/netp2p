@@ -8,6 +8,7 @@
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { Route } from '../types';
 
@@ -26,6 +27,9 @@
       `${route.id} ${route.destination} ${route.routingGroup}`.toLowerCase().includes(query.trim().toLowerCase()),
     ),
   );
+
+  const canWrite = $derived(can('routes', 'update'));
+  const canDelete = $derived(can('routes', 'delete'));
 
   function create() {
     editing = {
@@ -69,7 +73,9 @@
 <div class="space-y-5">
   <PageHeader title="Routes" shown={filtered.length} total={routes.length} subtitle="Advertise CIDRs or domains through a routing group to distribution groups.">
     {#snippet actions()}
-      <button class="btn-primary" onclick={create}>Add route</button>
+      {#if canWrite}
+        <button class="btn-primary" onclick={create}>Add route</button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -113,8 +119,12 @@
           <span class="text-sm text-slate-600">{route.metric}</span>
         {:else if key === 'actions'}
           <div class="flex justify-end gap-1">
-            <button class="btn-ghost" onclick={() => (editing = { ...route, distributionGroups: [...route.distributionGroups], allowedPathTypes: [...(route.allowedPathTypes ?? [])], budgetIds: [...(route.budgetIds ?? [])] })}>Edit</button>
-            <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = route)}>Delete</button>
+            {#if canWrite}
+              <button class="btn-ghost" onclick={() => (editing = { ...route, distributionGroups: [...route.distributionGroups], allowedPathTypes: [...(route.allowedPathTypes ?? [])], budgetIds: [...(route.budgetIds ?? [])] })}>Edit</button>
+            {/if}
+            {#if canDelete}
+              <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = route)}>Delete</button>
+            {/if}
           </div>
         {/if}
       {/snippet}

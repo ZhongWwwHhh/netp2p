@@ -21,10 +21,31 @@ export interface Policy {
 
 export interface Group {
   id: string;
+  name?: string;
   userIds?: string[];
   peerIds?: string[];
   managed?: boolean;
   ssoClaim?: string;
+  issued?: string;
+}
+
+export interface User {
+  id: string;
+  email?: string;
+  name?: string;
+  role: string;
+  autoGroups?: string[];
+  blocked?: boolean;
+  issued?: string;
+  lastLogin?: string;
+}
+
+export interface NetworkSettings {
+  dnsDomain?: string;
+  loginExpirationDays?: number;
+  jwtGroupsEnabled?: boolean;
+  jwtGroupsClaimName?: string;
+  jwtAllowGroups?: string[];
 }
 
 export interface Route {
@@ -64,6 +85,9 @@ export interface Peer {
   hostname?: string;
   os?: string;
   clientVersion?: string;
+  userId?: string;
+  dnsLabel?: string;
+  lastLogin?: string;
 }
 
 export interface CommitteeMember {
@@ -87,6 +111,7 @@ export interface State {
   networkId: string;
   overlayCidr: string;
   peers: Peer[];
+  users: User[];
   groups: Group[];
   policies: Policy[];
   routes: Route[];
@@ -95,6 +120,7 @@ export interface State {
   nameservers: Nameserver[];
   zones: DNSZone[];
   dnsSettings: DNSSettings;
+  settings: NetworkSettings;
   nextIpOffset: number;
 }
 
@@ -154,7 +180,36 @@ export type StateTransition =
   | { type: 'remove_nameserver'; targetId: string }
   | { type: 'upsert_zone'; zone: DNSZone }
   | { type: 'remove_zone'; targetId: string }
-  | { type: 'update_dns_settings'; dnsSettings: DNSSettings };
+  | { type: 'update_dns_settings'; dnsSettings: DNSSettings }
+  | { type: 'update_user_role'; user: User }
+  | { type: 'set_user_blocked'; user: User }
+  | { type: 'remove_user'; targetId: string }
+  | { type: 'update_network_settings'; settings: NetworkSettings };
+
+export type Operation = 'create' | 'read' | 'update' | 'delete';
+
+export interface Identity {
+  subject?: string;
+  userId?: string;
+  email?: string;
+  name?: string;
+  role: string;
+  static?: boolean;
+}
+
+export interface SessionInfo {
+  identity: Identity;
+  permissions: Record<string, Operation[]>;
+}
+
+export interface BootstrapOIDC {
+  issuer: string;
+  clientId: string;
+  scopes: string[];
+  authorizationEndpoint?: string;
+  tokenEndpoint?: string;
+  redirectUri?: string;
+}
 
 export interface Bootstrap {
   peerId: string;
@@ -165,6 +220,7 @@ export interface Bootstrap {
   networkId: string;
   version: string;
   committee: CommitteeMember[];
+  oidc?: BootstrapOIDC;
 }
 
 export interface Presence {

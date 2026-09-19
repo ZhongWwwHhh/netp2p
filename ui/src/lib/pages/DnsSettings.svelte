@@ -2,6 +2,7 @@
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
 
   let busy = $state(false);
@@ -11,6 +12,7 @@
 
   const settings = $derived(network.snapshot?.state.dnsSettings);
   const groupIds = $derived((network.snapshot?.state.groups ?? []).map((group) => group.id));
+  const canWrite = $derived(can('dns', 'update'));
 
   // Seed the form from certified state once it arrives, without stomping edits
   // the operator has already started.
@@ -47,9 +49,11 @@
       <p class="mt-1 text-xs text-slate-500">Empty applies the setting to every peer in the network.</p>
     </div>
 
-    <div class="flex justify-end">
-      <button class="btn-primary" onclick={save} disabled={busy}>{busy ? 'Committing…' : 'Save settings'}</button>
-    </div>
+    {#if canWrite}
+      <div class="flex justify-end">
+        <button class="btn-primary" onclick={save} disabled={busy}>{busy ? 'Committing…' : 'Save settings'}</button>
+      </div>
+    {/if}
   </div>
 
   <p class="rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800">

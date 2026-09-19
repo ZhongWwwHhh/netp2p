@@ -52,8 +52,11 @@ func main() {
 		}
 		return
 	case "client":
-		if *managerAddr == "" || *setupKey == "" {
-			log.Fatal("--manager and --setup-key are required for client role")
+		if *managerAddr == "" {
+			log.Fatal("--manager is required for client role")
+		}
+		if *setupKey == "" && !*sso {
+			log.Fatal("--setup-key or --sso is required for client role")
 		}
 		if err := runClient(ctx, clientOptions{
 			dataDir: *dataDir, listenAddr: *listen, managerAddr: *managerAddr,

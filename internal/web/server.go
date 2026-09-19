@@ -86,6 +86,7 @@ type Server struct {
 	addresses  []string
 	bootstrap  []byte
 	httpServer *http.Server
+	oidcProxy  *oidcProxy
 }
 
 func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server, error) {
@@ -107,6 +108,7 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 		httpHost:  &libp2phttp.Host{StreamHost: node.Host},
 		publicKey: publicKey,
 		addresses: addresses,
+		oidcProxy: newOIDCProxy(config.OIDC),
 	}
 	server.httpHost.SetHTTPHandler(p2p.WebAPIProtocol, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		server.handleAPI(writer, request)
@@ -299,6 +301,11 @@ func (server *Server) BootstrapHandler() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(dist))
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if server.oidcProxy != nil && strings.HasPrefix(request.URL.Path, "/auth/") {
+			if server.oidcProxy.handle(writer, request) {
+				return
+			}
+		}
 		switch request.URL.Path {
 		case "/api/bootstrap":
 			if request.Method != http.MethodGet {

@@ -12,6 +12,7 @@ const emptyState = {
   networkId: 'net',
   overlayCidr: '100.64.0.0/24',
   peers: [],
+  users: [],
   groups: [],
   policies: [],
   routes: [],
@@ -20,6 +21,7 @@ const emptyState = {
   nameservers: [],
   zones: [],
   dnsSettings: { disabled: false, groups: [] },
+  settings: {},
   nextIpOffset: 1,
 };
 
@@ -84,6 +86,17 @@ describe('snapshot normalization', () => {
     expect(normalized.state.dnsSettings.groups).toEqual([]);
   });
 
+  it('normalizes user and settings collections', () => {
+    const snapshot = baseSnapshot();
+    const withNulls = {
+      ...snapshot,
+      state: { ...emptyState, users: null, settings: null },
+    } as unknown as Snapshot;
+    const normalized = normalizeSnapshot(withNulls);
+    expect(normalized.state.users).toEqual([]);
+    expect(normalized.state.settings).toEqual({});
+  });
+
   it('turns null presence into an empty list', () => {
     expect(normalizePresence(null)).toEqual([]);
     expect(normalizePresence([{ peerId: 'p', online: true } as Presence])).toHaveLength(1);
@@ -102,6 +115,10 @@ describe('routing table', () => {
     expect(routes.some((route) => route.path === defaultPath)).toBe(true);
     expect(routeTitle(defaultPath)).toBe('Peers');
     expect(routeTitle('/nope')).toBe('Console');
+  });
+
+  it('exposes the SSO users page', () => {
+    expect(routes.some((route) => route.path === '/users')).toBe(true);
   });
 });
 

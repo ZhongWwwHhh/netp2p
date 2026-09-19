@@ -16,6 +16,7 @@ export function normalizeSnapshot(snapshot: Snapshot): Snapshot {
     state: {
       ...snapshot.state,
       peers: asArray(snapshot.state?.peers),
+      users: asArray(snapshot.state?.users),
       groups: asArray(snapshot.state?.groups),
       policies: asArray(snapshot.state?.policies),
       routes: asArray(snapshot.state?.routes),
@@ -24,6 +25,7 @@ export function normalizeSnapshot(snapshot: Snapshot): Snapshot {
       nameservers: asArray(snapshot.state?.nameservers),
       zones: asArray(snapshot.state?.zones),
       dnsSettings: { disabled: snapshot.state?.dnsSettings?.disabled ?? false, groups: asArray(snapshot.state?.dnsSettings?.groups) },
+      settings: snapshot.state?.settings ?? {},
     },
   };
 }

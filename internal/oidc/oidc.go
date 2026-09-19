@@ -73,9 +73,10 @@ type Claims struct {
 
 // Verifier validates ID tokens against an issuer's JWKS.
 type Verifier struct {
-	config   Config
-	provider *oidc.Provider
-	verifier *oidc.IDTokenVerifier
+	config      Config
+	provider    *oidc.Provider
+	verifier    *oidc.IDTokenVerifier
+	webVerifier *oidc.IDTokenVerifier
 }
 
 // NewVerifier performs OIDC discovery and prepares token verification.
@@ -87,17 +88,26 @@ func NewVerifier(ctx context.Context, config Config) (*Verifier, error) {
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
-	return &Verifier{
+	verifier := &Verifier{
 		config:   config,
 		provider: provider,
 		verifier: provider.Verifier(&oidc.Config{ClientID: config.audience()}),
-	}, nil
+	}
+	// The console uses a separate public client, so its tokens carry a different
+	// audience and need their own verifier.
+	if web := strings.TrimSpace(config.WebClientID); web != "" && web != config.audience() {
+		verifier.webVerifier = provider.Verifier(&oidc.Config{ClientID: web})
+	}
+	return verifier, nil
 }
 
 // Verify checks the token signature, issuer, audience and expiry, then extracts
 // the claims the overlay uses.
 func (verifier *Verifier) Verify(ctx context.Context, rawToken string) (Claims, error) {
 	token, err := verifier.verifier.Verify(ctx, rawToken)
+	if err != nil && verifier.webVerifier != nil {
+		token, err = verifier.webVerifier.Verify(ctx, rawToken)
+	}
 	if err != nil {
 		return Claims{}, err
 	}

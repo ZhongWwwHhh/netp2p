@@ -4,6 +4,17 @@
 # Build once with:  docker build -t netp2p-test:latest .
 # Set MANAGER1_PEER_ID (see deploy/compose.env) so clients dial manager-1.
 services:
+  # Lab identity provider. Managers verify ID tokens against it; the console
+  # reaches it through the manager's /auth proxy so it never needs a hostname
+  # the browser can resolve.
+  mock-idp:
+    image: netp2p-test:latest
+    entrypoint: ["netp2p-mockidp"]
+    command: ["--listen", "0.0.0.0:9999", "--issuer", "http://mock-idp:9999",
+      "--subject", "sso-user-1", "--email", "sso-user@example.com", "--name", "SSO Admin",
+      "--groups", "netp2p-admins,eng"]
+    ports:
+      - "9999:9999"
   manager-1:
     image: netp2p-test:latest
     environment:
@@ -55,6 +66,18 @@ services:
       "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
       "--setup-key", "setup-key-b", "--packet-listen", "127.0.0.1:51820", "--status-file", "/status/client-b.json"]
     volumes: ["./deploy/run:/status"]
+
+  # SSO client: registers through the device flow instead of a setup key and
+  # inherits its groups from the IdP claims.
+  client-sso:
+    image: netp2p-test:latest
+    profiles: ["sso"]
+    depends_on: [manager-1, mock-idp]
+    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
+      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
+      "--sso", "--sso-issuer", "http://mock-idp:9999", "--sso-client-id", "netp2p",
+      "--packet-listen", "127.0.0.1:51820", "--status-file", "/status/client-sso.json"]
+    volumes: ["./deploy/run:/status", "client-sso-data:/data"]
   # Started on demand to prove a quorum still certifies with one manager down.
   client-c:
     image: netp2p-test:latest
@@ -94,3 +117,4 @@ services:
 volumes:
   client-a-tun-data:
   client-b-tun-data:
+  client-sso-data:

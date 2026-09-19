@@ -19,11 +19,17 @@ func main() {
 	name := flag.String("name", "SSO User", "name claim")
 	groups := flag.String("groups", "netp2p-admins", "comma separated groups claim")
 	groupsClaim := flag.String("groups-claim", "groups", "claim name carrying groups")
+	webSubject := flag.String("web-subject", "sso-web-user", "subject of the browser PKCE user")
+	webGroups := flag.String("web-groups", "eng", "comma separated groups for the browser PKCE user")
 	flag.Parse()
 
 	user := &oidctest.User{Subject: *subject, Email: *email, Name: *name, Groups: splitGroups(*groups)}
+	webUser := &oidctest.User{
+		Subject: *webSubject, Email: *webSubject + "@example.com", Name: "SSO Web User",
+		Groups: splitGroups(*webGroups),
+	}
 	server, err := oidctest.New(*listen, oidctest.Options{
-		Issuer: *issuer, AutoApprove: true, Default: user, GroupsClaim: *groupsClaim,
+		Issuer: *issuer, AutoApprove: true, Default: user, WebUser: webUser, GroupsClaim: *groupsClaim,
 	})
 	if err != nil {
 		log.Fatal(err)

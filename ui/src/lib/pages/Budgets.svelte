@@ -9,6 +9,7 @@
   import ProgressBar from '../components/ProgressBar.svelte';
   import { bitrateLabel, bytesLabel, percent } from '../format';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { Budget } from '../types';
 
@@ -24,6 +25,8 @@
   const filtered = $derived(
     budgets.filter((budget) => `${budget.id} ${budget.subjectType} ${budget.subjectId}`.toLowerCase().includes(query.trim().toLowerCase())),
   );
+  const canWrite = $derived(can('budgets', 'update'));
+  const canDelete = $derived(can('budgets', 'delete'));
 
   function create() {
     editing = {
@@ -68,7 +71,9 @@
 <div class="space-y-5">
   <PageHeader title="Traffic Budgets" shown={filtered.length} total={budgets.length} subtitle="Rate and volume limits attached to peers, groups, routes or services.">
     {#snippet actions()}
-      <button class="btn-primary" onclick={create}>Create budget</button>
+      {#if canWrite}
+        <button class="btn-primary" onclick={create}>Create budget</button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -117,8 +122,12 @@
           <span class="code">{budget.onExhausted || 'none'}</span>
         {:else if key === 'actions'}
           <div class="flex justify-end gap-1">
-            <button class="btn-ghost" onclick={() => (editing = { ...budget })}>Edit</button>
-            <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = budget)}>Delete</button>
+            {#if canWrite}
+              <button class="btn-ghost" onclick={() => (editing = { ...budget })}>Edit</button>
+            {/if}
+            {#if canDelete}
+              <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = budget)}>Delete</button>
+            {/if}
           </div>
         {/if}
       {/snippet}

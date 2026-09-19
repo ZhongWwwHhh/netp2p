@@ -8,6 +8,7 @@
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { Nameserver } from '../types';
 
@@ -22,6 +23,9 @@
   const filtered = $derived(
     nameservers.filter((entry) => `${entry.id} ${entry.name} ${entry.servers.join(' ')}`.toLowerCase().includes(query.trim().toLowerCase())),
   );
+
+  const canWrite = $derived(can('nameservers', 'update'));
+  const canDelete = $derived(can('nameservers', 'delete'));
 
   function create() {
     serverDraft = '';
@@ -69,7 +73,9 @@
 <div class="space-y-5">
   <PageHeader title="Nameservers" shown={filtered.length} total={nameservers.length} subtitle="Resolvers the overlay hands to peers, optionally scoped to match domains.">
     {#snippet actions()}
-      <button class="btn-primary" onclick={create}>Add nameserver</button>
+      {#if canWrite}
+        <button class="btn-primary" onclick={create}>Add nameserver</button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -120,8 +126,12 @@
           </div>
         {:else if key === 'actions'}
           <div class="flex justify-end gap-1">
-            <button class="btn-ghost" onclick={() => (editing = { ...entry, groups: [...entry.groups], matchDomains: [...(entry.matchDomains ?? [])], servers: [...entry.servers] })}>Edit</button>
-            <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = entry)}>Delete</button>
+            {#if canWrite}
+              <button class="btn-ghost" onclick={() => (editing = { ...entry, groups: [...entry.groups], matchDomains: [...(entry.matchDomains ?? [])], servers: [...entry.servers] })}>Edit</button>
+            {/if}
+            {#if canDelete}
+              <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = entry)}>Delete</button>
+            {/if}
           </div>
         {/if}
       {/snippet}

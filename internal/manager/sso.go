@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -126,9 +127,11 @@ func (manager *Manager) reconcileUser(user model.User, claims oidc.Claims, autoG
 			User: &model.User{ID: current.ID, Role: role},
 		})
 		if err != nil {
-			return model.User{}, err
-		}
-		if record := findUserRecord(snapshot.State, current.ID); record != nil {
+			// The IdP role is advisory. A rejected change (for example, the
+			// certified state refuses to demote the last owner) must not lock
+			// the user out of the network.
+			log.Printf("sso: keeping role %q for %s: %v", current.Role, current.ID, err)
+		} else if record := findUserRecord(snapshot.State, current.ID); record != nil {
 			current = *record
 		}
 	}

@@ -8,6 +8,7 @@
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { Policy, Service } from '../types';
 
@@ -25,6 +26,9 @@
         .includes(query.trim().toLowerCase()),
     ),
   );
+
+  const canWrite = $derived(can('policies', 'update'));
+  const canDelete = $derived(can('policies', 'delete'));
 
   function create() {
     editing = {
@@ -85,7 +89,9 @@
 <div class="space-y-5">
   <PageHeader title="Policies" shown={filtered.length} total={policies.length} subtitle="Decide which groups may reach which groups, over which protocols.">
     {#snippet actions()}
-      <button class="btn-primary" onclick={create}>Create policy</button>
+      {#if canWrite}
+        <button class="btn-primary" onclick={create}>Create policy</button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -132,8 +138,12 @@
           <span class="text-sm text-slate-600">{policy.priority}</span>
         {:else if key === 'actions'}
           <div class="flex justify-end gap-1">
-            <button class="btn-ghost" onclick={() => (editing = { ...policy, services: policy.services.map((service) => ({ ...service })) })}>Edit</button>
-            <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = policy)}>Delete</button>
+            {#if canWrite}
+              <button class="btn-ghost" onclick={() => (editing = { ...policy, services: policy.services.map((service) => ({ ...service })) })}>Edit</button>
+            {/if}
+            {#if canDelete}
+              <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = policy)}>Delete</button>
+            {/if}
           </div>
         {/if}
       {/snippet}

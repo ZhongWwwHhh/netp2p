@@ -8,6 +8,7 @@
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { SetupKey } from '../types';
 
@@ -24,6 +25,9 @@
   const filtered = $derived(
     keys.filter((record) => `${record.key} ${record.groups.join(' ')}`.toLowerCase().includes(query.trim().toLowerCase())),
   );
+
+  const canWrite = $derived(can('setup_keys', 'update'));
+  const canDelete = $derived(can('setup_keys', 'delete'));
 
   function create() {
     revealed = '';
@@ -59,7 +63,9 @@
 <div class="space-y-5">
   <PageHeader title="Setup Keys" shown={filtered.length} total={keys.length} subtitle="Registration tokens that place new peers into groups.">
     {#snippet actions()}
-      <button class="btn-primary" onclick={create}>Create key</button>
+      {#if canWrite}
+        <button class="btn-primary" onclick={create}>Create key</button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -96,8 +102,12 @@
           </div>
         {:else if key === 'actions'}
           <div class="flex justify-end gap-1">
-            <button class="btn-ghost" onclick={() => (editing = { key: record.key, groups: [...record.groups] })}>Edit</button>
-            <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = record)}>Delete</button>
+            {#if canWrite}
+              <button class="btn-ghost" onclick={() => (editing = { key: record.key, groups: [...record.groups] })}>Edit</button>
+            {/if}
+            {#if canDelete}
+              <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = record)}>Delete</button>
+            {/if}
           </div>
         {/if}
       {/snippet}

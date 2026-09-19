@@ -8,6 +8,7 @@
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { Group } from '../types';
 
@@ -23,6 +24,8 @@
   const filtered = $derived(
     groups.filter((group) => group.id.toLowerCase().includes(query.trim().toLowerCase())),
   );
+  const canWrite = $derived(can('groups', 'update'));
+  const canDelete = $derived(can('groups', 'delete'));
 
   function create() {
     editing = { id: '', peerIds: [] };
@@ -65,7 +68,9 @@
 <div class="space-y-5">
   <PageHeader title="Groups" shown={filtered.length} total={groups.length} subtitle="Authorization unit shared by peers, policies, routes and DNS.">
     {#snippet actions()}
-      <button class="btn-primary" onclick={create}>Create group</button>
+      {#if canWrite}
+        <button class="btn-primary" onclick={create}>Create group</button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -97,8 +102,12 @@
           <span class="text-sm text-slate-600">{group.peerIds?.length ?? 0} peer(s)</span>
         {:else if key === 'actions'}
           <div class="flex justify-end gap-1">
-            <button class="btn-ghost" onclick={() => (editing = { ...group, peerIds: [...(group.peerIds ?? [])] })}>Edit</button>
-            <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = group)}>Delete</button>
+            {#if canWrite}
+              <button class="btn-ghost" onclick={() => (editing = { ...group, peerIds: [...(group.peerIds ?? [])] })}>Edit</button>
+            {/if}
+            {#if canDelete}
+              <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = group)}>Delete</button>
+            {/if}
           </div>
         {/if}
       {/snippet}

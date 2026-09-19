@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,9 @@ type Options struct {
 	AutoApprove bool
 	// Default is the user issued to auto-approved device flows.
 	Default *User
+	// WebUser is the user issued to the browser authorization code flow. It
+	// defaults to Default when unset.
+	WebUser *User
 	// GroupsClaim is the claim name carrying groups. Defaults to "groups".
 	GroupsClaim string
 }
@@ -53,10 +57,11 @@ type Server struct {
 	keyID      string
 	options    Options
 
-	mu      sync.Mutex
-	pending map[string]*deviceGrant
-	byCode  map[string]*deviceGrant
-	users   map[string]User
+	mu        sync.Mutex
+	pending   map[string]*deviceGrant
+	byCode    map[string]*deviceGrant
+	authCodes map[string]authGrant
+	users     map[string]User
 }
 
 type deviceGrant struct {
@@ -65,6 +70,11 @@ type deviceGrant struct {
 	clientID   string
 	approved   bool
 	user       User
+}
+
+type authGrant struct {
+	clientID string
+	user     User
 }
 
 // New starts a mock provider listening on listen (e.g. "127.0.0.1:0").
@@ -82,18 +92,20 @@ func New(listen string, options Options) (*Server, error) {
 		issuer = "http://" + listener.Addr().String()
 	}
 	server := &Server{
-		Issuer:   issuer,
-		listener: listener,
-		key:      key,
-		keyID:    keyID(key),
-		options:  options,
-		pending:  make(map[string]*deviceGrant),
-		byCode:   make(map[string]*deviceGrant),
-		users:    make(map[string]User),
+		Issuer:    issuer,
+		listener:  listener,
+		key:       key,
+		keyID:     keyID(key),
+		options:   options,
+		pending:   make(map[string]*deviceGrant),
+		byCode:    make(map[string]*deviceGrant),
+		authCodes: make(map[string]authGrant),
+		users:     make(map[string]User),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", server.handleDiscovery)
 	mux.HandleFunc("/keys", server.handleJWKS)
+	mux.HandleFunc("/authorize", server.handleAuthorize)
 	mux.HandleFunc("/device_authorization", server.handleDeviceAuthorization)
 	mux.HandleFunc("/token", server.handleToken)
 	server.httpServer = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
@@ -183,9 +195,46 @@ func (server *Server) handleDeviceAuthorization(writer http.ResponseWriter, requ
 	})
 }
 
+// handleAuthorize implements the authorization code flow without any consent
+// UI: it immediately redirects back with a code, which is what makes the
+// manager's PKCE proxy testable end to end.
+func (server *Server) handleAuthorize(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	redirectURI := query.Get("redirect_uri")
+	if redirectURI == "" {
+		http.Error(writer, "redirect_uri is required", http.StatusBadRequest)
+		return
+	}
+	user := User{Subject: "unknown"}
+	switch {
+	case server.options.WebUser != nil:
+		user = *server.options.WebUser
+	case server.options.Default != nil:
+		user = *server.options.Default
+	}
+	code := randomToken()
+	server.mu.Lock()
+	server.authCodes[code] = authGrant{clientID: query.Get("client_id"), user: user}
+	server.mu.Unlock()
+	target, err := url.Parse(redirectURI)
+	if err != nil {
+		http.Error(writer, "invalid redirect_uri", http.StatusBadRequest)
+		return
+	}
+	params := target.Query()
+	params.Set("code", code)
+	params.Set("state", query.Get("state"))
+	target.RawQuery = params.Encode()
+	http.Redirect(writer, request, target.String(), http.StatusFound)
+}
+
 func (server *Server) handleToken(writer http.ResponseWriter, request *http.Request) {
 	if err := request.ParseForm(); err != nil {
 		http.Error(writer, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if request.Form.Get("grant_type") == "authorization_code" {
+		server.handleAuthorizationCode(writer, request.Form.Get("code"), request.Form.Get("client_id"))
 		return
 	}
 	deviceCode := request.Form.Get("device_code")
@@ -210,6 +259,29 @@ func (server *Server) handleToken(writer http.ResponseWriter, request *http.Requ
 		"token_type":   "Bearer",
 		"id_token":     token,
 		"expires_in":   3600,
+	})
+}
+
+func (server *Server) handleAuthorizationCode(writer http.ResponseWriter, code, clientID string) {
+	server.mu.Lock()
+	grant, ok := server.authCodes[code]
+	delete(server.authCodes, code)
+	server.mu.Unlock()
+	if !ok {
+		writeJSONStatus(writer, http.StatusBadRequest, map[string]string{"error": "invalid_grant"})
+		return
+	}
+	if grant.clientID != "" && clientID != "" && grant.clientID != clientID {
+		writeJSONStatus(writer, http.StatusBadRequest, map[string]string{"error": "invalid_client"})
+		return
+	}
+	token, err := server.mintIDToken(&deviceGrant{clientID: grant.clientID, user: grant.user})
+	if err != nil {
+		writeJSONStatus(writer, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+		return
+	}
+	writeJSON(writer, map[string]any{
+		"access_token": token, "token_type": "Bearer", "id_token": token, "expires_in": 3600,
 	})
 }
 

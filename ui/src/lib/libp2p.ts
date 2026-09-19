@@ -6,7 +6,7 @@ import { webRTCDirect } from '@libp2p/webrtc';
 import { multiaddr } from '@multiformats/multiaddr';
 import { normalizePresence, normalizeSnapshot } from './normalize';
 import { httpResource, joinProtocolPath, resolveProtocolBasePath } from './paths';
-import type { ActivityEntry, Bootstrap, Presence, Snapshot, StateTransition } from './types';
+import type { ActivityEntry, Bootstrap, Presence, SessionInfo, Snapshot, StateTransition, User } from './types';
 
 export async function createConsoleNode() {
   return createLibp2p({
@@ -64,6 +64,9 @@ export async function apiClient(bootstrap: Bootstrap) {
       }).then(snapshot),
       presence: () => request('/api/v1/presence').then((body) =>
         normalizePresence((body as { observations?: Presence[] } | null)?.observations)),
+      session: () => request('/api/v1/session') as Promise<SessionInfo>,
+      users: () => request('/api/v1/users').then((body) =>
+        ((body as { users?: User[] } | null)?.users ?? [])),
       activity: (limit = 100) => request(`/api/v1/activity?limit=${limit}`).then((body) =>
         ((body as { entries?: ActivityEntry[] } | null)?.entries ?? []).map(snapshot)),
     };

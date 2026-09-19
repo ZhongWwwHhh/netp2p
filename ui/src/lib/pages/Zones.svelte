@@ -8,6 +8,7 @@
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { network, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { DNSRecord, DNSZone } from '../types';
 
@@ -23,6 +24,9 @@
   const filtered = $derived(
     zones.filter((zone) => `${zone.id} ${zone.domain}`.toLowerCase().includes(query.trim().toLowerCase())),
   );
+
+  const canWrite = $derived(can('dns', 'update'));
+  const canDelete = $derived(can('dns', 'delete'));
 
   function create() {
     editing = { id: '', domain: '', records: [], groups: [], enabled: true };
@@ -74,7 +78,9 @@
 <div class="space-y-5">
   <PageHeader title="Zones" shown={filtered.length} total={zones.length} subtitle="Authoritative records the overlay resolves before falling back to upstream DNS.">
     {#snippet actions()}
-      <button class="btn-primary" onclick={create}>Add zone</button>
+      {#if canWrite}
+        <button class="btn-primary" onclick={create}>Add zone</button>
+      {/if}
     {/snippet}
   </PageHeader>
 
@@ -114,8 +120,12 @@
           <Badge tone={zone.enabled ? 'emerald' : 'slate'} label={zone.enabled ? 'enabled' : 'disabled'} />
         {:else if key === 'actions'}
           <div class="flex justify-end gap-1">
-            <button class="btn-ghost" onclick={() => (editing = { ...zone, records: zone.records.map((record) => ({ ...record })), groups: [...(zone.groups ?? [])] })}>Edit</button>
-            <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = zone)}>Delete</button>
+            {#if canWrite}
+              <button class="btn-ghost" onclick={() => (editing = { ...zone, records: zone.records.map((record) => ({ ...record })), groups: [...(zone.groups ?? [])] })}>Edit</button>
+            {/if}
+            {#if canDelete}
+              <button class="btn-ghost text-rose-600" onclick={() => (pendingDelete = zone)}>Delete</button>
+            {/if}
           </div>
         {/if}
       {/snippet}

@@ -11,6 +11,7 @@ export const routes: Route[] = [
   { path: '/policies', title: 'Policies', group: 'Access Control' },
   { path: '/groups', title: 'Groups', group: 'Access Control' },
   { path: '/setup-keys', title: 'Setup Keys', group: 'Access Control' },
+  { path: '/users', title: 'Users', group: 'Access Control' },
   { path: '/routes', title: 'Routes', group: 'Network Routing' },
   { path: '/budgets', title: 'Traffic Budgets', group: 'Network Routing' },
   { path: '/dns/nameservers', title: 'Nameservers', group: 'DNS' },

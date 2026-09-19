@@ -2,17 +2,81 @@
   import Badge from '../components/Badge.svelte';
   import PageHeader from '../components/PageHeader.svelte';
   import { shortPeerId } from '../format';
-  import { network } from '../stores/network.svelte';
-  import { disconnect, session } from '../stores/session.svelte';
+  import { network, submit } from '../stores/network.svelte';
+  import { can, disconnect, session } from '../stores/session.svelte';
+  import { notify } from '../stores/toast.svelte';
+  import type { NetworkSettings } from '../types';
 
   const bootstrap = $derived(session.bootstrap);
   const snapshot = $derived(network.snapshot);
+  const canWrite = $derived(can('settings', 'update'));
+
+  let busy = $state(false);
+  let settings = $state<NetworkSettings>({});
+  let loaded = $state(false);
+  let allowGroups = $state('');
+
+  $effect(() => {
+    const current = snapshot?.state.settings;
+    if (loaded || !current) return;
+    settings = { ...current };
+    allowGroups = (current.jwtAllowGroups ?? []).join(', ');
+    loaded = true;
+  });
+
+  async function saveSettings() {
+    busy = true;
+    const ok = await submit({
+      type: 'update_network_settings',
+      settings: {
+        ...settings,
+        jwtAllowGroups: allowGroups
+          .split(',')
+          .map((value) => value.trim())
+          .filter(Boolean),
+      },
+    });
+    busy = false;
+    if (ok) {
+      notify('Network settings committed');
+    } else {
+      notify(network.error || 'commit failed', 'error');
+    }
+  }
 </script>
 
 <div class="space-y-5">
   <PageHeader title="Settings" subtitle="Connection, network and build information for this console session." />
 
   <div class="grid gap-5 lg:grid-cols-2">
+    <section class="surface p-5">
+      <h2 class="text-sm font-semibold text-slate-900">Session</h2>
+      <dl class="mt-3 space-y-3 text-sm">
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-500">Signed in as</dt>
+          <dd class="text-slate-700">
+            {session.identity?.name || session.identity?.email || session.identity?.subject || '—'}
+          </dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-500">Role</dt>
+          <dd class="mt-1">
+            <Badge tone={session.identity?.role === 'owner' ? 'emerald' : 'slate'} label={session.identity?.role ?? '—'} />
+            {#if session.identity?.static}
+              <span class="ml-2 text-xs text-slate-500">break-glass token</span>
+            {/if}
+          </dd>
+        </div>
+        {#if bootstrap?.oidc}
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-slate-500">Identity provider</dt>
+            <dd class="break-all text-xs text-slate-600">{bootstrap.oidc.issuer}</dd>
+          </div>
+        {/if}
+      </dl>
+      <button class="btn-secondary mt-4" onclick={() => void disconnect()}>Sign out of this manager</button>
+    </section>
+
     <section class="surface p-5">
       <h2 class="text-sm font-semibold text-slate-900">Manager connection</h2>
       <dl class="mt-3 space-y-3 text-sm">
@@ -82,6 +146,38 @@
       <p class="mt-1 text-xs text-slate-500">
         Committee {shortPeerId(bootstrap?.committee[0]?.peerId ?? '', 12)} and {bootstrap?.committee.length ?? 0} members total.
       </p>
+    </section>
+
+    <section class="surface p-5 lg:col-span-2">
+      <h2 class="text-sm font-semibold text-slate-900">Network settings</h2>
+      <p class="mt-1 text-xs text-slate-500">Certified configuration applied to peers on their next sync.</p>
+      <div class="mt-4 grid gap-4 md:grid-cols-2">
+        <label class="block">
+          <span class="label">Overlay DNS domain</span>
+          <input class="input" bind:value={settings.dnsDomain} disabled={!canWrite} placeholder="netp2p.internal" />
+        </label>
+        <label class="block">
+          <span class="label">Login expiration (days)</span>
+          <input class="input" type="number" min="0" bind:value={settings.loginExpirationDays} disabled={!canWrite} />
+        </label>
+        <label class="block">
+          <span class="label">JWT groups claim</span>
+          <input class="input" bind:value={settings.jwtGroupsClaimName} disabled={!canWrite} placeholder="groups" />
+        </label>
+        <label class="block">
+          <span class="label">Allowed IdP groups</span>
+          <input class="input" bind:value={allowGroups} disabled={!canWrite} placeholder="comma separated; empty allows all" />
+        </label>
+        <label class="flex items-center gap-2 md:col-span-2">
+          <input type="checkbox" bind:checked={settings.jwtGroupsEnabled} disabled={!canWrite} />
+          <span class="text-sm text-slate-700">Mirror identity provider groups into managed groups</span>
+        </label>
+      </div>
+      {#if canWrite}
+        <div class="mt-4 flex justify-end">
+          <button class="btn-primary" onclick={saveSettings} disabled={busy}>{busy ? 'Committing…' : 'Save settings'}</button>
+        </div>
+      {/if}
     </section>
 
     <section class="surface p-5">
