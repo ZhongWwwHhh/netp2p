@@ -12,6 +12,7 @@ import (
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/web"
 )
@@ -89,11 +90,33 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 	}
 	// Register control handlers only after genesis so early client logins fail
 	// fast and retry instead of racing the genesis transition.
-	netManager := manager.New(node, engine, mesh)
+	var sso *oidc.Verifier
+	var bootstrapOIDC *web.BootstrapOIDC
+	if seed.OIDC.Enabled() {
+		verifier, err := oidc.NewVerifier(ctx, seed.OIDC)
+		if err != nil {
+			return fmt.Errorf("configure sso: %w", err)
+		}
+		sso = verifier
+		authURL, tokenURL, _ := verifier.Endpoint()
+		webClientID := seed.OIDC.WebClientID
+		if webClientID == "" {
+			webClientID = seed.OIDC.ClientID
+		}
+		bootstrapOIDC = &web.BootstrapOIDC{
+			Issuer: seed.OIDC.Issuer, ClientID: webClientID,
+			Scopes:                seed.OIDC.ScopesOrDefault(),
+			AuthorizationEndpoint: authURL, TokenEndpoint: tokenURL,
+		}
+		log.Printf("sso enabled with issuer %s", seed.OIDC.Issuer)
+	}
+	netManager := manager.New(node, engine, mesh, manager.Config{SSO: sso})
 	manager.RegisterAdminHandler(node, mesh, seed.AdminToken)
 	go netManager.RunPresenceGossip(ctx)
 
-	webServer, err := web.NewServer(node, netManager, web.Config{AdminToken: seed.AdminToken})
+	webServer, err := web.NewServer(node, netManager, web.Config{
+		AdminToken: seed.AdminToken, Authenticator: netManager, OIDC: bootstrapOIDC,
+	})
 	if err != nil {
 		return fmt.Errorf("create web server: %w", err)
 	}

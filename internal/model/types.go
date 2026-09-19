@@ -194,6 +194,15 @@ const (
 	RoleUser         = "user"
 )
 
+// ValidRole reports whether role is one of the roles the overlay understands.
+func ValidRole(role string) bool {
+	switch role {
+	case RoleOwner, RoleAdmin, RoleNetworkAdmin, RoleAuditor, RoleUsageViewer, RoleUser:
+		return true
+	}
+	return false
+}
+
 type Service struct {
 	Protocol  string `json:"protocol"`
 	StartPort uint16 `json:"startPort"`

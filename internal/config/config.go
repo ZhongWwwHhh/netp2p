@@ -10,6 +10,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/oidc"
 )
 
 type Seed struct {
@@ -25,6 +26,8 @@ type Seed struct {
 	Nameservers  []model.Nameserver      `json:"nameservers,omitempty"`
 	Zones        []model.DNSZone         `json:"zones,omitempty"`
 	DNSSettings  model.DNSSettings       `json:"dnsSettings,omitempty"`
+	Settings     model.NetworkSettings   `json:"settings,omitempty"`
+	OIDC         oidc.Config             `json:"oidc,omitempty"`
 	NextIPOffset uint32                  `json:"nextIpOffset"`
 }
 
@@ -103,6 +106,7 @@ func (seed Seed) NetworkState() model.NetworkState {
 		Nameservers:  append([]model.Nameserver(nil), seed.Nameservers...),
 		Zones:        append([]model.DNSZone(nil), seed.Zones...),
 		DNSSettings:  seed.DNSSettings,
+		Settings:     seed.Settings,
 		NextIPOffset: seed.NextIPOffset,
 	}
 }

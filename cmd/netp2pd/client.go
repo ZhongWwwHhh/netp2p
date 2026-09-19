@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/netp2p/netp2p/internal/client"
 	"github.com/netp2p/netp2p/internal/dns"
+	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
+	"github.com/netp2p/netp2p/internal/protocol"
 	"github.com/netp2p/netp2p/internal/tun"
 )
 
@@ -30,6 +33,9 @@ type clientOptions struct {
 	dnsListen    string
 	dnsManage    bool
 	noDNS        bool
+	sso          bool
+	ssoIssuer    string
+	ssoClientID  string
 }
 
 func runClient(ctx context.Context, options clientOptions) error {
@@ -60,7 +66,7 @@ func runClient(ctx context.Context, options clientOptions) error {
 		netClient.SetDNSResolver(resolver)
 		netClient.SetDNSUpstreams(upstreams)
 	}
-	if err := loginWithRetry(ctx, netClient, options.networkID, options.setupKey); err != nil {
+	if err := login(ctx, netClient, options); err != nil {
 		return err
 	}
 	if tunDevice != nil {
@@ -161,14 +167,30 @@ func openClientSink(options clientOptions) (packet.PacketSink, *tun.Device, erro
 	return sink, nil, nil
 }
 
-// loginWithRetry tolerates managers that are still certifying genesis; early
-// attempts fail fast until the control handlers are registered.
-func loginWithRetry(ctx context.Context, netClient *client.Client, networkID, setupKey string) error {
-	deadline := time.Now().Add(60 * time.Second)
+// login authenticates to the manager, tolerating managers that are still
+// certifying genesis. With SSO it runs the device flow once and re-runs it when
+// the certified login lifetime has expired.
+func login(ctx context.Context, netClient *client.Client, options clientOptions) error {
+	deadline := time.Now().Add(120 * time.Second)
+	var token string
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if lastErr = netClient.Login(ctx, networkID, setupKey); lastErr == nil {
+		if options.sso && token == "" {
+			fresh, err := obtainSSOToken(ctx, options)
+			if err != nil {
+				return fmt.Errorf("sso device flow: %w", err)
+			}
+			token = fresh
+		}
+		lastErr = netClient.Login(ctx, options.networkID, options.setupKey, token)
+		if lastErr == nil {
 			return nil
+		}
+		var loginErr *client.LoginError
+		if errors.As(lastErr, &loginErr) && loginErr.Code == protocol.CodeLoginExpired && options.sso {
+			log.Printf("certified login expired; re-authenticating with the identity provider")
+			token = ""
+			continue
 		}
 		log.Printf("login retry: %v", lastErr)
 		select {
@@ -178,4 +200,15 @@ func loginWithRetry(ctx context.Context, netClient *client.Client, networkID, se
 		}
 	}
 	return fmt.Errorf("login: %w", lastErr)
+}
+
+func obtainSSOToken(ctx context.Context, options clientOptions) (string, error) {
+	if options.ssoIssuer == "" || options.ssoClientID == "" {
+		return "", fmt.Errorf("--sso-issuer and --sso-client-id are required with --sso")
+	}
+	flow, err := oidc.NewDeviceFlow(ctx, oidc.Config{Issuer: options.ssoIssuer, ClientID: options.ssoClientID})
+	if err != nil {
+		return "", err
+	}
+	return flow.IDToken(ctx)
 }

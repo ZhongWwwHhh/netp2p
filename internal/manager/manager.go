@@ -11,6 +11,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/presence"
 	"github.com/netp2p/netp2p/internal/protocol"
@@ -22,15 +23,22 @@ type Manager struct {
 	mesh     *CommitteeMesh
 	presence *presence.Table
 	gossiper *presence.Gossiper
+	sso      *oidc.Verifier
 	mu       sync.RWMutex
 	snapshot model.SignedSnapshot
 	waiters  map[chan model.SignedSnapshot]struct{}
 }
 
-func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh) *Manager {
+// Config wires optional capabilities into the manager.
+type Config struct {
+	// SSO, when set, verifies ID tokens for peer and console logins.
+	SSO *oidc.Verifier
+}
+
+func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config) *Manager {
 	table := presence.NewTable()
 	manager := &Manager{
-		node: node, engine: engine, mesh: mesh, presence: table,
+		node: node, engine: engine, mesh: mesh, presence: table, sso: config.SSO,
 		gossiper: presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
 		waiters:  make(map[chan model.SignedSnapshot]struct{}),
 	}
@@ -72,6 +80,11 @@ func (manager *Manager) Committee() []model.CommitteeMember {
 	return manager.engine.CommitteeMembers()
 }
 
+// Users returns the certified user records.
+func (manager *Manager) Users() []model.User {
+	return manager.engine.CurrentState().Users
+}
+
 func (manager *Manager) Height() uint64 {
 	return manager.engine.Height()
 }
@@ -109,9 +122,14 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 		return
 	}
 	manager.presence.Observe(request.PeerID, stream.Conn().RemoteMultiaddr().String(), manager.engine.LocalID())
-	snapshot, peerRecord, err := manager.Register(toRegistration(request))
+	registration, code, message := manager.authenticate(request)
+	if message != "" {
+		manager.respond(stream, protocol.LoginResponse{Error: message, Code: code})
+		return
+	}
+	snapshot, peerRecord, err := manager.Register(registration)
 	if err != nil {
-		manager.respond(stream, protocol.LoginResponse{Error: err.Error()})
+		manager.respond(stream, protocol.LoginResponse{Error: err.Error(), Code: protocol.CodeRegistrationRequired})
 		return
 	}
 	manager.respond(stream, protocol.LoginResponse{Snapshot: snapshot, Peer: peerRecord})
@@ -168,6 +186,8 @@ func (manager *Manager) handleSync(stream network.Stream) {
 // Registration is what a client presents when it logs in.
 type Registration struct {
 	SetupKey      string
+	UserID        string
+	LastLogin     string
 	PeerID        string
 	Addresses     []string
 	Hostname      string
@@ -184,8 +204,11 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 		if peer.PeerID != registration.PeerID {
 			continue
 		}
-		if peer.Hostname == registration.Hostname && peer.OS == registration.OS &&
-			peer.ClientVersion == registration.ClientVersion && sameAddresses(peer.Addresses, registration.Addresses) {
+		metadataChanged := peer.Hostname != registration.Hostname || peer.OS != registration.OS ||
+			peer.ClientVersion != registration.ClientVersion || !sameAddresses(peer.Addresses, registration.Addresses)
+		userChanged := registration.UserID != "" && peer.UserID != registration.UserID
+		loginRefresh := registration.LastLogin != "" && shouldRefreshLogin(peer.LastLogin)
+		if !metadataChanged && !userChanged && !loginRefresh {
 			snapshot, ok := manager.LatestSnapshot()
 			if !ok {
 				return model.SignedSnapshot{}, model.PeerRecord{}, fmt.Errorf("no certified snapshot")
@@ -197,6 +220,7 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 			Peer: model.PeerRecord{
 				PeerID: registration.PeerID, Addresses: registration.Addresses,
 				Hostname: registration.Hostname, OS: registration.OS, ClientVersion: registration.ClientVersion,
+				UserID: registration.UserID, LastLogin: registration.LastLogin,
 			},
 		}
 		snapshot, err := manager.mesh.Submit(transition)
@@ -211,6 +235,7 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 		Peer: model.PeerRecord{
 			PeerID: registration.PeerID, Addresses: registration.Addresses,
 			Hostname: registration.Hostname, OS: registration.OS, ClientVersion: registration.ClientVersion,
+			UserID: registration.UserID, LastLogin: registration.LastLogin,
 		},
 	}
 	snapshot, err := manager.mesh.Submit(transition)

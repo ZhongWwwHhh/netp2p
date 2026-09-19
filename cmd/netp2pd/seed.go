@@ -7,6 +7,7 @@ import (
 
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/oidc"
 )
 
 func defaultSeed() config.Seed {
@@ -41,6 +42,19 @@ func defaultSeed() config.Seed {
 				ID: "deny-b-to-a-icmp", SourceGroups: []string{"clients-b"}, DestinationGroups: []string{"clients-a"},
 				Services: []model.Service{{Protocol: "icmp"}}, Effect: model.EffectDeny, Direction: model.DirectionUnidirectional, Priority: 100,
 			},
+		},
+		Settings: model.NetworkSettings{
+			DNSDomain:           "netp2p.internal",
+			LoginExpirationDays: 30,
+			JWTGroupsEnabled:    true,
+			JWTGroupsClaimName:  "groups",
+		},
+		OIDC: oidc.Config{
+			Issuer:      "http://mock-idp:9999",
+			ClientID:    "netp2p",
+			WebClientID: "netp2p-web",
+			GroupsClaim: "groups",
+			AdminGroups: []string{"netp2p-admins"},
 		},
 		NextIPOffset: 1,
 	}

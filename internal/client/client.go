@@ -57,11 +57,28 @@ func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, e
 	return client, nil
 }
 
-func (client *Client) Login(ctx context.Context, networkID, setupKey string) error {
+// LoginError carries the manager's machine-readable failure code so the client
+// can react (re-authenticate, retry) without matching error prose.
+type LoginError struct {
+	Code    string
+	Message string
+}
+
+func (err *LoginError) Error() string {
+	if err.Message != "" {
+		return err.Message
+	}
+	return "login failed: " + err.Code
+}
+
+func (client *Client) Login(ctx context.Context, networkID, setupKey, jwtToken string) error {
 	if err := client.connect(ctx); err != nil {
 		return fmt.Errorf("connect manager: %w", err)
 	}
-	request := netproto.LoginRequest{NetworkID: networkID, SetupKey: setupKey, PeerID: client.node.Host.ID().String(), Addresses: client.node.Addresses()}
+	request := netproto.LoginRequest{
+		NetworkID: networkID, SetupKey: setupKey, JWTToken: jwtToken,
+		PeerID: client.node.Host.ID().String(), Addresses: client.node.Addresses(),
+	}
 	request.Hostname, _ = os.Hostname()
 	request.OS = runtime.GOOS
 	request.ClientVersion = version.Version
@@ -70,6 +87,9 @@ func (client *Client) Login(ctx context.Context, networkID, setupKey string) err
 		return err
 	}
 	if response.Error != "" {
+		if response.Code != "" {
+			return &LoginError{Code: response.Code, Message: response.Error}
+		}
 		return fmt.Errorf("login failed: %s", response.Error)
 	}
 	if err := bft.ValidateSnapshot(response.Snapshot); err != nil {

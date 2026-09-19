@@ -28,6 +28,9 @@ func main() {
 	dnsListen := flag.String("dns-listen", "127.0.0.1:53", "client local DNS resolver address")
 	dnsManage := flag.Bool("dns-manage-resolv-conf", true, "point /etc/resolv.conf at the overlay resolver (TUN mode only)")
 	noDNS := flag.Bool("no-dns", false, "do not start the local DNS resolver")
+	sso := flag.Bool("sso", false, "authenticate the client with an OIDC device flow")
+	ssoIssuer := flag.String("sso-issuer", "", "OIDC issuer URL used with --sso")
+	ssoClientID := flag.String("sso-client-id", "", "OIDC client id used with --sso")
 	statusFile := flag.String("status-file", "", "write client status JSON to this path after login")
 	networkID := flag.String("network", "netp2p-test", "network id")
 	adminToken := flag.String("admin-token", "", "admin auth token from seed")
@@ -57,6 +60,7 @@ func main() {
 			networkID: *networkID, setupKey: *setupKey, packetListen: *packetListen,
 			statusFile: *statusFile, tunName: *tunName, tunMTU: *tunMTU, noTun: *noTun,
 			dnsListen: *dnsListen, dnsManage: *dnsManage, noDNS: *noDNS,
+			sso: *sso, ssoIssuer: *ssoIssuer, ssoClientID: *ssoClientID,
 		}); err != nil {
 			log.Fatal(err)
 		}

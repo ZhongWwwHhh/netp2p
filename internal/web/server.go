@@ -33,6 +33,18 @@ type BootstrapResponse struct {
 	NetworkID       string                  `json:"networkId"`
 	Version         string                  `json:"version"`
 	Committee       []model.CommitteeMember `json:"committee"`
+	OIDC            *BootstrapOIDC          `json:"oidc,omitempty"`
+}
+
+// BootstrapOIDC is the browser-facing slice of the OIDC configuration. The
+// console uses it to run a PKCE authorization code flow.
+type BootstrapOIDC struct {
+	Issuer                string   `json:"issuer"`
+	ClientID              string   `json:"clientId"`
+	Scopes                []string `json:"scopes"`
+	AuthorizationEndpoint string   `json:"authorizationEndpoint,omitempty"`
+	TokenEndpoint         string   `json:"tokenEndpoint,omitempty"`
+	RedirectURI           string   `json:"redirectUri,omitempty"`
 }
 
 type TransitionRequest struct {
@@ -55,6 +67,8 @@ type Config struct {
 	// Authenticator, when set, resolves an SSO bearer token to an identity.
 	// The static admin token always works as break-glass.
 	Authenticator Authenticator
+	// OIDC is advertised to the browser console for PKCE login.
+	OIDC *BootstrapOIDC
 }
 
 // Authenticator resolves an SSO ID token to an authenticated identity. It is
@@ -106,6 +120,7 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 		NetworkID:       manager.NetworkID(),
 		Version:         version.Version,
 		Committee:       manager.Committee(),
+		OIDC:            config.OIDC,
 	})
 	if err != nil {
 		return nil, err
@@ -161,6 +176,12 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		server.handleSnapshot(writer, request)
 	case request.Method == http.MethodGet && path == "/api/v1/presence":
 		writeJSON(writer, http.StatusOK, map[string]any{"observations": server.manager.Presence()})
+	case request.Method == http.MethodGet && path == "/api/v1/users":
+		if !identity.Allows(auth.ModuleUsers, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"users": server.manager.Users()})
 	case request.Method == http.MethodGet && path == "/api/v1/activity":
 		server.handleActivity(writer, request)
 	case request.Method == http.MethodGet && path == "/api/v1/committee/status":

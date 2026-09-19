@@ -58,6 +58,10 @@ type cluster struct {
 }
 
 func newCluster(t *testing.T, state model.NetworkState) *cluster {
+	return newClusterWithConfig(t, state, manager.Config{})
+}
+
+func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager.Config) *cluster {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	group := &cluster{ctx: ctx, cancel: cancel}
@@ -100,7 +104,7 @@ func newCluster(t *testing.T, state model.NetworkState) *cluster {
 		}
 		group.engines = append(group.engines, engine)
 		group.meshes = append(group.meshes, mesh)
-		group.managers = append(group.managers, manager.New(group.nodes[index], engine, mesh))
+		group.managers = append(group.managers, manager.New(group.nodes[index], engine, mesh, config))
 	}
 	for _, mesh := range group.meshes {
 		if err := mesh.Connect(ctx); err != nil {
@@ -163,7 +167,7 @@ func newTestClient(t *testing.T, seed int64, managerAddr, setupKey string) (*cli
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := netClient.Login(ctx, networkID, setupKey); err != nil {
+	if err := netClient.Login(ctx, networkID, setupKey, ""); err != nil {
 		t.Fatalf("login %s: %v", setupKey, err)
 	}
 	go netClient.ServePackets(ctx)

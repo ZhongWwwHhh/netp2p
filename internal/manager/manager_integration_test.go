@@ -78,7 +78,7 @@ func TestFourManagerMeshRegistersPeer(t *testing.T) {
 		nodes[index] = node
 		engines[index] = engine
 		meshes[index] = mesh
-		managers[index] = New(node, engine, mesh)
+		managers[index] = New(node, engine, mesh, Config{})
 	}
 
 	for index, mesh := range meshes {

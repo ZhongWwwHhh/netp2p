@@ -3,9 +3,11 @@ module github.com/netp2p/netp2p
 go 1.25.7
 
 require (
+	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/libp2p/go-libp2p v0.49.0
 	github.com/miekg/dns v1.1.73
 	github.com/multiformats/go-multiaddr v0.16.1
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.47.0
 )
 
@@ -20,6 +22,7 @@ require (
 	github.com/dunglas/httpsfv v1.1.0 // indirect
 	github.com/filecoin-project/go-clock v0.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect

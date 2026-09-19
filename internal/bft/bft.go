@@ -556,15 +556,29 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 				return fmt.Errorf("peer already registered")
 			}
 		}
-		var setupKey *model.SetupKey
-		for index := range state.SetupKeys {
-			if state.SetupKeys[index].Key == transition.SetupKey {
-				setupKey = &state.SetupKeys[index]
-				break
-			}
+		if transition.SetupKey == "" && transition.Peer.UserID == "" {
+			return fmt.Errorf("a setup key or an authenticated user is required")
 		}
-		if setupKey == nil {
-			return fmt.Errorf("invalid setup key")
+		groups := []string{}
+		if transition.SetupKey != "" {
+			setupKey := findSetupKey(*state, transition.SetupKey)
+			if setupKey == nil {
+				return fmt.Errorf("invalid setup key")
+			}
+			groups = append(groups, setupKey.Groups...)
+		}
+		if transition.Peer.UserID != "" {
+			user := findUser(*state, transition.Peer.UserID)
+			if user == nil {
+				return fmt.Errorf("unknown user %q", transition.Peer.UserID)
+			}
+			if user.Blocked {
+				return fmt.Errorf("user %q is blocked", user.ID)
+			}
+			groups = append(groups, user.AutoGroups...)
+		}
+		if err := requireGroups(state, groups); err != nil {
+			return err
 		}
 		if transition.Peer.OverlayIP != "" {
 			return fmt.Errorf("client may not choose overlay IP")
@@ -575,24 +589,11 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		peer := transition.Peer
 		peer.OverlayIP = address
-		peer.Groups = append([]string(nil), setupKey.Groups...)
+		peer.Groups = dedupeSorted(groups)
 		peer.DNSLabel = allocateDNSLabel(*state, peer.Hostname)
 		state.Peers = append(state.Peers, peer)
 		state.NextIPOffset++
-		for _, groupID := range setupKey.Groups {
-			found := false
-			for index := range state.Groups {
-				if state.Groups[index].ID != groupID {
-					continue
-				}
-				state.Groups[index].PeerIDs = append(state.Groups[index].PeerIDs, peer.PeerID)
-				found = true
-				break
-			}
-			if !found {
-				return fmt.Errorf("setup key references unknown group %q", groupID)
-			}
-		}
+		addPeerToGroups(state, peer.PeerID, peer.Groups)
 		return nil
 	case TransitionUpsertGroup:
 		if transition.Group == nil || transition.Group.ID == "" {
@@ -612,6 +613,9 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		for index := range state.Groups {
 			if state.Groups[index].ID == transition.TargetID {
+				if state.Groups[index].Issued == model.GroupIssuedJWT {
+					return fmt.Errorf("group %q is managed by JWT synchronization", transition.TargetID)
+				}
 				state.Groups = append(state.Groups[:index], state.Groups[index+1:]...)
 				return nil
 			}
@@ -725,6 +729,18 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			state.Peers[index].Hostname = transition.Peer.Hostname
 			state.Peers[index].OS = transition.Peer.OS
 			state.Peers[index].ClientVersion = transition.Peer.ClientVersion
+			if transition.Peer.UserID != "" {
+				if findUser(*state, transition.Peer.UserID) == nil {
+					return fmt.Errorf("unknown user %q", transition.Peer.UserID)
+				}
+				state.Peers[index].UserID = transition.Peer.UserID
+			}
+			if transition.Peer.LastLogin != "" {
+				state.Peers[index].LastLogin = transition.Peer.LastLogin
+			}
+			if state.Peers[index].DNSLabel == "" {
+				state.Peers[index].DNSLabel = allocateDNSLabel(*state, transition.Peer.Hostname)
+			}
 			if len(transition.Peer.Addresses) > 0 {
 				state.Peers[index].Addresses = append([]string(nil), transition.Peer.Addresses...)
 			}
@@ -795,6 +811,104 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		state.DNSSettings = *transition.DNSSettings
 		return nil
+	case TransitionRegisterUser:
+		if transition.User == nil || transition.User.ID == "" {
+			return fmt.Errorf("user record is required")
+		}
+		if findUser(*state, transition.User.ID) != nil {
+			return fmt.Errorf("user %q already registered", transition.User.ID)
+		}
+		user := *transition.User
+		if user.Role == "" {
+			user.Role = model.RoleUser
+		}
+		if !model.ValidRole(user.Role) {
+			return fmt.Errorf("unknown role %q", user.Role)
+		}
+		if err := requireGroups(state, user.AutoGroups); err != nil {
+			return err
+		}
+		user.AutoGroups = dedupeSorted(user.AutoGroups)
+		state.Users = append(state.Users, user)
+		addUserToGroups(state, user.ID, user.AutoGroups)
+		applyUserGroupsToPeers(state, user)
+		return nil
+	case TransitionUpdateUserGroups:
+		user := findUser(*state, transitionUserID(transition))
+		if user == nil {
+			return fmt.Errorf("user %q not found", transitionUserID(transition))
+		}
+		if transition.User != nil {
+			if err := requireGroups(state, transition.User.AutoGroups); err != nil {
+				return err
+			}
+			previous := append([]string(nil), user.AutoGroups...)
+			user.AutoGroups = dedupeSorted(transition.User.AutoGroups)
+			removeUserFromGroups(state, user.ID, previous, user.AutoGroups)
+			addUserToGroups(state, user.ID, user.AutoGroups)
+			applyUserGroupsToPeers(state, *user)
+			if transition.User.LastLogin != "" {
+				user.LastLogin = transition.User.LastLogin
+			}
+		}
+		if transition.User != nil && transition.User.Blocked {
+			user.Blocked = true
+		}
+		return nil
+	case TransitionUpdateUserRole:
+		user := findUser(*state, transitionUserID(transition))
+		if user == nil {
+			return fmt.Errorf("user %q not found", transitionUserID(transition))
+		}
+		if transition.User == nil || transition.User.Role == "" {
+			return fmt.Errorf("role is required")
+		}
+		if !model.ValidRole(transition.User.Role) {
+			return fmt.Errorf("unknown role %q", transition.User.Role)
+		}
+		if user.Role == model.RoleOwner && transition.User.Role != model.RoleOwner {
+			if countOwners(*state) <= 1 {
+				return fmt.Errorf("cannot demote the last owner")
+			}
+		}
+		user.Role = transition.User.Role
+		return nil
+	case TransitionSetUserBlocked:
+		user := findUser(*state, transitionUserID(transition))
+		if user == nil {
+			return fmt.Errorf("user %q not found", transitionUserID(transition))
+		}
+		blocked := false
+		if transition.User != nil {
+			blocked = transition.User.Blocked
+		}
+		if blocked && user.Role == model.RoleOwner && countOwners(*state) <= 1 {
+			return fmt.Errorf("cannot block the last owner")
+		}
+		user.Blocked = blocked
+		return nil
+	case TransitionRemoveUser:
+		target := transitionUserID(transition)
+		user := findUser(*state, target)
+		if user == nil {
+			return fmt.Errorf("user %q not found", target)
+		}
+		if user.Role == model.RoleOwner && countOwners(*state) <= 1 {
+			return fmt.Errorf("cannot remove the last owner")
+		}
+		removeUserFromGroups(state, user.ID, user.AutoGroups, nil)
+		state.Users = removeUser(state.Users, target)
+		removePeersOfUser(state, target)
+		return nil
+	case TransitionUpdateSettings:
+		if transition.Settings == nil {
+			return fmt.Errorf("network settings record is required")
+		}
+		if transition.Settings.LoginExpirationDays < 0 {
+			return fmt.Errorf("loginExpirationDays cannot be negative")
+		}
+		state.Settings = *transition.Settings
+		return nil
 	default:
 		return fmt.Errorf("unknown transition type %q", transition.Type)
 	}
@@ -814,6 +928,195 @@ func requireGroups(state *model.NetworkState, groups []string) error {
 		}
 	}
 	return nil
+}
+
+func findSetupKey(state model.NetworkState, key string) *model.SetupKey {
+	for index := range state.SetupKeys {
+		if state.SetupKeys[index].Key == key {
+			return &state.SetupKeys[index]
+		}
+	}
+	return nil
+}
+
+func findUser(state model.NetworkState, id string) *model.User {
+	if id == "" {
+		return nil
+	}
+	for index := range state.Users {
+		if state.Users[index].ID == id {
+			return &state.Users[index]
+		}
+	}
+	return nil
+}
+
+func transitionUserID(transition model.StateTransition) string {
+	if transition.User != nil && transition.User.ID != "" {
+		return transition.User.ID
+	}
+	return transition.TargetID
+}
+
+func countOwners(state model.NetworkState) int {
+	count := 0
+	for _, user := range state.Users {
+		if user.Role == model.RoleOwner {
+			count++
+		}
+	}
+	return count
+}
+
+// dedupeSorted returns the distinct values in sorted order. Sorting keeps the
+// derived peer groups identical on every committee member.
+func dedupeSorted(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+// addPeerToGroups records peer membership in Group.PeerIDs, which is what the
+// policy compiler reads, then re-derives the peer's group list from it.
+func addPeerToGroups(state *model.NetworkState, peerID string, groupIDs []string) {
+	for _, groupID := range groupIDs {
+		for index := range state.Groups {
+			if state.Groups[index].ID != groupID {
+				continue
+			}
+			state.Groups[index].PeerIDs = dedupeSorted(append(state.Groups[index].PeerIDs, peerID))
+			break
+		}
+	}
+	syncPeerGroups(state, peerID)
+}
+
+// addUserToGroups records user membership in Group.UserIDs so policy can expand
+// user groups even before any device registers.
+func addUserToGroups(state *model.NetworkState, userID string, groupIDs []string) {
+	for _, groupID := range groupIDs {
+		for index := range state.Groups {
+			if state.Groups[index].ID != groupID {
+				continue
+			}
+			state.Groups[index].UserIDs = dedupeSorted(append(state.Groups[index].UserIDs, userID))
+			break
+		}
+	}
+}
+
+// removeUserFromGroups drops the user from the groups they left. Peers are only
+// removed from JWT-issued groups: setup-key and API groups are not derived from
+// the user's IdP membership and must survive a group sync.
+func removeUserFromGroups(state *model.NetworkState, userID string, previous, next []string) {
+	keep := make(map[string]struct{}, len(next))
+	for _, groupID := range next {
+		keep[groupID] = struct{}{}
+	}
+	for _, groupID := range previous {
+		if _, still := keep[groupID]; still {
+			continue
+		}
+		for index := range state.Groups {
+			group := &state.Groups[index]
+			if group.ID != groupID {
+				continue
+			}
+			group.UserIDs = removeValue(group.UserIDs, userID)
+			if group.Issued == model.GroupIssuedJWT {
+				for _, peerID := range peersOfUser(*state, userID) {
+					group.PeerIDs = removeValue(group.PeerIDs, peerID)
+					syncPeerGroups(state, peerID)
+				}
+			}
+			break
+		}
+	}
+}
+
+// applyUserGroupsToPeers propagates a user's group set to their devices.
+func applyUserGroupsToPeers(state *model.NetworkState, user model.User) {
+	peerIDs := peersOfUser(*state, user.ID)
+	for _, peerID := range peerIDs {
+		addPeerToGroups(state, peerID, user.AutoGroups)
+	}
+}
+
+// syncPeerGroups re-derives PeerRecord.Groups from group membership so the two
+// representations cannot drift.
+func syncPeerGroups(state *model.NetworkState, peerID string) {
+	groups := []string{}
+	for _, group := range state.Groups {
+		for _, member := range group.PeerIDs {
+			if member == peerID {
+				groups = append(groups, group.ID)
+				break
+			}
+		}
+	}
+	for index := range state.Peers {
+		if state.Peers[index].PeerID == peerID {
+			state.Peers[index].Groups = dedupeSorted(groups)
+			return
+		}
+	}
+}
+
+func peersOfUser(state model.NetworkState, userID string) []string {
+	result := make([]string, 0, 2)
+	for _, peer := range state.Peers {
+		if peer.UserID == userID {
+			result = append(result, peer.PeerID)
+		}
+	}
+	return result
+}
+
+func removePeersOfUser(state *model.NetworkState, userID string) {
+	filtered := state.Peers[:0]
+	for _, peer := range state.Peers {
+		if peer.UserID == userID {
+			continue
+		}
+		filtered = append(filtered, peer)
+	}
+	state.Peers = filtered
+}
+
+func removeUser(users []model.User, id string) []model.User {
+	filtered := users[:0]
+	for _, user := range users {
+		if user.ID == id {
+			continue
+		}
+		filtered = append(filtered, user)
+	}
+	return filtered
+}
+
+func removeValue(values []string, target string) []string {
+	filtered := values[:0]
+	for _, value := range values {
+		if value == target {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	return filtered
 }
 
 func allocateAddress(state model.NetworkState) (string, error) {
