@@ -34,7 +34,7 @@
 - [x] 完整角色模型（owner/admin/network_admin/auditor/usage_viewer/user）× 模块 × 操作矩阵。
 - [x] 登录过期（`LoginExpirationDays`）与客户端自动重新认证。
 - [x] 本地 DNS 解析器：certified zone、peer 名自动注册、MatchDomains 转发、resolv.conf 接管/恢复（重启后从备份恢复真实上游）。
-- [ ] setup key 的 scope/expiry/使用次数与撤销。
+- [x] setup key 的 scope/expiry/使用次数与撤销（token hash 存储、one-off/reusable、Web UI 创建/撤销）。
 - [x] sync 流下发 certified snapshot，client 长轮询并重连（`handleSync` + `SyncLoop`）。
 - [x] incremental update 与 decision log 追平（`Engine.Activity` + `/api/v1/activity`）。
 - [x] 控制面 Web 控制台：NetBird 式多页布局、深链接、浅色主题。
@@ -43,7 +43,8 @@
 
 ## Phase 3：链路探测
 
-- [ ] direct 与 circuit relay 候选发现。
+- [x] direct 与 circuit relay 候选发现（libp2p hole punching + static relay）。
+- [x] B-score 链路评分：加权 RTT/loss/bandwidth/cost，归一化区间由 Web Settings 中的 relay advantage 阈值参数化。
 - [ ] RTT/loss/jitter/bandwidth/stability probe（`/netp2p/link/probe/1.0.0`）。
 - [ ] flow class 约束、路径切换迟滞与热备。
 
