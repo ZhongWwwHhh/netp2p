@@ -68,12 +68,10 @@ func SubmitAdmin(ctx context.Context, node *p2p.Node, managerID peer.ID, adminTo
 	if closer, ok := stream.(interface{ CloseWrite() error }); ok {
 		_ = closer.CloseWrite()
 	}
-	envelope, err := p2p.DecodeEnvelope(stream)
-	if err != nil {
-		return model.SignedSnapshot{}, err
-	}
+	// The manager responds with a bare AdminResponse object (the same framing
+	// used by login and sync), not an Envelope, so decode it directly.
 	var response AdminResponse
-	if err := json.Unmarshal(envelope.Payload, &response); err != nil {
+	if err := json.NewDecoder(stream).Decode(&response); err != nil {
 		return model.SignedSnapshot{}, err
 	}
 	if response.Error != "" {

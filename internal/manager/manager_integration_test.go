@@ -367,3 +367,88 @@ func TestSubmitRejectsInvalidTransition(t *testing.T) {
 		t.Fatalf("error %q, want %q", err.Error(), want)
 	}
 }
+
+// TestAdminSubmitRoundTrip verifies the admin CLI path end to end: a token
+// authenticated transition over AdminProtocol is committed and the certified
+// snapshot comes back to the caller.
+func TestAdminSubmitRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	state := model.NetworkState{
+		NetworkID:    "net-test",
+		OverlayCIDR:  "100.64.0.0/24",
+		NextIPOffset: 1,
+	}
+
+	const count = 4
+	members := make([]model.CommitteeMember, count)
+	for index := range members {
+		seed := int64(index + 301)
+		privateKey := bft.SeededPrivateKey(seed)
+		libp2pKey, _, err := crypto.KeyPairFromStdKey(&privateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peerID, err := peer.IDFromPrivateKey(libp2pKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		members[index] = model.CommitteeMember{ID: string(rune('A' + index)), PeerID: peerID.String(), KeySeed: seed}
+	}
+
+	meshes := make([]*CommitteeMesh, count)
+	nodes := make([]*p2p.Node, count)
+	for index, member := range members {
+		node, err := p2p.New(ctx, p2p.Config{IdentitySeed: member.KeySeed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer node.Close()
+		addresses := node.Addresses()
+		if len(addresses) == 0 {
+			t.Fatal("manager has no addresses")
+		}
+		members[index].Address = addresses[0]
+		engine, err := bft.NewEngine(state, members, member.ID, bft.SeededPrivateKey(member.KeySeed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mesh, err := NewCommitteeMesh(node, engine, members)
+		if err != nil {
+			t.Fatal(err)
+		}
+		RegisterAdminHandler(node, mesh, "test-token")
+		meshes[index] = mesh
+		nodes[index] = node
+	}
+	for index, mesh := range meshes {
+		if err := mesh.Connect(ctx); err != nil {
+			t.Fatalf("mesh %d connect: %v", index, err)
+		}
+	}
+	if _, err := meshes[0].Submit(model.StateTransition{Type: bft.TransitionGenesis}); err != nil {
+		t.Fatalf("genesis: %v", err)
+	}
+
+	adminNode, err := p2p.New(ctx, p2p.Config{Listen: []string{"/ip4/127.0.0.1/udp/0/quic-v1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminNode.Close()
+	if err := adminNode.Host.Connect(ctx, peer.AddrInfo{ID: nodes[0].Host.ID(), Addrs: nodes[0].Host.Addrs()}); err != nil {
+		t.Fatalf("connect admin node: %v", err)
+	}
+
+	group := model.Group{ID: "admin-group"}
+	snapshot, err := SubmitAdmin(ctx, adminNode, nodes[0].Host.ID(), "test-token", model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &group})
+	if err != nil {
+		t.Fatalf("submit admin group: %v", err)
+	}
+	if snapshot.Height != 2 {
+		t.Fatalf("snapshot height %d, want 2", snapshot.Height)
+	}
+	if _, err := SubmitAdmin(ctx, adminNode, nodes[0].Host.ID(), "wrong-token", model.StateTransition{Type: bft.TransitionRemoveGroup, TargetID: "admin-group"}); err == nil {
+		t.Fatal("expected wrong token to be rejected")
+	}
+}
