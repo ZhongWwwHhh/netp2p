@@ -18,27 +18,33 @@ import (
 )
 
 const (
-	CommitteeSize            = 4
-	FaultLimit               = 1
-	QuorumSize               = CommitteeSize - FaultLimit
-	TransitionRegisterPeer   = "register_peer"
-	TransitionGenesis        = "genesis"
-	TransitionUpsertGroup    = "upsert_group"
-	TransitionRemoveGroup    = "remove_group"
-	TransitionUpsertPolicy   = "upsert_policy"
-	TransitionRemovePolicy   = "remove_policy"
-	TransitionUpsertRoute    = "upsert_route"
-	TransitionRemoveRoute    = "remove_route"
-	TransitionUpsertBudget   = "upsert_budget"
-	TransitionRemoveBudget   = "remove_budget"
-	TransitionUpsertSetupKey = "upsert_setup_key"
-	TransitionRemoveSetupKey = "remove_setup_key"
-	TransitionUpdatePeer     = "update_peer"
-	TransitionUpsertNS       = "upsert_nameserver"
-	TransitionRemoveNS       = "remove_nameserver"
-	TransitionUpsertZone     = "upsert_zone"
-	TransitionRemoveZone     = "remove_zone"
-	TransitionUpdateDNS      = "update_dns_settings"
+	CommitteeSize              = 4
+	FaultLimit                 = 1
+	QuorumSize                 = CommitteeSize - FaultLimit
+	TransitionRegisterPeer     = "register_peer"
+	TransitionGenesis          = "genesis"
+	TransitionUpsertGroup      = "upsert_group"
+	TransitionRemoveGroup      = "remove_group"
+	TransitionUpsertPolicy     = "upsert_policy"
+	TransitionRemovePolicy     = "remove_policy"
+	TransitionUpsertRoute      = "upsert_route"
+	TransitionRemoveRoute      = "remove_route"
+	TransitionUpsertBudget     = "upsert_budget"
+	TransitionRemoveBudget     = "remove_budget"
+	TransitionUpsertSetupKey   = "upsert_setup_key"
+	TransitionRemoveSetupKey   = "remove_setup_key"
+	TransitionUpdatePeer       = "update_peer"
+	TransitionUpsertNS         = "upsert_nameserver"
+	TransitionRemoveNS         = "remove_nameserver"
+	TransitionUpsertZone       = "upsert_zone"
+	TransitionRemoveZone       = "remove_zone"
+	TransitionUpdateDNS        = "update_dns_settings"
+	TransitionRegisterUser     = "register_user"
+	TransitionUpdateUserGroups = "update_user_groups"
+	TransitionUpdateUserRole   = "update_user_role"
+	TransitionRemoveUser       = "remove_user"
+	TransitionSetUserBlocked   = "set_user_blocked"
+	TransitionUpdateSettings   = "update_network_settings"
 )
 
 var (

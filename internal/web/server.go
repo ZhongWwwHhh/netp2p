@@ -16,6 +16,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/http"
+	"github.com/netp2p/netp2p/internal/auth"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
@@ -51,6 +52,15 @@ type CommitteeStatus struct {
 
 type Config struct {
 	AdminToken string
+	// Authenticator, when set, resolves an SSO bearer token to an identity.
+	// The static admin token always works as break-glass.
+	Authenticator Authenticator
+}
+
+// Authenticator resolves an SSO ID token to an authenticated identity. It is
+// implemented by the OIDC verifier.
+type Authenticator interface {
+	Authenticate(ctx context.Context, token string) (auth.Identity, error)
 }
 
 type Server struct {
@@ -135,12 +145,18 @@ func (server *Server) HTTPHost() *libp2phttp.Host {
 }
 
 func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Request) {
-	if !authorize(request, server.config.AdminToken) {
+	identity, ok := server.authenticate(request)
+	if !ok {
 		writeError(writer, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	path := strings.TrimSuffix(request.URL.Path, "/")
 	switch {
+	case request.Method == http.MethodGet && path == "/api/v1/session":
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"identity":    identity,
+			"permissions": auth.Permissions(identity.Role),
+		})
 	case request.Method == http.MethodGet && path == "/api/v1/snapshot":
 		server.handleSnapshot(writer, request)
 	case request.Method == http.MethodGet && path == "/api/v1/presence":
@@ -155,6 +171,10 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		var body TransitionRequest
 		if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
 			writeError(writer, http.StatusBadRequest, "invalid request")
+			return
+		}
+		if err := auth.AuthorizeTransition(identity, body.Transition.Type); err != nil {
+			writeError(writer, http.StatusForbidden, err.Error())
 			return
 		}
 		snapshot, err := server.manager.Submit(body.Transition)
@@ -297,12 +317,36 @@ func hasFileExtension(path string) bool {
 	return strings.Contains(base, ".")
 }
 
-func authorize(request *http.Request, adminToken string) bool {
+// authenticate resolves the request's bearer token to an identity. The static
+// admin token is always accepted as break-glass; any other token is delegated
+// to the configured SSO verifier.
+func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) {
+	token, ok := bearerToken(request)
+	if !ok {
+		return auth.Identity{}, false
+	}
+	if adminToken := server.config.AdminToken; adminToken != "" &&
+		subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1 {
+		return auth.BreakGlass(), true
+	}
+	if server.config.Authenticator != nil {
+		identity, err := server.config.Authenticator.Authenticate(request.Context(), token)
+		if err == nil && identity.Role != "" {
+			return identity, true
+		}
+	}
+	return auth.Identity{}, false
+}
+
+func bearerToken(request *http.Request) (string, bool) {
 	header := request.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
-		return false
+		return "", false
 	}
-	token := strings.TrimPrefix(header, prefix)
-	return subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1
+	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	if token == "" {
+		return "", false
+	}
+	return token, true
 }

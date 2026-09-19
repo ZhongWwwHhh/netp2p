@@ -7,6 +7,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/auth"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
@@ -39,6 +40,10 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 		}
 		if adminToken == "" || request.Token != adminToken {
 			respondAdmin(stream, AdminResponse{Error: "forbidden"})
+			return
+		}
+		if err := auth.AuthorizeTransition(auth.BreakGlass(), request.Transition.Type); err != nil {
+			respondAdmin(stream, AdminResponse{Error: err.Error()})
 			return
 		}
 		snapshot, err := mesh.Submit(request.Transition)
