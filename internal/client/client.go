@@ -38,6 +38,7 @@ type Client struct {
 	flows          *conntrack.Table
 	frames         *transport.Transport
 	synthesizeICMP bool
+	routesReady    bool
 	dnsUpdater     DNSUpdater
 	dnsUpstreams   []string
 }
@@ -168,7 +169,7 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	overlayIPs := client.peerOverlayIPsLocked()
 	client.mu.Unlock()
 	client.rememberPeers(snapshot, localPeerID)
-	client.applyRoutes(overlayIPs)
+	client.reconcileRoutesWhenReady(overlayIPs)
 	client.publishDNS()
 }
 
@@ -196,11 +197,27 @@ func (client *Client) peerOverlayIPsLocked() []string {
 
 // ReconcileRoutes pushes the current overlay addresses into the kernel
 // routing table. It is called after the device is configured, because the login
-// snapshot is applied before the interface has an address.
+// snapshot is applied before the interface has an address. Calling it also
+// lifts the gate that suppresses route writes until then.
 func (client *Client) ReconcileRoutes() {
-	client.mu.RLock()
+	client.mu.Lock()
+	client.routesReady = true
 	overlayIPs := client.peerOverlayIPsLocked()
+	client.mu.Unlock()
+	client.applyRoutes(overlayIPs)
+}
+
+// reconcileRoutesWhenReady installs routes for a freshly applied snapshot, but
+// skips the write while the interface is not configured yet. The kernel would
+// reject the route with "Device for nexthop is not up", so the post-configure
+// ReconcileRoutes call is the one that installs the initial table.
+func (client *Client) reconcileRoutesWhenReady(overlayIPs []string) {
+	client.mu.RLock()
+	ready := client.routesReady
 	client.mu.RUnlock()
+	if !ready {
+		return
+	}
 	client.applyRoutes(overlayIPs)
 }
 
