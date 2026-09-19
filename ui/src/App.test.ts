@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { multiaddr } from '@multiformats/multiaddr';
-import { normalizeSnapshot } from './lib/normalize';
+import { bitrateLabel, bytesLabel, percent, relativeTime, shortPeerId } from './lib/format';
+import { normalizePresence, normalizeSnapshot } from './lib/normalize';
 import { httpResource, joinProtocolPath } from './lib/paths';
-import type { Snapshot } from './lib/types';
-import { QUORUM, verifySnapshot } from './lib/verifier';
+import { QuorumSize } from './lib/quorum';
+import { defaultPath, routeTitle, routes } from './lib/router.svelte';
+import type { Presence, Snapshot, StateTransition } from './lib/types';
+import { verifySnapshot } from './lib/verifier';
 
 const emptyState = {
   networkId: 'net',
@@ -14,6 +17,9 @@ const emptyState = {
   routes: [],
   budgets: [],
   setupKeys: [],
+  nameservers: [],
+  zones: [],
+  dnsSettings: { disabled: false, groups: [] },
   nextIpOffset: 1,
 };
 
@@ -37,9 +43,12 @@ function baseSnapshot(): Snapshot {
       height: 1,
       round: 0,
       stateHash: 'hash',
+      transitionHash: 'transition',
       signers: ['manager-1', 'manager-2', 'manager-3'],
       signatures: ['a', 'b', 'c'],
     },
+    transition: { type: 'upsert_group', group: { id: 'g' } },
+    leaderId: 'manager-2',
   };
 }
 
@@ -65,34 +74,83 @@ describe('snapshot normalization', () => {
     const snapshot = baseSnapshot();
     const withNulls = {
       ...snapshot,
-      state: { ...emptyState, peers: null, routes: null, budgets: null },
+      state: { ...emptyState, peers: null, routes: null, budgets: null, nameservers: null, zones: null, dnsSettings: null },
     } as unknown as Snapshot;
     const normalized = normalizeSnapshot(withNulls);
     expect(normalized.state.peers).toEqual([]);
     expect(normalized.state.routes).toEqual([]);
-    expect(normalized.state.budgets).toEqual([]);
-    expect(normalized.state.groups).toEqual([]);
+    expect(normalized.state.nameservers).toEqual([]);
+    expect(normalized.state.zones).toEqual([]);
+    expect(normalized.state.dnsSettings.groups).toEqual([]);
+  });
+
+  it('turns null presence into an empty list', () => {
+    expect(normalizePresence(null)).toEqual([]);
+    expect(normalizePresence([{ peerId: 'p', online: true } as Presence])).toHaveLength(1);
+  });
+});
+
+describe('routing table', () => {
+  it('has a dedicated page for every sidebar entry', () => {
+    for (const route of routes) {
+      expect(route.path.startsWith('/')).toBe(true);
+      expect(route.group.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('falls back to a real page for unknown paths', () => {
+    expect(routes.some((route) => route.path === defaultPath)).toBe(true);
+    expect(routeTitle(defaultPath)).toBe('Peers');
+    expect(routeTitle('/nope')).toBe('Console');
+  });
+});
+
+describe('formatting', () => {
+  it('renders human readable sizes, rates and recency', () => {
+    expect(bytesLabel(0)).toBe('0 B');
+    expect(bytesLabel(2048)).toBe('2.0 KB');
+    expect(bitrateLabel(0)).toBe('unlimited');
+    expect(bitrateLabel(1_500_000)).toBe('1.5 Mbps');
+    expect(percent(50, 100)).toBe(50);
+    expect(percent(1, 0)).toBe(0);
+    expect(relativeTime(undefined)).toBe('never');
+    expect(relativeTime(Date.now())).toBe('just now');
+    expect(shortPeerId('1234567890abcdef', 6)).toBe('123456…');
+  });
+});
+
+describe('transition payload shapes', () => {
+  it('builds the DNS and resource transitions the API expects', () => {
+    const transitions: StateTransition[] = [
+      { type: 'upsert_nameserver', nameserver: { id: 'ns', name: 'ns', groups: [], servers: ['1.1.1.1'], enabled: true } },
+      { type: 'remove_nameserver', targetId: 'ns' },
+      { type: 'upsert_zone', zone: { id: 'z', domain: 'internal', records: [], enabled: true } },
+      { type: 'remove_zone', targetId: 'z' },
+      { type: 'update_dns_settings', dnsSettings: { disabled: true, groups: [] } },
+      { type: 'upsert_route', route: { id: 'r', destination: '10.0.0.0/8', routingGroup: 'g', distributionGroups: [], metric: 1 } },
+      { type: 'upsert_budget', budget: { id: 'b', subjectType: 'group', subjectId: 'g', dailyBytes: 0, monthlyBytes: 0, peakBps: 0, relayCostLimit: 0, onExhausted: 'block', usedDailyBytes: 0, usedMonthlyBytes: 0 } },
+      { type: 'remove_setup_key', targetId: 'k' },
+    ];
+    expect(transitions.map((transition) => transition.type)).toContain('update_dns_settings');
+    expect(JSON.parse(JSON.stringify(transitions[0]))).toHaveProperty('nameserver.id', 'ns');
   });
 });
 
 describe('snapshot verifier', () => {
   it('accepts a well-formed quorum of known signers', () => {
     expect(verifySnapshot(baseSnapshot())).toBe(true);
-    expect(QUORUM).toBe(3);
+    expect(QuorumSize).toBe(3);
   });
 
-  it('rejects quorum below 2f+1', () => {
-    const snapshot = baseSnapshot();
-    snapshot.qc.signers = ['manager-1'];
-    snapshot.qc.signatures = ['a'];
-    expect(verifySnapshot(snapshot)).toBe(false);
-  });
+  it('rejects a sub-quorum or unknown signers', () => {
+    const weak = baseSnapshot();
+    weak.qc.signers = ['manager-1'];
+    weak.qc.signatures = ['a'];
+    expect(verifySnapshot(weak)).toBe(false);
 
-  it('rejects signatures from unknown committee members', () => {
-    const snapshot = baseSnapshot();
-    snapshot.qc.signers = ['manager-1', 'manager-2', 'ghost'];
-    snapshot.qc.signatures = ['a', 'b', 'c'];
-    expect(verifySnapshot(snapshot)).toBe(false);
+    const foreign = baseSnapshot();
+    foreign.qc.signers = ['manager-1', 'manager-2', 'ghost'];
+    expect(verifySnapshot(foreign)).toBe(false);
   });
 
   it('does not throw on malformed input', () => {

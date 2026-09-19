@@ -1,5 +1,5 @@
 import { apiClient } from './libp2p';
-import type { Bootstrap, Snapshot, StateTransition } from './types';
+import type { ActivityEntry, Bootstrap, Presence, Snapshot, StateTransition } from './types';
 
 export { apiClient };
 
@@ -8,5 +8,8 @@ export interface ApiClient {
   setToken(value: string): void;
   stop(): Promise<void>;
   snapshot(): Promise<Snapshot>;
+  snapshotAt(height: number): Promise<Snapshot>;
   transition(transition: StateTransition): Promise<Snapshot>;
+  presence(): Promise<Presence[]>;
+  activity(limit?: number): Promise<ActivityEntry[]>;
 }

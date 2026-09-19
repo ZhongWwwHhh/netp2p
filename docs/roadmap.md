@@ -30,7 +30,10 @@
 - [ ] OIDC PKCE、device flow、setup key 和撤销。
 - [ ] JWT groups 到 managed groups 的映射。
 - [x] sync 流下发 certified snapshot，client 长轮询并重连（`handleSync` + `SyncLoop`）。
-- [ ] incremental update 与 decision log 追平。
+- [x] incremental update 与 decision log 追平（`Engine.Activity` + `/api/v1/activity`）。
+- [x] 控制面 Web 控制台：NetBird 式多页布局、深链接、浅色主题。
+- [x] peer 认证元数据（hostname/OS/version）与观测在线状态（presence gossip）。
+- [x] DNS 控制面对象（nameserver / zone / settings）与 BFT transition。
 
 ## Phase 3：链路探测
 
@@ -44,6 +47,7 @@
 - [x] 单 manager 故障后仍能形成 quorum 并认证新状态。
 - [x] decision log（committed map 查询）、落后/重启 manager catch-up。
 - [x] view change：Submit 轮换 round，leader 宕机后仍能出块。
+- [x] 决策日志认证：transition hash 纳入投票签名，snapshot 携带 transition 与 leader。
 - [ ] threshold signature、committee reconfiguration。
 
 ## Phase 5：多跳与配额

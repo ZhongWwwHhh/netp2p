@@ -1,4 +1,4 @@
-import type { Snapshot } from './types';
+import type { Presence, Snapshot } from './types';
 
 function asArray<T>(value: readonly T[] | null | undefined): T[] {
   return Array.isArray(value) ? [...value] : [];
@@ -21,6 +21,13 @@ export function normalizeSnapshot(snapshot: Snapshot): Snapshot {
       routes: asArray(snapshot.state?.routes),
       budgets: asArray(snapshot.state?.budgets),
       setupKeys: asArray(snapshot.state?.setupKeys),
+      nameservers: asArray(snapshot.state?.nameservers),
+      zones: asArray(snapshot.state?.zones),
+      dnsSettings: { disabled: snapshot.state?.dnsSettings?.disabled ?? false, groups: asArray(snapshot.state?.dnsSettings?.groups) },
     },
   };
+}
+
+export function normalizePresence(observations: readonly Presence[] | null | undefined): Presence[] {
+  return asArray(observations);
 }

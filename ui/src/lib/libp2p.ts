@@ -4,9 +4,9 @@ import { identify } from '@libp2p/identify';
 import { http } from '@libp2p/http';
 import { webRTCDirect } from '@libp2p/webrtc';
 import { multiaddr } from '@multiformats/multiaddr';
-import { normalizeSnapshot } from './normalize';
+import { normalizePresence, normalizeSnapshot } from './normalize';
 import { httpResource, joinProtocolPath, resolveProtocolBasePath } from './paths';
-import type { Bootstrap, Snapshot, StateTransition } from './types';
+import type { ActivityEntry, Bootstrap, Presence, Snapshot, StateTransition } from './types';
 
 export async function createConsoleNode() {
   return createLibp2p({
@@ -51,15 +51,21 @@ export async function apiClient(bootstrap: Bootstrap) {
       }
       return body;
     };
+    const snapshot = (body: unknown) => normalizeSnapshot(body as Snapshot);
     return {
       peerId: node.peerId,
       setToken: (value: string) => { token = value; },
       stop: async () => { await node.stop(); },
-      snapshot: () => request('/api/v1/snapshot').then((body) => normalizeSnapshot(body as Snapshot)),
+      snapshot: () => request('/api/v1/snapshot').then(snapshot),
+      snapshotAt: (height: number) => request(`/api/v1/snapshot?height=${height}`).then(snapshot),
       transition: (transition: StateTransition) => request('/api/v1/transitions', {
         method: 'POST',
         body: JSON.stringify({ transition }),
-      }).then((body) => normalizeSnapshot(body as Snapshot)),
+      }).then(snapshot),
+      presence: () => request('/api/v1/presence').then((body) =>
+        normalizePresence((body as { observations?: Presence[] } | null)?.observations)),
+      activity: (limit = 100) => request(`/api/v1/activity?limit=${limit}`).then((body) =>
+        ((body as { entries?: ActivityEntry[] } | null)?.entries ?? []).map(snapshot)),
     };
   } catch (caught) {
     try {

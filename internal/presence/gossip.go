@@ -3,7 +3,6 @@ package presence
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -88,9 +87,7 @@ func (gossiper *Gossiper) handle(stream network.Stream) {
 	if err := json.Unmarshal(envelope.Payload, &message); err != nil {
 		return
 	}
-	if changed := gossiper.table.Merge(message.Observations); changed > 0 {
-		log.Printf("presence merged %d remote observations", changed)
-	}
+	gossiper.table.Merge(message.Observations)
 }
 
 // connectionNotifiee turns libp2p connection lifecycle events into presence
