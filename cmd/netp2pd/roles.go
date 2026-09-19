@@ -50,6 +50,7 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 	node, err := p2p.New(ctx, p2p.Config{
 		DataDir: dataDir, Listen: []string{listenAddr},
 		WebRTCListen: []string{webrtcListen}, IdentitySeed: local.KeySeed,
+		EnableRelayService: true,
 	})
 	if err != nil {
 		return err

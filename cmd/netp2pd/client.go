@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/netp2p/netp2p/internal/client"
+	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/dns"
 	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
@@ -36,11 +37,24 @@ type clientOptions struct {
 	sso          bool
 	ssoIssuer    string
 	ssoClientID  string
+	seedPath     string
 }
 
 func runClient(ctx context.Context, options clientOptions) error {
 	dataDir := options.dataDir
-	node, err := p2p.New(ctx, p2p.Config{DataDir: filepath.Join(dataDir, "client"), Listen: []string{options.listenAddr}})
+	p2pConfig := p2p.Config{DataDir: filepath.Join(dataDir, "client"), Listen: []string{options.listenAddr}}
+	if options.seedPath != "" {
+		seed, err := config.Load(options.seedPath)
+		if err != nil {
+			return fmt.Errorf("load seed for relays: %w", err)
+		}
+		relays, err := seed.RelayAddrInfos()
+		if err != nil {
+			return err
+		}
+		p2pConfig.StaticRelays = relays
+	}
+	node, err := p2p.New(ctx, p2pConfig)
 	if err != nil {
 		return err
 	}

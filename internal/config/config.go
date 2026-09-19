@@ -18,6 +18,7 @@ type Seed struct {
 	OverlayCIDR  string                  `json:"overlayCidr"`
 	AdminToken   string                  `json:"adminToken,omitempty"`
 	Managers     []model.CommitteeMember `json:"managers"`
+	Relays       []model.CommitteeMember `json:"relays,omitempty"`
 	Groups       []model.Group           `json:"groups"`
 	Policies     []model.Policy          `json:"policies"`
 	Routes       []model.Route           `json:"routes"`
@@ -117,4 +118,22 @@ func (seed Seed) NetworkState() model.NetworkState {
 		Settings:     seed.Settings,
 		NextIPOffset: seed.NextIPOffset,
 	}
+}
+
+// RelayAddrInfos converts seed relay entries into libp2p AddrInfo. Entries
+// without a valid multiaddr are skipped; clients that get no relay candidates
+// simply do not enable AutoRelay.
+func (seed Seed) RelayAddrInfos() ([]peer.AddrInfo, error) {
+	result := make([]peer.AddrInfo, 0, len(seed.Relays))
+	for _, relay := range seed.Relays {
+		if relay.PeerID == "" || relay.Address == "" {
+			continue
+		}
+		addr, err := peer.AddrInfoFromString(relay.Address + "/p2p/" + relay.PeerID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid relay address %q: %w", relay.Address, err)
+		}
+		result = append(result, *addr)
+	}
+	return result, nil
 }

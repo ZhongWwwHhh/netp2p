@@ -38,11 +38,13 @@ var (
 )
 
 type Config struct {
-	DataDir      string   `json:"dataDir"`
-	Listen       []string `json:"listen"`
-	WebRTCListen []string `json:"webrtcListen,omitempty"`
-	Bootstraps   []string `json:"bootstraps"`
-	IdentitySeed int64    `json:"identitySeed,omitempty"`
+	DataDir            string          `json:"dataDir"`
+	Listen             []string        `json:"listen"`
+	WebRTCListen       []string        `json:"webrtcListen,omitempty"`
+	StaticRelays       []peer.AddrInfo `json:"staticRelays,omitempty"`
+	EnableRelayService bool            `json:"enableRelayService,omitempty"`
+	Bootstraps         []string        `json:"bootstraps"`
+	IdentitySeed       int64           `json:"identitySeed,omitempty"`
 }
 
 type Node struct {
@@ -77,7 +79,20 @@ func New(ctx context.Context, config Config) (*Node, error) {
 		}
 		listenAddrs = append(listenAddrs, address)
 	}
-	libp2pHost, err := libp2p.New(libp2p.Identity(privateKey), libp2p.ListenAddrs(listenAddrs...))
+	opts := []libp2p.Option{
+		libp2p.Identity(privateKey),
+		libp2p.ListenAddrs(listenAddrs...),
+		libp2p.EnableHolePunching(),
+		libp2p.EnableAutoNATv2(),
+		libp2p.EnableRelay(),
+	}
+	if len(config.StaticRelays) > 0 {
+		opts = append(opts, libp2p.EnableAutoRelayWithStaticRelays(config.StaticRelays))
+	}
+	if config.EnableRelayService {
+		opts = append(opts, libp2p.EnableRelayService())
+	}
+	libp2pHost, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}

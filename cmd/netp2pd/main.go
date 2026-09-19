@@ -19,6 +19,7 @@ func main() {
 	listen := flag.String("listen", "/ip4/0.0.0.0/udp/0/quic-v1", "libp2p listen multiaddr")
 	webListen := flag.String("web-listen", "0.0.0.0:8080", "manager browser bootstrap HTTP address")
 	configPath := flag.String("config", "", "manager static JSON seed")
+	seedPath := flag.String("seed", "", "path to a seed JSON for client relay/bootstrapping (optional)")
 	managerAddr := flag.String("manager", "", "manager libp2p multiaddr")
 	setupKey := flag.String("setup-key", "", "client setup key")
 	packetListen := flag.String("packet-listen", "127.0.0.1:51820", "client userspace UDP packet endpoint")
@@ -64,6 +65,7 @@ func main() {
 			statusFile: *statusFile, tunName: *tunName, tunMTU: *tunMTU, noTun: *noTun,
 			dnsListen: *dnsListen, dnsManage: *dnsManage, noDNS: *noDNS,
 			sso: *sso, ssoIssuer: *ssoIssuer, ssoClientID: *ssoClientID,
+			seedPath: *seedPath,
 		}); err != nil {
 			log.Fatal(err)
 		}
