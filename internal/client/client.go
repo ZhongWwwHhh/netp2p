@@ -15,11 +15,13 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/bft"
+	"github.com/netp2p/netp2p/internal/conntrack"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
 	"github.com/netp2p/netp2p/internal/policy"
 	netproto "github.com/netp2p/netp2p/internal/protocol"
+	"github.com/netp2p/netp2p/internal/transport"
 	"github.com/netp2p/netp2p/internal/version"
 )
 
@@ -31,6 +33,10 @@ type Client struct {
 	self       model.PeerRecord
 	networkMap policy.NetworkMap
 	mu         sync.RWMutex
+
+	flows          *conntrack.Table
+	frames         *transport.Transport
+	synthesizeICMP bool
 }
 
 func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, error) {
@@ -38,7 +44,14 @@ func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, e
 	if err != nil {
 		return nil, fmt.Errorf("invalid manager address: %w", err)
 	}
-	return &Client{node: node, manager: *info, sink: sink}, nil
+	client := &Client{
+		node: node, manager: *info, sink: sink,
+		flows: conntrack.NewTable(),
+	}
+	if marker, ok := sink.(packet.UserspaceICMP); ok {
+		client.synthesizeICMP = marker.SynthesizeICMP()
+	}
+	return client, nil
 }
 
 func (client *Client) Login(ctx context.Context, networkID, setupKey string) error {

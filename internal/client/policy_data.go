@@ -19,8 +19,19 @@ func (client *Client) peerByPeerID(peerID string) (model.PeerRecord, error) {
 }
 
 func describePacket(ipPacket packet.IPv4Packet) (string, uint16) {
-	if ipPacket.Protocol() == packet.ProtocolICMP {
+	switch ipPacket.Protocol() {
+	case packet.ProtocolICMP:
 		return "icmp", 0
+	case packet.ProtocolTCP:
+		if _, destinationPort, ok := ipPacket.TransportPorts(); ok {
+			return "tcp", destinationPort
+		}
+		return "tcp", 0
+	case packet.ProtocolUDP:
+		if _, destinationPort, ok := ipPacket.TransportPorts(); ok {
+			return "udp", destinationPort
+		}
+		return "udp", 0
 	}
 	return fmt.Sprintf("ip-%d", ipPacket.Protocol()), 0
 }

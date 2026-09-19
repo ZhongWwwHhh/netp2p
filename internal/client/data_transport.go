@@ -2,19 +2,25 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/conntrack"
+	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
+	"github.com/netp2p/netp2p/internal/transport"
 )
 
 const maxOverlayPacket = 65535
 
 func (client *Client) ServePackets(ctx context.Context) error {
-	go client.handleFrameStreams(ctx)
+	frames := transport.New(ctx, client.node.Host, p2p.FrameProtocol, client.handleFrame)
+	defer frames.Close()
+	client.mu.Lock()
+	client.frames = frames
+	client.mu.Unlock()
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -45,82 +51,87 @@ func (client *Client) forwardLocalPacket(ctx context.Context, raw []byte) {
 	if err != nil {
 		return
 	}
+	flow, hasFlow := ipPacket.Flow()
+	// Outbound return traffic: this packet answers something we admitted
+	// inbound, so the reverse policy must not be required to also allow it.
+	if hasFlow && client.flows.ReplyAllowed(conntrack.Key(flow)) {
+		client.sendToPeer(destination, raw)
+		return
+	}
 	protocolName, port := describePacket(ipPacket)
 	allowed, err := client.authorize(destination, protocolName, port)
 	if err != nil || !allowed {
 		return
 	}
-	peerID, err := peer.Decode(destination.PeerID)
+	// Remember the flow so the reply direction is admitted without requiring a
+	// second, mirror-image policy rule.
+	if hasFlow {
+		client.flows.Observe(conntrack.Key(flow))
+	}
+	client.sendToPeer(destination, raw)
+}
+
+func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) {
+	target, err := peer.Decode(destination.PeerID)
 	if err != nil {
 		return
 	}
-	client.sendFrame(ctx, peerID, raw)
+	client.sendFrame(target, raw)
 }
 
-func (client *Client) sendFrame(ctx context.Context, peerID peer.ID, raw []byte) {
-	sendContext, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	_ = client.node.Send(sendContext, peerID, p2p.FrameProtocol, raw)
+func (client *Client) sendFrame(target peer.ID, raw []byte) {
+	client.mu.RLock()
+	frames := client.frames
+	client.mu.RUnlock()
+	if frames == nil {
+		return
+	}
+	_ = frames.Send(target, raw)
 }
 
-func (client *Client) handleFrameStreams(ctx context.Context) {
-	client.node.Handle(p2p.FrameProtocol, func(stream network.Stream) {
-		defer stream.Close()
-		raw, err := decodeFramePayload(stream)
-		if err != nil {
-			return
-		}
-		if len(raw) == 0 || len(raw) > maxOverlayPacket {
-			return
-		}
-		ipPacket := packet.IPv4Packet(raw)
-		if err := ipPacket.Validate(); err != nil {
-			return
-		}
-		remote := stream.Conn().RemotePeer()
-		source, err := client.peerByPeerID(remote.String())
-		if err != nil {
-			return
-		}
-		if source.OverlayIP != ipPacket.Source().String() {
-			return
-		}
-		if ipPacket.Destination().String() != client.selfOverlayIP() {
-			// v0 does not forward on behalf of third parties.
-			return
-		}
-		if isEchoReply(ipPacket) {
-			// An echo reply answers a probe we originated, so it is delivered
-			// to the local endpoint without a second policy check. v0 trusts
-			// replies that already pass the source-peer and source-IP checks
-			// above.
-			_ = client.sink.WritePacket(raw)
-			return
-		}
-		protocolName, port := describePacket(ipPacket)
-		allowed, err := client.authorizeInbound(source, protocolName, port)
-		if err != nil || !allowed {
-			return
-		}
-		if reply, ok := buildEchoReply(ipPacket); ok {
-			// Answer an inbound echo request for our own overlay IP by sending
-			// the reply back to the requester over the frame stream. Writing it
-			// to the local sink would address the wrong endpoint.
-			client.sendFrame(ctx, remote, reply)
-			return
-		}
-		_ = client.sink.WritePacket(raw)
-	})
-}
-
-func decodeFramePayload(stream network.Stream) ([]byte, error) {
-	envelope, err := p2p.DecodeEnvelope(stream)
+// handleFrame is the inbound data path: verify the frame really came from the
+// peer that owns the source address, then admit it either as return traffic for
+// a flow we originated or through the inbound policy.
+func (client *Client) handleFrame(remote peer.ID, raw []byte) {
+	if len(raw) == 0 || len(raw) > maxOverlayPacket {
+		return
+	}
+	ipPacket := packet.IPv4Packet(raw)
+	if err := ipPacket.Validate(); err != nil {
+		return
+	}
+	source, err := client.peerByPeerID(remote.String())
 	if err != nil {
-		return nil, err
+		return
 	}
-	var raw []byte
-	if err := json.Unmarshal(envelope.Payload, &raw); err != nil {
-		return nil, err
+	if source.OverlayIP != ipPacket.Source().String() {
+		return
 	}
-	return raw, nil
+	if ipPacket.Destination().String() != client.selfOverlayIP() {
+		// v0 does not forward on behalf of third parties.
+		return
+	}
+	flow, hasFlow := ipPacket.Flow()
+	if hasFlow && client.flows.ReplyAllowed(conntrack.Key(flow)) {
+		_ = client.sink.WritePacket(raw)
+		return
+	}
+	protocolName, port := describePacket(ipPacket)
+	allowed, err := client.authorizeInbound(source, protocolName, port)
+	if err != nil || !allowed {
+		return
+	}
+	// The response the local stack produces is return traffic for this flow.
+	if hasFlow {
+		client.flows.Observe(conntrack.Key(flow))
+	}
+	if client.synthesizeICMP {
+		if reply, ok := buildEchoReply(ipPacket); ok {
+			// The userspace endpoint has no kernel to answer the echo request,
+			// so build the reply here.
+			client.sendFrame(remote, reply)
+			return
+		}
+	}
+	_ = client.sink.WritePacket(raw)
 }

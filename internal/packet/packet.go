@@ -16,6 +16,13 @@ type PacketSink interface {
 	Close() error
 }
 
+// UserspaceICMP is implemented by sinks with no kernel IP stack behind them.
+// Such sinks must have ICMP echo replies synthesized in userspace, because
+// nothing else will answer them.
+type UserspaceICMP interface {
+	SynthesizeICMP() bool
+}
+
 type UDPPacketSink struct {
 	connection *net.UDPConn
 	mu         sync.Mutex
@@ -82,6 +89,10 @@ func (sink *UDPPacketSink) LocalAddr() net.Addr {
 func (sink *UDPPacketSink) Close() error {
 	return sink.connection.Close()
 }
+
+// SynthesizeICMP reports that this endpoint has no kernel IP stack, so ICMP
+// echo requests must be answered by the client itself.
+func (sink *UDPPacketSink) SynthesizeICMP() bool { return true }
 
 // EncodeFrame wraps an IP packet in the length-prefixed local framing.
 func EncodeFrame(packet []byte) ([]byte, error) {

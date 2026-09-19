@@ -63,8 +63,15 @@ func serviceAllows(services []model.Service, protocol string, port uint16) bool 
 		return true
 	}
 	for _, service := range services {
-		if !strings.EqualFold(service.Protocol, protocol) {
+		// An empty or "all" protocol matches any transport, which is how a
+		// policy expresses "any traffic" without enumerating protocols.
+		if protocolName := strings.TrimSpace(service.Protocol); protocolName != "" &&
+			!strings.EqualFold(protocolName, "all") &&
+			!strings.EqualFold(protocolName, protocol) {
 			continue
+		}
+		if service.StartPort == 0 && service.EndPort == 0 {
+			return true
 		}
 		if port >= service.StartPort && port <= service.EndPort {
 			return true
