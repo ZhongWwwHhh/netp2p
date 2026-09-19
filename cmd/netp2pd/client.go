@@ -117,6 +117,10 @@ func startDNS(options clientOptions, upstreams []string, kernelRouting bool) (*d
 		log.Printf("dns resolver disabled: %v", err)
 		return nil, nil
 	}
+	// Seed the upstreams before login: the manager address is usually a dns4
+	// name, so taking over resolv.conf before the resolver can forward would
+	// deadlock the very first dial.
+	resolver.Update(dns.Config{Upstreams: upstreams})
 	var resolvConf *dns.ResolvConf
 	// Taking over resolv.conf only makes sense when the host network stack
 	// actually flows through the overlay, which is what TUN provides.

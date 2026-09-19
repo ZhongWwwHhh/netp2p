@@ -241,6 +241,37 @@ func TestTakeoverRejectsNonStandardPort(t *testing.T) {
 	}
 }
 
+// A restart of a host whose resolv.conf was already taken over must recover the
+// real upstreams from the backup instead of forwarding to itself.
+func TestRestartAfterTakeoverKeepsRealUpstreams(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resolv.conf")
+	original := "nameserver 127.0.0.11\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Takeover(path, "127.0.0.1:53", []string{"127.0.0.11:53"}); err != nil {
+		t.Fatalf("first takeover: %v", err)
+	}
+	// Simulate a restart before Restore: the live file still points to us.
+	if upstreams := HostUpstreams(path); len(upstreams) != 1 || upstreams[0] != "127.0.0.11:53" {
+		t.Fatalf("upstreams after restart = %v, want the original resolver", upstreams)
+	}
+	second, err := Takeover(path, "127.0.0.1:53", HostUpstreams(path))
+	if err != nil {
+		t.Fatalf("second takeover: %v", err)
+	}
+	if err := second.Restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != original {
+		t.Fatalf("restored = %q, want %q", restored, original)
+	}
+}
+
 // startUpstream runs a stub DNS server answering every A query with address.
 func startUpstream(t *testing.T, answer string) string {
 	t.Helper()

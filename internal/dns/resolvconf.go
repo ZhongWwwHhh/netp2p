@@ -38,13 +38,15 @@ func Takeover(path, listen string, upstreams []string) (*ResolvConf, error) {
 	if port != "53" {
 		return nil, fmt.Errorf("cannot take over %s: the resolver listens on port %s, not 53", path, port)
 	}
-	original, err := os.ReadFile(path)
-	hadFile := err == nil
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
-
 	backup := path + ".netp2p.bak"
+	// If a previous run left a backup behind (for example the container was
+	// restarted before Restore ran), that backup is the real original: the live
+	// file already points at this resolver, and treating it as the original
+	// would make the resolver forward to itself.
+	original, hadFile, err := readOriginal(path, backup)
+	if err != nil {
+		return nil, err
+	}
 	if hadFile {
 		if err := os.WriteFile(backup, original, 0o644); err != nil {
 			return nil, fmt.Errorf("write %s: %w", backup, err)
@@ -62,6 +64,25 @@ func Takeover(path, listen string, upstreams []string) (*ResolvConf, error) {
 		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	return &ResolvConf{path: path, backup: backup, original: original, hadFile: hadFile}, nil
+}
+
+// readOriginal prefers a leftover backup over the live file.
+func readOriginal(path, backup string) ([]byte, bool, error) {
+	data, err := os.ReadFile(backup)
+	if err == nil {
+		return data, true, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, false, fmt.Errorf("read %s: %w", backup, err)
+	}
+	data, err = os.ReadFile(path)
+	if err == nil {
+		return data, true, nil
+	}
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("read %s: %w", path, err)
 }
 
 // Restore puts the original configuration back. It is safe to call twice.
@@ -93,11 +114,18 @@ func (resolv *ResolvConf) BackupPath() string { return resolv.backup }
 // HostUpstreams returns the nameservers the host used before takeover, in
 // resolv.conf order.
 func HostUpstreams(path string) []string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
+	// Prefer the backup so a restart of an already-taken-over host still sees
+	// the real upstreams instead of this resolver itself.
+	for _, candidate := range []string{path + ".netp2p.bak", path} {
+		data, err := os.ReadFile(candidate)
+		if err != nil {
+			continue
+		}
+		if servers := ParseNameservers(string(data)); len(servers) > 0 {
+			return servers
+		}
 	}
-	return ParseNameservers(string(data))
+	return nil
 }
 
 // ParseNameservers extracts nameserver entries from resolv.conf content.

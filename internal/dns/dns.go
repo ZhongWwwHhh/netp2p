@@ -186,19 +186,29 @@ func (resolver *Resolver) lookupOverlay(config Config, name string) (string, boo
 // forwardOrFail relays the query to a certified nameserver, or to the original
 // upstream when none matches.
 func (resolver *Resolver) forwardOrFail(writer dns.ResponseWriter, request *dns.Msg, response *dns.Msg, config Config) {
-	for _, upstream := range resolver.upstreamsFor(config, request) {
+	upstreams := resolver.upstreamsFor(config, request)
+	for _, upstream := range upstreams {
 		reply, _, err := resolver.client.Exchange(request, upstream)
 		if err != nil {
+			logf("dns upstream %s failed: %v", upstream, err)
 			continue
 		}
 		reply.Id = request.Id
 		_ = writer.WriteMsg(reply)
 		return
 	}
+	logf("dns query for %s had no usable upstream (tried %v)", questionName(request), upstreams)
 	// SERVFAIL is the correct answer when nothing upstream could be reached, so
 	// the stub resolver retries rather than caching a negative result.
 	response.Rcode = dns.RcodeServerFailure
 	_ = writer.WriteMsg(response)
+}
+
+func questionName(request *dns.Msg) string {
+	if len(request.Question) == 0 {
+		return "<empty>"
+	}
+	return request.Question[0].Name
 }
 
 // upstreamsFor returns the certified nameservers that apply to the query,
