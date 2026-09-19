@@ -1,0 +1,503 @@
+package bft
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"testing"
+
+	"github.com/netp2p/netp2p/internal/model"
+)
+
+func testCommittee() ([]model.CommitteeMember, []ed25519.PrivateKey) {
+	members := make([]model.CommitteeMember, CommitteeSize)
+	privateKeys := make([]ed25519.PrivateKey, CommitteeSize)
+	for index := range members {
+		seed := int64(index + 1)
+		privateKeys[index] = SeededPrivateKey(seed)
+		members[index] = model.CommitteeMember{
+			ID:        string(rune('A' + index)),
+			KeySeed:   seed,
+			PeerID:    "",
+			Address:   "",
+			PublicKey: append([]byte(nil), SeededPublicKey(seed)...),
+		}
+	}
+	return members, privateKeys
+}
+
+func testState() model.NetworkState {
+	return model.NetworkState{
+		NetworkID:    "net-1",
+		OverlayCIDR:  "100.64.0.0/24",
+		NextIPOffset: 1,
+		Groups:       []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
+		SetupKeys: []model.SetupKey{
+			{Key: "key-a", Groups: []string{"clients-a"}},
+			{Key: "key-b", Groups: []string{"clients-b"}},
+		},
+		Policies: []model.Policy{{
+			ID: "a-to-b", SourceGroups: []string{"clients-a"}, DestinationGroups: []string{"clients-b"},
+			Services: []model.Service{{Protocol: "icmp"}}, Effect: model.EffectAllow, Direction: model.DirectionUnidirectional,
+		}},
+	}
+}
+
+func advance(t *testing.T, privateKeys []ed25519.PrivateKey, engines []*Engine, transition model.StateTransition) model.SignedSnapshot {
+	t.Helper()
+	leaderIndex := int((engines[0].Height() + 1) % CommitteeSize)
+	proposal, leaderVote, err := engines[leaderIndex].Propose(transition, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engines[leaderIndex].ProcessVote(leaderVote); err != nil {
+		t.Fatal(err)
+	}
+	var qc model.QuorumCertificate
+	ready := false
+	for index, engine := range engines {
+		if index == leaderIndex {
+			continue
+		}
+		vote, err := engine.ProcessProposal(proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qc, ready, err = engines[leaderIndex].ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			break
+		}
+	}
+	if !ready {
+		t.Fatal("quorum not reached")
+	}
+	var snapshot model.SignedSnapshot
+	for _, engine := range engines {
+		committed, err := engine.Commit(proposal, qc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Height == 0 {
+			snapshot = committed
+		} else if !bytes.Equal(snapshot.StateHash, committed.StateHash) {
+			t.Fatal("committed state fork")
+		}
+	}
+	return snapshot
+}
+
+func TestCanonicalHashAndQuorumCommit(t *testing.T) {
+	state := testState()
+	first := StateHash(state)
+	second := StateHash(testState())
+	if !bytes.Equal(first, second) {
+		t.Fatal("equivalent states produced different hashes")
+	}
+
+	committee, privateKeys := testCommittee()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range privateKeys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	snapshot := advance(t, privateKeys, engines, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a",
+		Peer: model.PeerRecord{PeerID: "peer-a"},
+	})
+	if snapshot.Height != 1 || len(snapshot.State.Peers) != 1 || snapshot.State.Peers[0].OverlayIP == "" {
+		t.Fatalf("unexpected snapshot: %+v", snapshot)
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRejectTamperedSnapshot(t *testing.T) {
+	committee, privateKeys := testCommittee()
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range privateKeys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	snapshot := advance(t, privateKeys, engines, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+	})
+	snapshot.State.Policies[0].ID = "changed"
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("tampered snapshot accepted")
+	}
+}
+
+// TestQuorumToleratesOneOfflineManager verifies n=4, f=1: three live managers
+// (leader plus two voters) are enough to certify state without the fourth.
+func TestQuorumToleratesOneOfflineManager(t *testing.T) {
+	committee, privateKeys := testCommittee()
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range privateKeys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+
+	online := []int{0, 1, 2}
+	leaderIndex := -1
+	leaderID := engines[0].Leader(1, 0).ID
+	for _, index := range online {
+		if engines[index].LocalID() == leaderID {
+			leaderIndex = index
+		}
+	}
+	if leaderIndex < 0 {
+		t.Fatal("leader must be online")
+	}
+	proposal, leaderVote, err := engines[leaderIndex].Propose(model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engines[leaderIndex].ProcessVote(leaderVote); err != nil {
+		t.Fatal(err)
+	}
+	var qc model.QuorumCertificate
+	ready := false
+	for _, index := range online {
+		if index == leaderIndex {
+			continue
+		}
+		vote, err := engines[index].ProcessProposal(proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qc, ready, err = engines[leaderIndex].ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !ready {
+		t.Fatal("three live managers should reach quorum")
+	}
+	snapshot, err := engines[leaderIndex].Commit(proposal, qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRejectInsufficientQuorum rejects a certificate signed by only two
+// managers, which is below the 2f+1 threshold.
+func TestRejectInsufficientQuorum(t *testing.T) {
+	committee, privateKeys := testCommittee()
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range privateKeys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	snapshot := advance(t, privateKeys, engines, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+	})
+	snapshot.QC.Signers = snapshot.QC.Signers[:2]
+	snapshot.QC.Signatures = snapshot.QC.Signatures[:2]
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("insufficient quorum accepted")
+	}
+}
+
+// TestRejectInvalidVoteSignature ensures a forged or corrupted vote never
+// contributes to a quorum certificate.
+func TestRejectInvalidVoteSignature(t *testing.T) {
+	committee, privateKeys := testCommittee()
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range privateKeys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	leaderIndex := -1
+	leaderID := engines[0].Leader(1, 0).ID
+	for index := range engines {
+		if engines[index].LocalID() == leaderID {
+			leaderIndex = index
+		}
+	}
+	proposal, _, err := engines[leaderIndex].Propose(model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	follower := (leaderIndex + 1) % CommitteeSize
+	vote, err := engines[follower].ProcessProposal(proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vote.Signature = append([]byte(nil), vote.Signature...)
+	vote.Signature[0] ^= 0xff
+	if _, _, err := engines[leaderIndex].ProcessVote(vote); err == nil {
+		t.Fatal("forged vote accepted")
+	}
+}
+
+// TestRegisterPeerAllocatesAddressesAndGroups verifies sequential overlay IP
+// allocation and that a setup key materializes group membership.
+func TestRegisterPeerAllocatesAddressesAndGroups(t *testing.T) {
+	state := testState()
+	state.SetupKeys = append(state.SetupKeys, model.SetupKey{Key: "key-ab", Groups: []string{"clients-a", "clients-b"}})
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRegisterPeer, SetupKey: "key-ab", Peer: model.PeerRecord{PeerID: "peer-2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Peers) != 2 {
+		t.Fatalf("expected 2 peers, got %d", len(state.Peers))
+	}
+	if state.Peers[0].OverlayIP != "100.64.0.1" || state.Peers[1].OverlayIP != "100.64.0.2" {
+		t.Fatalf("unexpected addresses: %q %q", state.Peers[0].OverlayIP, state.Peers[1].OverlayIP)
+	}
+	if len(state.Peers[1].Groups) != 2 {
+		t.Fatalf("expected peer-2 in two groups, got %v", state.Peers[1].Groups)
+	}
+	for _, peerID := range []string{"peer-1", "peer-2"} {
+		members := map[string]bool{}
+		for _, group := range state.Groups {
+			for _, id := range group.PeerIDs {
+				if id == peerID {
+					members[group.ID] = true
+				}
+			}
+		}
+		if peerID == "peer-1" && !members["clients-a"] {
+			t.Fatalf("peer-1 missing from clients-a: %v", members)
+		}
+		if peerID == "peer-2" && (!members["clients-a"] || !members["clients-b"]) {
+			t.Fatalf("peer-2 group expansion wrong: %v", members)
+		}
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRegisterPeer, SetupKey: "missing", Peer: model.PeerRecord{PeerID: "peer-3"}}); err == nil {
+		t.Fatal("unknown setup key accepted")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-1"}}); err == nil {
+		t.Fatal("duplicate peer registration accepted")
+	}
+}
+
+// TestCatchUpCommitsCertifiedSnapshot verifies that a manager which missed a
+// proposal can advance directly from a valid peer snapshot.
+func TestCatchUpCommitsCertifiedSnapshot(t *testing.T) {
+	committee, privateKeys := testCommittee()
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range privateKeys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	// Three engines commit height 1; the fourth misses it entirely.
+	snapshot := advanceSubset(t, privateKeys, engines, []int{0, 1, 2}, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+	})
+	lagging := engines[3]
+	if lagging.Height() != 0 {
+		t.Fatalf("lagging engine should still be at height 0, got %d", lagging.Height())
+	}
+	if err := lagging.CatchUp(snapshot); err != nil {
+		t.Fatalf("catch-up: %v", err)
+	}
+	if lagging.Height() != 1 {
+		t.Fatalf("lagging engine height %d, want 1", lagging.Height())
+	}
+	if len(lagging.CurrentState().Peers) != 1 {
+		t.Fatalf("lagging engine did not adopt the peer: %+v", lagging.CurrentState().Peers)
+	}
+	if err := lagging.CatchUp(snapshot); err == nil {
+		t.Fatal("stale catch-up accepted")
+	}
+	// Tampered snapshot must be rejected.
+	tampered := snapshot
+	tampered.State.Peers[0].OverlayIP = "1.2.3.4"
+	if err := lagging.CatchUp(tampered); err == nil {
+		t.Fatal("tampered snapshot accepted by CatchUp")
+	}
+}
+
+// advanceSubset commits a height using only the listed engine indices, leaving
+// the rest of the committee unaware.
+func advanceSubset(t *testing.T, privateKeys []ed25519.PrivateKey, engines []*Engine, online []int, transition model.StateTransition) model.SignedSnapshot {
+	t.Helper()
+	leaderIndex := -1
+	leaderID := engines[0].Leader(1, 0).ID
+	for _, index := range online {
+		if engines[index].LocalID() == leaderID {
+			leaderIndex = index
+		}
+	}
+	if leaderIndex < 0 {
+		t.Fatal("leader must be online")
+	}
+	proposal, leaderVote, err := engines[leaderIndex].Propose(transition, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engines[leaderIndex].ProcessVote(leaderVote); err != nil {
+		t.Fatal(err)
+	}
+	var qc model.QuorumCertificate
+	ready := false
+	for _, index := range online {
+		if index == leaderIndex {
+			continue
+		}
+		vote, err := engines[index].ProcessProposal(proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qc, ready, err = engines[leaderIndex].ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !ready {
+		t.Fatal("subset quorum not reached")
+	}
+	snapshot, err := engines[leaderIndex].Commit(proposal, qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func TestSnapshotAndLatestSnapshot(t *testing.T) {
+	committee, privateKeys := testCommittee()
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range privateKeys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	if _, ok := engines[0].LatestSnapshot(); ok {
+		t.Fatal("empty engine should have no latest snapshot")
+	}
+	if _, ok := engines[0].Snapshot(1); ok {
+		t.Fatal("empty engine should not have height 1")
+	}
+	advance(t, privateKeys, engines, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+	})
+	latest, ok := engines[0].LatestSnapshot()
+	if !ok || latest.Height != 1 {
+		t.Fatalf("latest snapshot height %d ok=%v, want 1 true", latest.Height, ok)
+	}
+	byHeight, ok := engines[0].Snapshot(1)
+	if !ok || !bytes.Equal(byHeight.StateHash, latest.StateHash) {
+		t.Fatalf("snapshot(1) mismatch: ok=%v hashEq=%v", ok, bytes.Equal(byHeight.StateHash, latest.StateHash))
+	}
+	if _, ok := engines[0].Snapshot(99); ok {
+		t.Fatal("snapshot(99) should not exist")
+	}
+}
+
+// TestAdminTransitions verifies every upsert/remove operation in the
+// ApplyTransition switch.
+func TestAdminTransitions(t *testing.T) {
+	state := testState()
+	// Upsert existing group.
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "clients-a", UserIDs: []string{"alice"}}}); err != nil {
+		t.Fatal(err)
+	}
+	// New group.
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "clients-c"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Remove group.
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveGroup, TargetID: "clients-c"}); err != nil {
+		t.Fatal(err)
+	}
+	// Policy upsert and remove.
+	policy := model.Policy{ID: "block-c", Effect: model.EffectDeny, SourceGroups: []string{"clients-a"}, DestinationGroups: []string{"clients-b"}}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertPolicy, Policy: &policy}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Policies) != 2 {
+		t.Fatalf("expected 2 policies, got %d", len(state.Policies))
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemovePolicy, TargetID: "block-c"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Policies) != 1 {
+		t.Fatalf("expected 1 policy after remove, got %d", len(state.Policies))
+	}
+	// Setup key upsert and remove.
+	record := model.SetupKey{Key: "key-c", Groups: []string{"clients-a"}}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertSetupKey, Record: &record}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.SetupKeys) != 3 {
+		t.Fatalf("expected 3 setup keys, got %d", len(state.SetupKeys))
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveSetupKey, TargetID: "key-c"}); err != nil {
+		t.Fatal(err)
+	}
+	// Route upsert/remove.
+	route := model.Route{ID: "route-x", Destination: "10.0.0.0/8"}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertRoute, Route: &route}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveRoute, TargetID: "route-x"}); err != nil {
+		t.Fatal(err)
+	}
+	// Budget upsert/remove.
+	budget := model.TrafficBudget{ID: "budget-x", DailyBytes: 100}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertBudget, Budget: &budget}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveBudget, TargetID: "budget-x"}); err != nil {
+		t.Fatal(err)
+	}
+	// Missing records.
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveGroup, TargetID: "nope"}); err == nil {
+		t.Fatal("removing missing group should fail")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemovePolicy, TargetID: "nope"}); err == nil {
+		t.Fatal("removing missing policy should fail")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveSetupKey, TargetID: "nope"}); err == nil {
+		t.Fatal("removing missing setup key should fail")
+	}
+	// Nil records.
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertGroup}); err == nil {
+		t.Fatal("upsert group without record should fail")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertPolicy}); err == nil {
+		t.Fatal("upsert policy without record should fail")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertSetupKey}); err == nil {
+		t.Fatal("upsert setup key without record should fail")
+	}
+}
