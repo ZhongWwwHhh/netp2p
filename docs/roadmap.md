@@ -33,7 +33,7 @@
 - [x] JWT groups 到 managed groups 的映射，user 记录进入 certified state，peer 绑定 user。
 - [x] 完整角色模型（owner/admin/network_admin/auditor/usage_viewer/user）× 模块 × 操作矩阵。
 - [x] 登录过期（`LoginExpirationDays`）与客户端自动重新认证。
-- [x] 本地 DNS 解析器：certified zone、peer 名自动注册、MatchDomains 转发、resolv.conf 接管/恢复。
+- [x] 本地 DNS 解析器：certified zone、peer 名自动注册、MatchDomains 转发、resolv.conf 接管/恢复（重启后从备份恢复真实上游）。
 - [ ] setup key 的 scope/expiry/使用次数与撤销。
 - [x] sync 流下发 certified snapshot，client 长轮询并重连（`handleSync` + `SyncLoop`）。
 - [x] incremental update 与 decision log 追平（`Engine.Activity` + `/api/v1/activity`）。

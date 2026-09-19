@@ -43,6 +43,15 @@ scripts/e2e.sh
 sudo -n docker compose --env-file deploy/compose.env -f docker-compose.test.yml --profile tun up -d client-a-tun client-b-tun
 sudo -n docker exec netp2p-client-a-tun-1 ping -c 3 100.64.0.2   # overlay 地址按 deploy/run/*.json 为准
 
+# DNS：容器内 resolv.conf 被接管到 127.0.0.1，外部域名与 overlay 名都要能解析
+sudo -n docker exec netp2p-client-a-tun-1 cat /etc/resolv.conf        # nameserver 127.0.0.1
+sudo -n docker exec netp2p-client-a-tun-1 getent hosts example.com    # 转发到备份里的真实上游
+sudo -n docker exec netp2p-client-a-tun-1 getent hosts manager-1
+sudo -n docker exec netp2p-client-a-tun-1 getent hosts "$(sudo -n docker exec netp2p-client-b-tun-1 hostname).netp2p.internal"
+# 重启后仍要能解析：上游从 /etc/resolv.conf.netp2p.bak 恢复，而不是转给自己
+sudo -n docker restart netp2p-client-a-tun-1 && sleep 15
+sudo -n docker exec netp2p-client-a-tun-1 getent hosts example.com
+
 # SSO：mock IdP + device flow 客户端
 sudo -n docker compose --env-file deploy/compose.env -f docker-compose.test.yml --profile sso up -d mock-idp client-sso
 sudo -n docker logs netp2p-client-sso-1        # 会打印 verification URI 与 user code（mock 自动批准）
