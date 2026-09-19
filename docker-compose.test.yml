@@ -78,7 +78,7 @@ services:
       "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
       "--setup-key", "setup-key-a", "--tun", "netp2p0",
       "--status-file", "/status/client-a-tun.json"]
-    volumes: ["./deploy/run:/status"]
+    volumes: ["./deploy/run:/status", "client-a-tun-data:/data"]
   client-b-tun:
     image: netp2p-test:latest
     profiles: ["tun"]
@@ -89,4 +89,8 @@ services:
       "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
       "--setup-key", "setup-key-b", "--tun", "netp2p0",
       "--status-file", "/status/client-b-tun.json"]
-    volumes: ["./deploy/run:/status"]
+    volumes: ["./deploy/run:/status", "client-b-tun-data:/data"]
+
+volumes:
+  client-a-tun-data:
+  client-b-tun-data:

@@ -41,14 +41,17 @@ func (client *Client) ServePackets(ctx context.Context) error {
 // policy for the outbound direction and forwards it to the owning overlay peer.
 func (client *Client) forwardLocalPacket(ctx context.Context, raw []byte) {
 	if len(raw) == 0 || len(raw) > maxOverlayPacket {
+		debugDrop("forward: size %d", len(raw))
 		return
 	}
 	ipPacket := packet.IPv4Packet(raw)
 	if err := ipPacket.Validate(); err != nil {
+		debugDrop("forward: invalid %v", err)
 		return
 	}
 	destination, err := client.peerByIP(ipPacket.Destination())
 	if err != nil {
+		debugDrop("forward: %v", err)
 		return
 	}
 	flow, hasFlow := ipPacket.Flow()
@@ -61,6 +64,7 @@ func (client *Client) forwardLocalPacket(ctx context.Context, raw []byte) {
 	protocolName, port := describePacket(ipPacket)
 	allowed, err := client.authorize(destination, protocolName, port)
 	if err != nil || !allowed {
+		debugDrop("forward: denied %s/%d to %s (err=%v)", protocolName, port, destination.OverlayIP, err)
 		return
 	}
 	// Remember the flow so the reply direction is admitted without requiring a
@@ -94,21 +98,26 @@ func (client *Client) sendFrame(target peer.ID, raw []byte) {
 // a flow we originated or through the inbound policy.
 func (client *Client) handleFrame(remote peer.ID, raw []byte) {
 	if len(raw) == 0 || len(raw) > maxOverlayPacket {
+		debugDrop("inbound: size %d", len(raw))
 		return
 	}
 	ipPacket := packet.IPv4Packet(raw)
 	if err := ipPacket.Validate(); err != nil {
+		debugDrop("inbound: invalid %v", err)
 		return
 	}
 	source, err := client.peerByPeerID(remote.String())
 	if err != nil {
+		debugDrop("inbound: %v", err)
 		return
 	}
 	if source.OverlayIP != ipPacket.Source().String() {
+		debugDrop("inbound: source %s does not own %s", source.OverlayIP, ipPacket.Source())
 		return
 	}
 	if ipPacket.Destination().String() != client.selfOverlayIP() {
 		// v0 does not forward on behalf of third parties.
+		debugDrop("inbound: not for us (%s)", ipPacket.Destination())
 		return
 	}
 	flow, hasFlow := ipPacket.Flow()
@@ -119,6 +128,7 @@ func (client *Client) handleFrame(remote peer.ID, raw []byte) {
 	protocolName, port := describePacket(ipPacket)
 	allowed, err := client.authorizeInbound(source, protocolName, port)
 	if err != nil || !allowed {
+		debugDrop("inbound: denied %s/%d from %s (err=%v)", protocolName, port, source.OverlayIP, err)
 		return
 	}
 	// The response the local stack produces is return traffic for this flow.

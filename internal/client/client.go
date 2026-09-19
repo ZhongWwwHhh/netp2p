@@ -143,36 +143,42 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	}
 	client.networkMap = networkMap
 	localPeerID := client.node.Host.ID()
-	allowedOverlayIPs := client.allowedOverlayIPsLocked()
+	overlayIPs := client.peerOverlayIPsLocked()
 	client.mu.Unlock()
 	client.rememberPeers(snapshot, localPeerID)
-	client.applyRoutes(allowedOverlayIPs)
+	client.applyRoutes(overlayIPs)
 }
 
-// allowedOverlayIPsLocked lists the overlay addresses policy currently allows
-// this peer to reach. The caller must hold the client lock.
-func (client *Client) allowedOverlayIPsLocked() []string {
-	result := make([]string, 0, len(client.networkMap.AllowedPeers))
-	for peerID := range client.networkMap.AllowedPeers {
-		for _, record := range client.snapshot.State.Peers {
-			if record.PeerID == peerID && record.OverlayIP != "" {
-				result = append(result, record.OverlayIP)
-				break
-			}
+// peerOverlayIPsLocked lists every other peer's overlay address.
+//
+// Routes intentionally cover all peers rather than only policy-allowed ones.
+// The kernel needs a route to emit reply traffic, and a reply for a flow we
+// admitted inbound is legitimate even when the mirror-image policy denies it.
+// Access control stays in this process: every packet, in both directions, is
+// checked against the certified policy before it is forwarded. The route only
+// decides which destinations the kernel hands to the overlay instead of the
+// default gateway. The caller must hold the client lock.
+func (client *Client) peerOverlayIPsLocked() []string {
+	self := client.self.PeerID
+	result := make([]string, 0, len(client.snapshot.State.Peers))
+	for _, record := range client.snapshot.State.Peers {
+		if record.PeerID == self || record.OverlayIP == "" {
+			continue
 		}
+		result = append(result, record.OverlayIP)
 	}
 	sort.Strings(result)
 	return result
 }
 
-// ReconcileRoutes pushes the current allowed overlay addresses into the kernel
+// ReconcileRoutes pushes the current overlay addresses into the kernel
 // routing table. It is called after the device is configured, because the login
 // snapshot is applied before the interface has an address.
 func (client *Client) ReconcileRoutes() {
 	client.mu.RLock()
-	allowed := client.allowedOverlayIPsLocked()
+	overlayIPs := client.peerOverlayIPsLocked()
 	client.mu.RUnlock()
-	client.applyRoutes(allowed)
+	client.applyRoutes(overlayIPs)
 }
 
 func (client *Client) applyRoutes(overlayIPs []string) {
