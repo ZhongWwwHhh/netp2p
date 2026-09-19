@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/netp2p/netp2p/internal/client"
+	"github.com/netp2p/netp2p/internal/dns"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
 	"github.com/netp2p/netp2p/internal/tun"
@@ -26,6 +27,9 @@ type clientOptions struct {
 	tunName      string
 	tunMTU       int
 	noTun        bool
+	dnsListen    string
+	dnsManage    bool
+	noDNS        bool
 }
 
 func runClient(ctx context.Context, options clientOptions) error {
@@ -35,14 +39,26 @@ func runClient(ctx context.Context, options clientOptions) error {
 		return err
 	}
 	defer node.Close()
+
+	// Capture the host resolver configuration before taking it over, so the
+	// resolver can still forward queries the overlay does not own.
+	upstreams := dns.HostUpstreams(dns.DefaultResolvConf)
 	sink, tunDevice, err := openClientSink(options)
 	if err != nil {
 		return err
 	}
 	defer sink.Close()
+	resolver, restoreDNS := startDNS(options, upstreams, tunDevice != nil)
+	if restoreDNS != nil {
+		defer restoreDNS()
+	}
 	netClient, err := client.New(node, options.managerAddr, sink)
 	if err != nil {
 		return err
+	}
+	if resolver != nil {
+		netClient.SetDNSResolver(resolver)
+		netClient.SetDNSUpstreams(upstreams)
 	}
 	if err := loginWithRetry(ctx, netClient, options.networkID, options.setupKey); err != nil {
 		return err
@@ -82,6 +98,41 @@ func runClient(ctx context.Context, options clientOptions) error {
 	}
 	<-ctx.Done()
 	return nil
+}
+
+// startDNS brings up the local resolver and optionally points the host at it.
+// Failures are warnings: the overlay keeps working without DNS takeover.
+func startDNS(options clientOptions, upstreams []string, kernelRouting bool) (*dns.Resolver, func()) {
+	if options.noDNS {
+		return nil, nil
+	}
+	resolver := dns.NewResolver(options.dnsListen)
+	if err := resolver.ListenAndServe(); err != nil {
+		log.Printf("dns resolver disabled: %v", err)
+		return nil, nil
+	}
+	var resolvConf *dns.ResolvConf
+	// Taking over resolv.conf only makes sense when the host network stack
+	// actually flows through the overlay, which is what TUN provides.
+	if options.dnsManage && kernelRouting {
+		takeover, err := dns.Takeover(dns.DefaultResolvConf, resolver.ListenAddr(), upstreams)
+		if err != nil {
+			log.Printf("dns resolv.conf takeover skipped: %v", err)
+		} else {
+			resolvConf = takeover
+			log.Printf("dns resolver on %s; original resolv.conf saved to %s", resolver.ListenAddr(), takeover.BackupPath())
+		}
+	}
+	return resolver, func() {
+		if resolvConf != nil {
+			if err := resolvConf.Restore(); err != nil {
+				log.Printf("restore resolv.conf: %v", err)
+			}
+		}
+		if err := resolver.Shutdown(); err != nil {
+			log.Printf("stop dns resolver: %v", err)
+		}
+	}
 }
 
 func clientMode(tunDevice *tun.Device) string {

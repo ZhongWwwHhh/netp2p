@@ -19,6 +19,41 @@ type PeerRecord struct {
 	Hostname      string   `json:"hostname,omitempty"`
 	OS            string   `json:"os,omitempty"`
 	ClientVersion string   `json:"clientVersion,omitempty"`
+	UserID        string   `json:"userId,omitempty"`
+	// DNSLabel is the peer's unique name inside the overlay DNS domain,
+	// assigned once at registration.
+	DNSLabel string `json:"dnsLabel,omitempty"`
+	// LastLogin is when the peer last authenticated. SSO-registered peers can
+	// be required to re-authenticate periodically.
+	LastLogin string `json:"lastLogin,omitempty"`
+}
+
+// NetworkSettings carries network-wide toggles that are part of certified
+// state rather than policy.
+type NetworkSettings struct {
+	// DNSDomain is the search domain and suffix for peer names.
+	DNSDomain string `json:"dnsDomain,omitempty"`
+	// LoginExpirationDays forces SSO-registered peers to re-authenticate after
+	// this many days. Zero disables expiration.
+	LoginExpirationDays int `json:"loginExpirationDays,omitempty"`
+	// JWTGroupsEnabled turns IdP group claims into managed groups.
+	JWTGroupsEnabled bool `json:"jwtGroupsEnabled,omitempty"`
+	// JWTGroupsClaimName is the claim holding group names.
+	JWTGroupsClaimName string `json:"jwtGroupsClaimName,omitempty"`
+	// JWTAllowGroups, when non-empty, restricts access to these IdP groups.
+	JWTAllowGroups []string `json:"jwtAllowGroups,omitempty"`
+}
+
+// User is an authenticated human identity, mirrored from the IdP.
+type User struct {
+	ID         string   `json:"id"`
+	Email      string   `json:"email,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	Role       string   `json:"role"`
+	AutoGroups []string `json:"autoGroups,omitempty"`
+	Blocked    bool     `json:"blocked,omitempty"`
+	Issued     string   `json:"issued,omitempty"`
+	LastLogin  string   `json:"lastLogin,omitempty"`
 }
 
 type SetupKey struct {
@@ -64,19 +99,21 @@ type DNSSettings struct {
 }
 
 type StateTransition struct {
-	Type        string         `json:"type"`
-	Peer        PeerRecord     `json:"peer,omitempty"`
-	SetupKey    string         `json:"setupKey,omitempty"`
-	RequestID   string         `json:"requestId,omitempty"`
-	Group       *Group         `json:"group,omitempty"`
-	Policy      *Policy        `json:"policy,omitempty"`
-	Route       *Route         `json:"route,omitempty"`
-	Budget      *TrafficBudget `json:"budget,omitempty"`
-	Record      *SetupKey      `json:"setupKeyRecord,omitempty"`
-	Nameserver  *Nameserver    `json:"nameserver,omitempty"`
-	Zone        *DNSZone       `json:"zone,omitempty"`
-	DNSSettings *DNSSettings   `json:"dnsSettings,omitempty"`
-	TargetID    string         `json:"targetId,omitempty"`
+	Type        string           `json:"type"`
+	Peer        PeerRecord       `json:"peer,omitempty"`
+	SetupKey    string           `json:"setupKey,omitempty"`
+	RequestID   string           `json:"requestId,omitempty"`
+	Group       *Group           `json:"group,omitempty"`
+	Policy      *Policy          `json:"policy,omitempty"`
+	Route       *Route           `json:"route,omitempty"`
+	Budget      *TrafficBudget   `json:"budget,omitempty"`
+	Record      *SetupKey        `json:"setupKeyRecord,omitempty"`
+	Nameserver  *Nameserver      `json:"nameserver,omitempty"`
+	Zone        *DNSZone         `json:"zone,omitempty"`
+	DNSSettings *DNSSettings     `json:"dnsSettings,omitempty"`
+	User        *User            `json:"user,omitempty"`
+	Settings    *NetworkSettings `json:"settings,omitempty"`
+	TargetID    string           `json:"targetId,omitempty"`
 }
 
 type QuorumCertificate struct {
@@ -103,6 +140,7 @@ type NetworkState struct {
 	NetworkID    string          `json:"networkId"`
 	OverlayCIDR  string          `json:"overlayCidr"`
 	Peers        []PeerRecord    `json:"peers"`
+	Users        []User          `json:"users"`
 	Groups       []Group         `json:"groups"`
 	Policies     []Policy        `json:"policies"`
 	Routes       []Route         `json:"routes"`
@@ -111,6 +149,7 @@ type NetworkState struct {
 	Nameservers  []Nameserver    `json:"nameservers"`
 	Zones        []DNSZone       `json:"zones"`
 	DNSSettings  DNSSettings     `json:"dnsSettings"`
+	Settings     NetworkSettings `json:"settings"`
 	NextIPOffset uint32          `json:"nextIpOffset"`
 }
 
@@ -130,11 +169,30 @@ const (
 
 type Group struct {
 	ID       string   `json:"id"`
+	Name     string   `json:"name,omitempty"`
 	UserIDs  []string `json:"userIds,omitempty"`
 	PeerIDs  []string `json:"peerIds,omitempty"`
 	Managed  bool     `json:"managed,omitempty"`
 	SSOClaim string   `json:"ssoClaim,omitempty"`
+	// Issued records how the group came to exist: "api" for administrator
+	// created groups, "jwt" for groups mirrored from an IdP claim.
+	Issued string `json:"issued,omitempty"`
 }
+
+const (
+	GroupIssuedAPI = "api"
+	GroupIssuedJWT = "jwt"
+)
+
+// User roles, mirroring NetBird's role model.
+const (
+	RoleOwner        = "owner"
+	RoleAdmin        = "admin"
+	RoleNetworkAdmin = "network_admin"
+	RoleAuditor      = "auditor"
+	RoleUsageViewer  = "usage_viewer"
+	RoleUser         = "user"
+)
 
 type Service struct {
 	Protocol  string `json:"protocol"`

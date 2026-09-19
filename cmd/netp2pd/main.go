@@ -25,6 +25,9 @@ func main() {
 	tunName := flag.String("tun", "netp2p0", "client TUN interface name (Linux)")
 	tunMTU := flag.Int("tun-mtu", 1280, "client TUN interface MTU")
 	noTun := flag.Bool("no-tun", false, "force the userspace UDP packet endpoint instead of TUN")
+	dnsListen := flag.String("dns-listen", "127.0.0.1:53", "client local DNS resolver address")
+	dnsManage := flag.Bool("dns-manage-resolv-conf", true, "point /etc/resolv.conf at the overlay resolver (TUN mode only)")
+	noDNS := flag.Bool("no-dns", false, "do not start the local DNS resolver")
 	statusFile := flag.String("status-file", "", "write client status JSON to this path after login")
 	networkID := flag.String("network", "netp2p-test", "network id")
 	adminToken := flag.String("admin-token", "", "admin auth token from seed")
@@ -53,6 +56,7 @@ func main() {
 			dataDir: *dataDir, listenAddr: *listen, managerAddr: *managerAddr,
 			networkID: *networkID, setupKey: *setupKey, packetListen: *packetListen,
 			statusFile: *statusFile, tunName: *tunName, tunMTU: *tunMTU, noTun: *noTun,
+			dnsListen: *dnsListen, dnsManage: *dnsManage, noDNS: *noDNS,
 		}); err != nil {
 			log.Fatal(err)
 		}

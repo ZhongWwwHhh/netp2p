@@ -38,6 +38,8 @@ type Client struct {
 	flows          *conntrack.Table
 	frames         *transport.Transport
 	synthesizeICMP bool
+	dnsUpdater     DNSUpdater
+	dnsUpstreams   []string
 }
 
 func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, error) {
@@ -147,6 +149,7 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	client.mu.Unlock()
 	client.rememberPeers(snapshot, localPeerID)
 	client.applyRoutes(overlayIPs)
+	client.publishDNS()
 }
 
 // peerOverlayIPsLocked lists every other peer's overlay address.

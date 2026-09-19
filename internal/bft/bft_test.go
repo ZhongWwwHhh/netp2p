@@ -681,3 +681,61 @@ validated:
 		t.Fatal("a snapshot with the wrong leader must not validate")
 	}
 }
+
+func TestAllocateDNSLabelIsUniqueAndDeterministic(t *testing.T) {
+	state := model.NetworkState{
+		Peers: []model.PeerRecord{
+			{PeerID: "a", DNSLabel: "web"},
+			{PeerID: "b", DNSLabel: "web-2"},
+		},
+	}
+	if got := allocateDNSLabel(state, "web"); got != "web-3" {
+		t.Fatalf("label = %q, want web-3", got)
+	}
+	if got := allocateDNSLabel(state, "WEB-01.corp.example"); got != "web-01" {
+		t.Fatalf("label = %q, want web-01", got)
+	}
+	// Same input, same output: consensus depends on determinism.
+	first := allocateDNSLabel(state, "db_primary")
+	if second := allocateDNSLabel(state, "db_primary"); first != second {
+		t.Fatalf("non-deterministic: %q vs %q", first, second)
+	}
+	if first != "db-primary" {
+		t.Fatalf("label = %q, want db-primary", first)
+	}
+	if got := allocateDNSLabel(state, "..."); got != "" {
+		t.Fatalf("label = %q, want empty for an unusable hostname", got)
+	}
+}
+
+func TestRegisterPeerAssignsDNSLabel(t *testing.T) {
+	state := model.NetworkState{
+		NetworkID:   "net-1",
+		OverlayCIDR: "100.64.0.0/24",
+		Groups:      []model.Group{{ID: "clients"}},
+		SetupKeys:   []model.SetupKey{{Key: "key", Groups: []string{"clients"}}},
+	}
+	transition := model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key",
+		Peer: model.PeerRecord{PeerID: "peer-a", Hostname: "Web-01.corp.example"},
+	}
+	if err := ApplyTransition(&state, transition); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if len(state.Peers) != 1 {
+		t.Fatalf("peers = %d, want 1", len(state.Peers))
+	}
+	if state.Peers[0].DNSLabel != "web-01" {
+		t.Fatalf("dns label = %q, want web-01", state.Peers[0].DNSLabel)
+	}
+}
+
+func TestNormalizeStateEmitsUsersArray(t *testing.T) {
+	encoded, err := json.Marshal(NormalizeState(model.NetworkState{NetworkID: "net-1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"users":[]`) {
+		t.Fatalf("state json %s missing empty users array", encoded)
+	}
+}

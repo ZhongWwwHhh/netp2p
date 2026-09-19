@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/netp2p/netp2p/internal/model"
@@ -142,6 +143,7 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	// Start from non-nil empty slices so an empty collection marshals as [] and
 	// not null. Clients (including the browser console) decode these as arrays.
 	normalized.Peers = append([]model.PeerRecord{}, state.Peers...)
+	normalized.Users = append([]model.User{}, state.Users...)
 	normalized.Groups = append([]model.Group{}, state.Groups...)
 	normalized.Policies = append([]model.Policy{}, state.Policies...)
 	normalized.Routes = append([]model.Route{}, state.Routes...)
@@ -150,6 +152,7 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	normalized.Nameservers = append([]model.Nameserver{}, state.Nameservers...)
 	normalized.Zones = append([]model.DNSZone{}, state.Zones...)
 	sort.Slice(normalized.Peers, func(i, j int) bool { return normalized.Peers[i].PeerID < normalized.Peers[j].PeerID })
+	sort.Slice(normalized.Users, func(i, j int) bool { return normalized.Users[i].ID < normalized.Users[j].ID })
 	sort.Slice(normalized.Groups, func(i, j int) bool { return normalized.Groups[i].ID < normalized.Groups[j].ID })
 	sort.Slice(normalized.Policies, func(i, j int) bool { return normalized.Policies[i].ID < normalized.Policies[j].ID })
 	sort.Slice(normalized.Routes, func(i, j int) bool { return normalized.Routes[i].ID < normalized.Routes[j].ID })
@@ -161,6 +164,10 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 		sort.Strings(normalized.Groups[index].UserIDs)
 		sort.Strings(normalized.Groups[index].PeerIDs)
 	}
+	for index := range normalized.Users {
+		sort.Strings(normalized.Users[index].AutoGroups)
+	}
+	sort.Strings(normalized.Settings.JWTAllowGroups)
 	for index := range normalized.Nameservers {
 		sort.Strings(normalized.Nameservers[index].Groups)
 		sort.Strings(normalized.Nameservers[index].MatchDomains)
@@ -563,6 +570,7 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		peer := transition.Peer
 		peer.OverlayIP = address
 		peer.Groups = append([]string(nil), setupKey.Groups...)
+		peer.DNSLabel = allocateDNSLabel(*state, peer.Hostname)
 		state.Peers = append(state.Peers, peer)
 		state.NextIPOffset++
 		for _, groupID := range setupKey.Groups {
@@ -819,6 +827,53 @@ func allocateAddress(state model.NetworkState) (string, error) {
 		return netip.AddrFrom4([4]byte{byte(value >> 24), byte(value >> 16), byte(value >> 8), byte(value)}).String(), nil
 	}
 	return "", fmt.Errorf("only IPv4 overlay prefixes are supported")
+}
+
+// allocateDNSLabel derives a unique DNS label for a peer from its hostname,
+// falling back to a peer-id prefix when the hostname carries nothing usable.
+// Determinism matters: every committee member must derive the same label.
+func allocateDNSLabel(state model.NetworkState, hostname string) string {
+	label := sanitizeDNSLabel(hostname)
+	if label == "" {
+		return ""
+	}
+	used := make(map[string]struct{}, len(state.Peers))
+	for _, peer := range state.Peers {
+		if peer.DNSLabel != "" {
+			used[peer.DNSLabel] = struct{}{}
+		}
+	}
+	if _, taken := used[label]; !taken {
+		return label
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("%s-%d", label, suffix)
+		if _, taken := used[candidate]; !taken {
+			return candidate
+		}
+	}
+}
+
+// sanitizeDNSLabel keeps only characters valid in a DNS label.
+func sanitizeDNSLabel(hostname string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(hostname))
+	if index := strings.Index(trimmed, "."); index >= 0 {
+		trimmed = trimmed[:index]
+	}
+	var builder strings.Builder
+	for _, char := range trimmed {
+		switch {
+		case char >= 'a' && char <= 'z', char >= '0' && char <= '9', char == '-':
+			builder.WriteRune(char)
+		case char == '_' || char == ' ':
+			builder.WriteRune('-')
+		}
+	}
+	label := strings.Trim(builder.String(), "-")
+	if len(label) > 63 {
+		label = label[:63]
+	}
+	return label
 }
 
 func ValidateSnapshot(snapshot model.SignedSnapshot) error {
