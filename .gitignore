@@ -2,3 +2,6 @@
 deploy/run/
 deploy/compose.env
 deploy/state.json
+ui/node_modules/
+ui/dist/
+bin/

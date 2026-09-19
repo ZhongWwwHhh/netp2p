@@ -131,12 +131,14 @@ func NewEngine(seedState model.NetworkState, committee []model.CommitteeMember, 
 
 func NormalizeState(state model.NetworkState) model.NetworkState {
 	normalized := state
-	normalized.Peers = append([]model.PeerRecord(nil), state.Peers...)
-	normalized.Groups = append([]model.Group(nil), state.Groups...)
-	normalized.Policies = append([]model.Policy(nil), state.Policies...)
-	normalized.Routes = append([]model.Route(nil), state.Routes...)
-	normalized.Budgets = append([]model.TrafficBudget(nil), state.Budgets...)
-	normalized.SetupKeys = append([]model.SetupKey(nil), state.SetupKeys...)
+	// Start from non-nil empty slices so an empty collection marshals as [] and
+	// not null. Clients (including the browser console) decode these as arrays.
+	normalized.Peers = append([]model.PeerRecord{}, state.Peers...)
+	normalized.Groups = append([]model.Group{}, state.Groups...)
+	normalized.Policies = append([]model.Policy{}, state.Policies...)
+	normalized.Routes = append([]model.Route{}, state.Routes...)
+	normalized.Budgets = append([]model.TrafficBudget{}, state.Budgets...)
+	normalized.SetupKeys = append([]model.SetupKey{}, state.SetupKeys...)
 	sort.Slice(normalized.Peers, func(i, j int) bool { return normalized.Peers[i].PeerID < normalized.Peers[j].PeerID })
 	sort.Slice(normalized.Groups, func(i, j int) bool { return normalized.Groups[i].ID < normalized.Groups[j].ID })
 	sort.Slice(normalized.Policies, func(i, j int) bool { return normalized.Policies[i].ID < normalized.Policies[j].ID })
@@ -193,6 +195,13 @@ func (engine *Engine) Proposal(height uint64) (Proposal, bool) {
 	return cloneProposal(proposal), ok
 }
 
+// CommitteeMembers returns the committee's signing identities in canonical order.
+func (engine *Engine) CommitteeMembers() []model.CommitteeMember {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return append([]model.CommitteeMember(nil), engine.committee...)
+}
+
 // Snapshot returns a committed snapshot by height for decision-log queries.
 func (engine *Engine) Snapshot(height uint64) (model.SignedSnapshot, bool) {
 	engine.mu.RLock()
@@ -208,8 +217,9 @@ func (engine *Engine) LatestSnapshot() (model.SignedSnapshot, bool) {
 	if len(engine.committed) == 0 {
 		return model.SignedSnapshot{}, false
 	}
-	snapshot, ok := engine.committed[engine.height]
-	return snapshot, ok
+	snapshot := engine.committed[engine.height]
+	snapshot.Committee = append([]model.CommitteeMember(nil), engine.committee...)
+	return snapshot, true
 }
 
 // CatchUp commits a certified snapshot received from a peer without needing a
@@ -243,14 +253,8 @@ func (engine *Engine) CatchUp(snapshot model.SignedSnapshot) error {
 }
 
 func cloneState(state model.NetworkState) model.NetworkState {
-	normalized := NormalizeState(state)
-	normalized.Peers = append([]model.PeerRecord(nil), normalized.Peers...)
-	normalized.Groups = append([]model.Group(nil), normalized.Groups...)
-	normalized.Policies = append([]model.Policy(nil), normalized.Policies...)
-	normalized.Routes = append([]model.Route(nil), normalized.Routes...)
-	normalized.Budgets = append([]model.TrafficBudget(nil), normalized.Budgets...)
-	normalized.SetupKeys = append([]model.SetupKey(nil), normalized.SetupKeys...)
-	return normalized
+	// NormalizeState already returns fresh (non-nil) copies of every collection.
+	return NormalizeState(state)
 }
 
 func cloneProposal(proposal Proposal) Proposal {

@@ -13,9 +13,10 @@ func defaultSeed() config.Seed {
 	managers := make([]model.CommitteeMember, 4)
 	for index := range managers {
 		managers[index] = model.CommitteeMember{
-			ID:      fmt.Sprintf("manager-%d", index+1),
-			Address: fmt.Sprintf("/dns4/manager-%d/udp/4001/quic-v1", index+1),
-			KeySeed: int64(index + 101),
+			ID:         fmt.Sprintf("manager-%d", index+1),
+			Address:    fmt.Sprintf("/dns4/manager-%d/udp/4001/quic-v1", index+1),
+			KeySeed:    int64(index + 101),
+			ListenAddr: fmt.Sprintf("/ip4/0.0.0.0/udp/%d/webrtc-direct", 4101+index),
 		}
 	}
 	return config.Seed{

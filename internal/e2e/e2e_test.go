@@ -78,7 +78,7 @@ func newCluster(t *testing.T, state model.NetworkState) *cluster {
 		group.members[index] = model.CommitteeMember{ID: managerName(index), PeerID: peerID.String(), KeySeed: seed}
 	}
 	for index := range group.members {
-		node, err := p2p.New(ctx, p2p.Config{IdentitySeed: group.members[index].KeySeed})
+		node, err := p2p.New(ctx, p2p.Config{IdentitySeed: group.members[index].KeySeed, WebRTCListen: []string{"/ip4/127.0.0.1/udp/0/webrtc-direct"}})
 		if err != nil {
 			t.Fatal(err)
 		}

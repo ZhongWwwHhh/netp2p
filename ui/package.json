@@ -1,0 +1,29 @@
+{
+  "name": "netp2p-console",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@libp2p/circuit-relay-v2": "^4.2.13",
+    "@libp2p/http": "^2.0.6",
+    "@libp2p/identify": "^4.1.14",
+    "@libp2p/webrtc": "^6.0.32",
+    "libp2p": "^3.3.11",
+    "multiformats": "^14.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@tailwindcss/vite": "^4.3.3",
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.3.4",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0",
+    "vitest": "^3.2.4"
+  }
+}

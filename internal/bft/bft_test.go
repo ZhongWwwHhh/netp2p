@@ -3,6 +3,8 @@ package bft
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/netp2p/netp2p/internal/model"
@@ -499,5 +501,18 @@ func TestAdminTransitions(t *testing.T) {
 	}
 	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertSetupKey}); err == nil {
 		t.Fatal("upsert setup key without record should fail")
+	}
+}
+
+func TestNormalizeStateEmitsEmptyArrays(t *testing.T) {
+	state := model.NetworkState{NetworkID: "net-1", OverlayCIDR: "100.64.0.0/24"}
+	encoded, err := json.Marshal(NormalizeState(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"\"peers\"", "\"groups\"", "\"policies\"", "\"routes\"", "\"budgets\"", "\"setupKeys\""} {
+		if !strings.Contains(string(encoded), field+":[]") {
+			t.Fatalf("expected %s to serialize as an empty array, got %s", field, encoded)
+		}
 	}
 }

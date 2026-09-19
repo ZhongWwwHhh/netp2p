@@ -18,6 +18,8 @@ NetBird Management API。
 可运行的最小闭环：4 manager 完成 genesis，client 用 setup key 注册并获得 overlay IP 与
 certified snapshot，由 certified state 驱动的 policy 允许/拒绝 overlay ICMP 转发。数据面通过
 用户态 UDP packet endpoint 接入，**不依赖 TUN**。
+- Web 控制台：每个 manager 内嵌 Svelte 控制台；普通 HTTP 只提供页面和 libp2p/WebRTC
+  bootstrap，管理 API 跑在 `/netp2p/web-api/1.0.0` 的 libp2p HTTP 上。
 
 - 架构：`docs/architecture.md`
 - NetBird 调研：`docs/netbird-research.md`
@@ -27,6 +29,19 @@ certified snapshot，由 certified state 驱动的 policy 允许/拒绝 overlay 
 ## 快速开始
 
 ```bash
-go test ./...        # 单元 + 进程内 E2E
+make ui              # 构建 Svelte 控制台到 Go embed 目录
+make build           # 构建内嵌 UI 的 Go binary
+make test            # 前端测试 + 单元 + 进程内 E2E
 scripts/e2e.sh       # Docker E2E（4 manager + 2 client，无 TUN）
 ```
+
+启动 manager 后访问：
+
+```bash
+netp2pd --role manager --config deploy/state.json \
+  --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+  --web-listen 0.0.0.0:8080
+```
+
+`http://127.0.0.1:8080` 会返回控制台和 `/api/bootstrap`。浏览器随后用 js-libp2p
+WebRTC 直连 manager，再通过 `@libp2p/http` 调用管理 API。

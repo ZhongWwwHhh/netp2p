@@ -32,6 +32,37 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh) *Manager {
 	return manager
 }
 
+func (manager *Manager) LatestSnapshot() (model.SignedSnapshot, bool) {
+	if snapshot := manager.Snapshot(); snapshot.Height > 0 {
+		return snapshot, true
+	}
+	return manager.engine.LatestSnapshot()
+}
+
+func (manager *Manager) Committee() []model.CommitteeMember {
+	return manager.engine.CommitteeMembers()
+}
+
+func (manager *Manager) Height() uint64 {
+	return manager.engine.Height()
+}
+
+func (manager *Manager) LocalID() string {
+	return manager.engine.LocalID()
+}
+
+func (manager *Manager) Leader(height, round uint64) model.CommitteeMember {
+	return manager.engine.Leader(height, round)
+}
+
+func (manager *Manager) NetworkID() string {
+	return manager.engine.CurrentState().NetworkID
+}
+
+func (manager *Manager) Submit(transition model.StateTransition) (model.SignedSnapshot, error) {
+	return manager.mesh.Submit(transition)
+}
+
 func (manager *Manager) handleLogin(stream network.Stream) {
 	defer stream.Close()
 	envelope, err := p2p.DecodeEnvelope(stream)

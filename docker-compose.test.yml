@@ -6,10 +6,13 @@
 services:
   manager-1:
     image: netp2p-test:latest
-    command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1"]
     environment:
       NETP2P_MANAGER_ID: manager-1
     volumes: ["./deploy:/config:ro"]
+    command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--web-listen", "0.0.0.0:8080"]
+    ports:
+      - "8080:8080"
+      - "4101:4101/udp"
   manager-2:
     image: netp2p-test:latest
     command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1"]

@@ -2,3 +2,5 @@
 .netp2p
 deploy/run
 tools
+../../ui/node_modules
+!internal/web/dist

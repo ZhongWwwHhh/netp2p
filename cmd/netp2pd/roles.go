@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -12,9 +13,10 @@ import (
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/web"
 )
 
-func runManager(ctx context.Context, dataDir, configPath, listenAddr string) error {
+func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen string) error {
 	seed, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -40,7 +42,14 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr string) err
 	}
 	local := seed.Managers[localIndex]
 	privateKey := bft.SeededPrivateKey(local.KeySeed)
-	node, err := p2p.New(ctx, p2p.Config{DataDir: dataDir, Listen: []string{listenAddr}, IdentitySeed: local.KeySeed})
+	webrtcListen := local.ListenAddr
+	if webrtcListen == "" {
+		webrtcListen = "/ip4/0.0.0.0/udp/0/webrtc-direct"
+	}
+	node, err := p2p.New(ctx, p2p.Config{
+		DataDir: dataDir, Listen: []string{listenAddr},
+		WebRTCListen: []string{webrtcListen}, IdentitySeed: local.KeySeed,
+	})
 	if err != nil {
 		return err
 	}
@@ -80,8 +89,23 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr string) err
 	}
 	// Register control handlers only after genesis so early client logins fail
 	// fast and retry instead of racing the genesis transition.
-	manager.New(node, engine, mesh)
+	netManager := manager.New(node, engine, mesh)
 	manager.RegisterAdminHandler(node, mesh, seed.AdminToken)
+
+	webServer, err := web.NewServer(node, netManager, web.Config{AdminToken: seed.AdminToken})
+	if err != nil {
+		return fmt.Errorf("create web server: %w", err)
+	}
+	if err := webServer.StartInsecureBootstrap(webListen); err != nil {
+		return fmt.Errorf("start web bootstrap: %w", err)
+	}
+	go func() {
+		if serveErr := webServer.HTTPHost().Serve(); serveErr != nil {
+			log.Printf("libp2p http server stopped: %v", serveErr)
+		}
+	}()
+	defer webServer.Stop()
+
 	return runStatus(ctx, node)
 }
 

@@ -4,6 +4,7 @@ package p2p
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -32,11 +33,13 @@ var (
 	FrameProtocol       = protocol.ID(ProtocolPrefix + "/data/frame/1.0.0")
 	QuotaProtocol       = protocol.ID(ProtocolPrefix + "/data/quota/1.0.0")
 	AdminProtocol       = protocol.ID(ProtocolPrefix + "/control/admin/1.0.0")
+	WebAPIProtocol      = protocol.ID(ProtocolPrefix + "/web-api/1.0.0")
 )
 
 type Config struct {
 	DataDir      string   `json:"dataDir"`
 	Listen       []string `json:"listen"`
+	WebRTCListen []string `json:"webrtcListen,omitempty"`
 	Bootstraps   []string `json:"bootstraps"`
 	IdentitySeed int64    `json:"identitySeed,omitempty"`
 }
@@ -61,6 +64,7 @@ func New(ctx context.Context, config Config) (*Node, error) {
 	}
 	addresses := make([]string, 0, len(config.Listen))
 	addresses = append(addresses, config.Listen...)
+	addresses = append(addresses, config.WebRTCListen...)
 	if len(addresses) == 0 {
 		addresses = []string{"/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/udp/0/quic-v1"}
 	}
@@ -77,6 +81,42 @@ func New(ctx context.Context, config Config) (*Node, error) {
 		return nil, fmt.Errorf("create libp2p host: %w", err)
 	}
 	return &Node{Host: libp2pHost}, nil
+}
+
+func (node *Node) WebRTCAddresses() []string {
+	result := make([]string, 0)
+	for _, address := range node.Host.Addrs() {
+		protocols := address.Protocols()
+		hasWebRTC := false
+		for _, protocol := range protocols {
+			if protocol.Name == "webrtc-direct" {
+				hasWebRTC = true
+				break
+			}
+		}
+		if !hasWebRTC {
+			continue
+		}
+		result = append(result, fmt.Sprintf("%s/p2p/%s", address.String(), node.Host.ID()))
+	}
+	return result
+}
+
+// IdentityPublicKey returns the host's raw Ed25519 public key, which lets the
+// browser authenticate this manager after the HTTP-only bootstrap step.
+func (node *Node) IdentityPublicKey() ([]byte, error) {
+	publicKey, err := node.Host.ID().ExtractPublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("extract identity public key: %w", err)
+	}
+	raw, err := publicKey.Raw()
+	if err != nil {
+		return nil, fmt.Errorf("serialize identity public key: %w", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("identity key is not Ed25519")
+	}
+	return raw, nil
 }
 
 func identityPath(dataDir string) string {

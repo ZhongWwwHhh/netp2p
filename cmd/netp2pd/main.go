@@ -17,6 +17,7 @@ func main() {
 	role := flag.String("role", "node", "node, manager, client or seedgen")
 	dataDir := flag.String("data-dir", ".netp2p", "libp2p identity and node data directory")
 	listen := flag.String("listen", "/ip4/0.0.0.0/udp/0/quic-v1", "libp2p listen multiaddr")
+	webListen := flag.String("web-listen", "0.0.0.0:8080", "manager browser bootstrap HTTP address")
 	configPath := flag.String("config", "", "manager static JSON seed")
 	managerAddr := flag.String("manager", "", "manager libp2p multiaddr")
 	setupKey := flag.String("setup-key", "", "client setup key")
@@ -37,7 +38,7 @@ func main() {
 		if *configPath == "" {
 			log.Fatal("--config is required for manager role")
 		}
-		if err := runManager(ctx, *dataDir, *configPath, *listen); err != nil {
+		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen); err != nil {
 			log.Fatal(err)
 		}
 		return
