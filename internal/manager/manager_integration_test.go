@@ -293,3 +293,77 @@ func TestSubmitWithLeaderDown(t *testing.T) {
 		t.Fatalf("snapshot height %d, want 2", snapshot.Height)
 	}
 }
+
+// TestSubmitRejectsInvalidTransition verifies that a transition which cannot
+// apply against the committed state fails fast with the real reason instead of
+// exhausting every committee round and reporting a consensus timeout.
+func TestSubmitRejectsInvalidTransition(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	state := model.NetworkState{
+		NetworkID:    "net-test",
+		OverlayCIDR:  "100.64.0.0/24",
+		NextIPOffset: 1,
+		Groups:       []model.Group{{ID: "clients-a"}},
+	}
+
+	const count = 4
+	members := make([]model.CommitteeMember, count)
+	for index := range members {
+		seed := int64(index + 201)
+		privateKey := bft.SeededPrivateKey(seed)
+		libp2pKey, _, err := crypto.KeyPairFromStdKey(&privateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peerID, err := peer.IDFromPrivateKey(libp2pKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		members[index] = model.CommitteeMember{ID: string(rune('A' + index)), PeerID: peerID.String(), KeySeed: seed}
+	}
+
+	meshes := make([]*CommitteeMesh, count)
+	for index, member := range members {
+		node, err := p2p.New(ctx, p2p.Config{IdentitySeed: member.KeySeed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer node.Close()
+		addresses := node.Addresses()
+		if len(addresses) == 0 {
+			t.Fatal("manager has no addresses")
+		}
+		members[index].Address = addresses[0]
+		engine, err := bft.NewEngine(state, members, member.ID, bft.SeededPrivateKey(member.KeySeed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mesh, err := NewCommitteeMesh(node, engine, members)
+		if err != nil {
+			t.Fatal(err)
+		}
+		meshes[index] = mesh
+	}
+	for index, mesh := range meshes {
+		if err := mesh.Connect(ctx); err != nil {
+			t.Fatalf("mesh %d connect: %v", index, err)
+		}
+	}
+	if _, err := meshes[0].Submit(model.StateTransition{Type: bft.TransitionGenesis}); err != nil {
+		t.Fatalf("genesis: %v", err)
+	}
+
+	start := time.Now()
+	_, err := meshes[0].Submit(model.StateTransition{Type: bft.TransitionRemoveGroup, TargetID: "does-not-exist"})
+	if err == nil {
+		t.Fatal("expected invalid transition to be rejected")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("invalid transition took %s, want fast rejection", elapsed)
+	}
+	if want := `group "does-not-exist" not found`; err.Error() != want {
+		t.Fatalf("error %q, want %q", err.Error(), want)
+	}
+}

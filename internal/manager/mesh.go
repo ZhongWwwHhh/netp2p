@@ -289,6 +289,15 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 	mesh.submitMu.Lock()
 	defer mesh.submitMu.Unlock()
 
+	// ApplyTransition is deterministic, so a transition that cannot apply is
+	// rejected before proposing rather than burning every committee round and
+	// surfacing as a generic consensus timeout. Admin and console callers then
+	// get the real reason, such as an unknown group reference.
+	probe := mesh.engine.CurrentState()
+	if err := bft.ApplyTransition(&probe, transition); err != nil {
+		return model.SignedSnapshot{}, err
+	}
+
 	subscriber := make(chan model.SignedSnapshot, 16)
 	mesh.mu.Lock()
 	mesh.subscribers[subscriber] = struct{}{}
