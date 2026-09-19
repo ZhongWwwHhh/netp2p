@@ -46,6 +46,11 @@ export interface NetworkSettings {
   jwtGroupsEnabled?: boolean;
   jwtGroupsClaimName?: string;
   jwtAllowGroups?: string[];
+  linkMinBandwidthMbps?: number;
+  relayLatencyAdvantageMs?: number;
+  relayLossAdvantagePct?: number;
+  linkProbeIntervalSeconds?: number;
+  linkProbeTimeoutMs?: number;
 }
 
 export interface Route {
