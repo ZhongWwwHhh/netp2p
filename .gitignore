@@ -1,4 +1,5 @@
 .netp2p/
+tmp/
 deploy/run/
 deploy/compose.env
 deploy/state.json
