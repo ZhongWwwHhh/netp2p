@@ -91,7 +91,7 @@ func TestFourManagerMeshRegistersPeer(t *testing.T) {
 	if _, err := meshes[0].Submit(model.StateTransition{Type: bft.TransitionGenesis}); err != nil {
 		t.Fatalf("genesis submit: %v", err)
 	}
-	snapshot, peerRecord, err := managers[0].Register("key-a", "peer-a", nil)
+	snapshot, peerRecord, err := managers[0].Register(Registration{SetupKey: "key-a", PeerID: "peer-a"})
 	if err != nil {
 		t.Fatal(err)
 	}

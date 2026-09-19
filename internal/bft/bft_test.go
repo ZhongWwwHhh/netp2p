@@ -516,3 +516,168 @@ func TestNormalizeStateEmitsEmptyArrays(t *testing.T) {
 		}
 	}
 }
+
+func TestDNSAndPeerTransitions(t *testing.T) {
+	state := testState()
+	state.Nameservers = nil
+	state.Zones = nil
+
+	nameserver := model.Nameserver{
+		ID: "ns-1", Name: "corp", Groups: []string{"clients-a"},
+		Servers: []string{"1.1.1.1"}, Enabled: true,
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertNS, Nameserver: &nameserver}); err != nil {
+		t.Fatalf("upsert nameserver: %v", err)
+	}
+	if len(state.Nameservers) != 1 || state.Nameservers[0].ID != "ns-1" {
+		t.Fatalf("nameserver not applied: %+v", state.Nameservers)
+	}
+
+	unknownGroup := nameserver
+	unknownGroup.ID = "ns-2"
+	unknownGroup.Groups = []string{"ghost"}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertNS, Nameserver: &unknownGroup}); err == nil {
+		t.Fatal("nameserver referencing an unknown group should fail")
+	}
+
+	zone := model.DNSZone{
+		ID: "zone-1", Domain: "internal.example", Groups: []string{"clients-b"},
+		Records: []model.DNSRecord{{Name: "api", Type: "A", Value: "100.64.0.1"}}, Enabled: true,
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertZone, Zone: &zone}); err != nil {
+		t.Fatalf("upsert zone: %v", err)
+	}
+	missingDomain := zone
+	missingDomain.ID = "zone-2"
+	missingDomain.Domain = ""
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertZone, Zone: &missingDomain}); err == nil {
+		t.Fatal("zone without a domain should fail")
+	}
+
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateDNS, DNSSettings: &model.DNSSettings{Groups: []string{"clients-a"}}}); err != nil {
+		t.Fatalf("update dns settings: %v", err)
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateDNS, DNSSettings: &model.DNSSettings{Disabled: true, Groups: []string{"ghost"}}}); err == nil {
+		t.Fatal("dns settings referencing an unknown group should fail")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveNS, TargetID: "nope"}); err == nil {
+		t.Fatal("removing a missing nameserver should fail")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveZone, TargetID: "nope"}); err == nil {
+		t.Fatal("removing a missing zone should fail")
+	}
+}
+
+func TestUpdatePeerOnlyChangesMetadata(t *testing.T) {
+	state := testState()
+	state.Peers = []model.PeerRecord{{PeerID: "peer-a", OverlayIP: "100.64.0.11", Groups: []string{"clients-a"}}}
+
+	transition := model.StateTransition{
+		Type: TransitionUpdatePeer,
+		Peer: model.PeerRecord{PeerID: "peer-a", Hostname: "laptop", OS: "linux", ClientVersion: "0.2.0"},
+	}
+	if err := ApplyTransition(&state, transition); err != nil {
+		t.Fatalf("update peer: %v", err)
+	}
+	peer := state.Peers[0]
+	if peer.Hostname != "laptop" || peer.OS != "linux" || peer.ClientVersion != "0.2.0" {
+		t.Fatalf("metadata not applied: %+v", peer)
+	}
+	if peer.OverlayIP != "100.64.0.11" || len(peer.Groups) != 1 {
+		t.Fatalf("overlay ip/groups must not change: %+v", peer)
+	}
+
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdatePeer, Peer: model.PeerRecord{PeerID: "peer-a", OverlayIP: "100.64.0.99"}}); err == nil {
+		t.Fatal("client must not be able to choose its overlay ip")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdatePeer, Peer: model.PeerRecord{PeerID: "ghost"}}); err == nil {
+		t.Fatal("updating an unregistered peer should fail")
+	}
+}
+
+func TestValidateSnapshotRejectsTamperedTransition(t *testing.T) {
+	committee, _ := testCommittee()
+
+	// Commit a real registration so we hold a valid QC covering a transition.
+	state := testState()
+	engines := make([]*Engine, len(committee))
+	for index := range committee {
+		engine, err := NewEngine(state, committee, committee[index].ID, SeededPrivateKey(committee[index].KeySeed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	transition := model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "extra"}}
+	var snapshot model.SignedSnapshot
+	for round := uint64(0); round < CommitteeSize; round++ {
+		leader := engines[0].Leader(1, round).ID
+		var leaderEngine *Engine
+		for index, member := range committee {
+			if member.ID == leader {
+				leaderEngine = engines[index]
+			}
+		}
+		proposal, leaderVote, err := leaderEngine.Propose(transition, round)
+		if err != nil {
+			continue
+		}
+
+		// Every member must first see the proposal, then vote on it, which is
+		// exactly how the mesh relays messages in production.
+		votes := []Vote{leaderVote}
+		for _, engine := range engines {
+			if engine.LocalID() == leader {
+				continue
+			}
+			vote, err := engine.ProcessProposal(proposal)
+			if err != nil {
+				t.Fatalf("process proposal: %v", err)
+			}
+			votes = append(votes, vote)
+		}
+
+		var qc model.QuorumCertificate
+		ready := false
+		for _, engine := range engines {
+			for _, vote := range votes {
+				processed, ok, err := engine.ProcessVote(vote)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if ok {
+					qc, ready = processed, true
+				}
+			}
+		}
+		if !ready {
+			continue
+		}
+		committed, err := engines[0].Commit(proposal, qc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot = committed
+		goto validated
+	}
+	t.Fatal("could not commit a transition")
+
+validated:
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("freshly committed snapshot should validate: %v", err)
+	}
+
+	// Rewriting the decision log must invalidate the certificate.
+	tampered := snapshot
+	tampered.Transition = model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "forged"}}
+	if err := ValidateSnapshot(tampered); err == nil {
+		t.Fatal("a rewritten transition must not validate")
+	}
+
+	// A snapshot claiming the wrong leader must not validate either.
+	wrongLeader := snapshot
+	wrongLeader.LeaderID = "not-the-leader"
+	if err := ValidateSnapshot(wrongLeader); err == nil {
+		t.Fatal("a snapshot with the wrong leader must not validate")
+	}
+}

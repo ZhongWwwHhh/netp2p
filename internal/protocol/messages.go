@@ -5,10 +5,13 @@ package protocol
 import "github.com/netp2p/netp2p/internal/model"
 
 type LoginRequest struct {
-	NetworkID string   `json:"networkId"`
-	SetupKey  string   `json:"setupKey"`
-	PeerID    string   `json:"peerId"`
-	Addresses []string `json:"addresses,omitempty"`
+	NetworkID     string   `json:"networkId"`
+	SetupKey      string   `json:"setupKey"`
+	PeerID        string   `json:"peerId"`
+	Addresses     []string `json:"addresses,omitempty"`
+	Hostname      string   `json:"hostname,omitempty"`
+	OS            string   `json:"os,omitempty"`
+	ClientVersion string   `json:"clientVersion,omitempty"`
 }
 
 type LoginResponse struct {

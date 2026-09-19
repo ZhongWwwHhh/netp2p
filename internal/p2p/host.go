@@ -34,6 +34,7 @@ var (
 	QuotaProtocol       = protocol.ID(ProtocolPrefix + "/data/quota/1.0.0")
 	AdminProtocol       = protocol.ID(ProtocolPrefix + "/control/admin/1.0.0")
 	WebAPIProtocol      = protocol.ID(ProtocolPrefix + "/web-api/1.0.0")
+	PresenceProtocol    = protocol.ID(ProtocolPrefix + "/presence/1.0.0")
 )
 
 type Config struct {

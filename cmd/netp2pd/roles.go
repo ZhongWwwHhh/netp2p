@@ -91,6 +91,7 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 	// fast and retry instead of racing the genesis transition.
 	netManager := manager.New(node, engine, mesh)
 	manager.RegisterAdminHandler(node, mesh, seed.AdminToken)
+	go netManager.RunPresenceGossip(ctx)
 
 	webServer, err := web.NewServer(node, netManager, web.Config{AdminToken: seed.AdminToken})
 	if err != nil {

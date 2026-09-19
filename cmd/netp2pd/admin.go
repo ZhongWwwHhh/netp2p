@@ -101,6 +101,33 @@ func buildTransition(action, file, target string) (model.StateTransition, error)
 	case "remove-setup-key":
 		transition.Type = bft.TransitionRemoveSetupKey
 		transition.TargetID = target
+	case "upsert-nameserver":
+		transition.Type = bft.TransitionUpsertNS
+		var nameserver model.Nameserver
+		if err := loadRecord(file, &nameserver); err != nil {
+			return transition, err
+		}
+		transition.Nameserver = &nameserver
+	case "remove-nameserver":
+		transition.Type = bft.TransitionRemoveNS
+		transition.TargetID = target
+	case "upsert-zone":
+		transition.Type = bft.TransitionUpsertZone
+		var zone model.DNSZone
+		if err := loadRecord(file, &zone); err != nil {
+			return transition, err
+		}
+		transition.Zone = &zone
+	case "remove-zone":
+		transition.Type = bft.TransitionRemoveZone
+		transition.TargetID = target
+	case "update-dns-settings":
+		transition.Type = bft.TransitionUpdateDNS
+		var settings model.DNSSettings
+		if err := loadRecord(file, &settings); err != nil {
+			return transition, err
+		}
+		transition.DNSSettings = &settings
 	default:
 		return transition, fmt.Errorf("unknown action %q", action)
 	}

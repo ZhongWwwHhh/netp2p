@@ -22,6 +22,9 @@ type Seed struct {
 	Routes       []model.Route           `json:"routes"`
 	Budgets      []model.TrafficBudget   `json:"budgets"`
 	SetupKeys    []model.SetupKey        `json:"setupKeys"`
+	Nameservers  []model.Nameserver      `json:"nameservers,omitempty"`
+	Zones        []model.DNSZone         `json:"zones,omitempty"`
+	DNSSettings  model.DNSSettings       `json:"dnsSettings,omitempty"`
 	NextIPOffset uint32                  `json:"nextIpOffset"`
 }
 
@@ -97,6 +100,9 @@ func (seed Seed) NetworkState() model.NetworkState {
 		Routes:       append([]model.Route(nil), seed.Routes...),
 		Budgets:      append([]model.TrafficBudget(nil), seed.Budgets...),
 		SetupKeys:    append([]model.SetupKey(nil), seed.SetupKeys...),
+		Nameservers:  append([]model.Nameserver(nil), seed.Nameservers...),
+		Zones:        append([]model.DNSZone(nil), seed.Zones...),
+		DNSSettings:  seed.DNSSettings,
 		NextIPOffset: seed.NextIPOffset,
 	}
 }

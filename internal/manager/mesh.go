@@ -33,6 +33,7 @@ type committeeEnvelope struct {
 	Snapshot   *model.SignedSnapshot  `json:"snapshot,omitempty"`
 	Transition *model.StateTransition `json:"transition,omitempty"`
 	Height     *uint64                `json:"height,omitempty"`
+	Round      *uint64                `json:"round,omitempty"`
 }
 
 func NewCommitteeMesh(node *p2p.Node, engine *bft.Engine, members []model.CommitteeMember) (*CommitteeMesh, error) {
@@ -55,6 +56,15 @@ func NewCommitteeMesh(node *p2p.Node, engine *bft.Engine, members []model.Commit
 	node.Handle(p2p.StateUpdateProtocol, mesh.handleStateUpdate)
 	engine.OnCommit(mesh.publish)
 	return mesh, nil
+}
+
+// PeerIDs returns the libp2p identities of the other committee members.
+func (mesh *CommitteeMesh) PeerIDs() []peer.ID {
+	result := make([]peer.ID, 0, len(mesh.peers))
+	for _, peerID := range mesh.peers {
+		result = append(result, peerID)
+	}
+	return result
 }
 
 func (mesh *CommitteeMesh) connectInfo(memberID string, peerID peer.ID) peer.AddrInfo {
@@ -149,7 +159,11 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if message.Transition == nil {
 			return
 		}
-		mesh.proposeLocal(*message.Transition, 0)
+		round := uint64(0)
+		if message.Round != nil {
+			round = *message.Round
+		}
+		mesh.proposeLocal(*message.Transition, round)
 	case "sync_request":
 		if message.Height == nil {
 			return
@@ -297,7 +311,8 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 			if !ok {
 				continue
 			}
-			if err := mesh.send(leaderPeer, committeeEnvelope{Type: "forward", Transition: &transition}); err != nil {
+			round := round
+			if err := mesh.send(leaderPeer, committeeEnvelope{Type: "forward", Transition: &transition, Round: &round}); err != nil {
 				continue
 			}
 		}

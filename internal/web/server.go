@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/version"
 )
 
 type BootstrapResponse struct {
@@ -28,6 +30,7 @@ type BootstrapResponse struct {
 	APIProtocol     string                  `json:"apiProtocol"`
 	APIBase         string                  `json:"apiBase"`
 	NetworkID       string                  `json:"networkId"`
+	Version         string                  `json:"version"`
 	Committee       []model.CommitteeMember `json:"committee"`
 }
 
@@ -91,6 +94,7 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 		APIProtocol:     string(p2p.WebAPIProtocol),
 		APIBase:         "/api/v1",
 		NetworkID:       manager.NetworkID(),
+		Version:         version.Version,
 		Committee:       manager.Committee(),
 	})
 	if err != nil {
@@ -138,12 +142,11 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 	path := strings.TrimSuffix(request.URL.Path, "/")
 	switch {
 	case request.Method == http.MethodGet && path == "/api/v1/snapshot":
-		snapshot, ok := server.manager.LatestSnapshot()
-		if !ok {
-			writeError(writer, http.StatusServiceUnavailable, "no certified snapshot")
-			return
-		}
-		writeJSON(writer, http.StatusOK, snapshot)
+		server.handleSnapshot(writer, request)
+	case request.Method == http.MethodGet && path == "/api/v1/presence":
+		writeJSON(writer, http.StatusOK, map[string]any{"observations": server.manager.Presence()})
+	case request.Method == http.MethodGet && path == "/api/v1/activity":
+		server.handleActivity(writer, request)
 	case request.Method == http.MethodGet && path == "/api/v1/committee/status":
 		writeJSON(writer, http.StatusOK, server.committeeStatus())
 	case request.Method == http.MethodGet && path == "/api/v1/schema":
@@ -167,6 +170,57 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 	default:
 		writeError(writer, http.StatusNotFound, "not found")
 	}
+}
+
+// handleSnapshot serves the latest certified state, or a historical height when
+// ?height= is given. Historical lookups are how the console inspects the
+// decision log without trusting any single manager's memory.
+func (server *Server) handleSnapshot(writer http.ResponseWriter, request *http.Request) {
+	if raw := request.URL.Query().Get("height"); raw != "" {
+		height, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid height")
+			return
+		}
+		snapshot, ok := server.manager.SnapshotAt(height)
+		if !ok {
+			writeError(writer, http.StatusNotFound, "unknown height")
+			return
+		}
+		writeJSON(writer, http.StatusOK, snapshot)
+		return
+	}
+	snapshot, ok := server.manager.LatestSnapshot()
+	if !ok {
+		writeError(writer, http.StatusServiceUnavailable, "no certified snapshot")
+		return
+	}
+	writeJSON(writer, http.StatusOK, snapshot)
+}
+
+func (server *Server) handleActivity(writer http.ResponseWriter, request *http.Request) {
+	limit := 100
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeError(writer, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		if parsed > 500 {
+			parsed = 500
+		}
+		limit = parsed
+	}
+	var before uint64
+	if raw := request.URL.Query().Get("before"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid before")
+			return
+		}
+		before = parsed
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"entries": server.manager.Activity(limit, before)})
 }
 
 func (server *Server) committeeStatus() CommitteeStatus {
@@ -224,8 +278,23 @@ func (server *Server) BootstrapHandler() http.Handler {
 			writeError(writer, http.StatusNotFound, "not found")
 			return
 		}
+		// Serve the SPA shell for deep links such as /peers, so client-side
+		// routing works on a hard refresh. Asset paths keep their file
+		// semantics and still 404 when missing.
+		if request.Method == http.MethodGet && !strings.HasPrefix(request.URL.Path, "/assets/") && !hasFileExtension(request.URL.Path) {
+			request = request.Clone(request.Context())
+			request.URL.Path = "/"
+		}
 		fileServer.ServeHTTP(writer, request)
 	})
+}
+
+func hasFileExtension(path string) bool {
+	base := path
+	if index := strings.LastIndex(base, "/"); index >= 0 {
+		base = base[index+1:]
+	}
+	return strings.Contains(base, ".")
 }
 
 func authorize(request *http.Request, adminToken string) bool {

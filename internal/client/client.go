@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/netp2p/netp2p/internal/packet"
 	"github.com/netp2p/netp2p/internal/policy"
 	netproto "github.com/netp2p/netp2p/internal/protocol"
+	"github.com/netp2p/netp2p/internal/version"
 )
 
 type Client struct {
@@ -43,6 +46,9 @@ func (client *Client) Login(ctx context.Context, networkID, setupKey string) err
 		return fmt.Errorf("connect manager: %w", err)
 	}
 	request := netproto.LoginRequest{NetworkID: networkID, SetupKey: setupKey, PeerID: client.node.Host.ID().String(), Addresses: client.node.Addresses()}
+	request.Hostname, _ = os.Hostname()
+	request.OS = runtime.GOOS
+	request.ClientVersion = version.Version
 	var response netproto.LoginResponse
 	if err := client.request(ctx, p2p.LoginProtocol, request, &response); err != nil {
 		return err

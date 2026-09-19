@@ -25,7 +25,7 @@ func main() {
 	statusFile := flag.String("status-file", "", "write client status JSON to this path after login")
 	networkID := flag.String("network", "netp2p-test", "network id")
 	adminToken := flag.String("admin-token", "", "admin auth token from seed")
-	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key")
+	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key, upsert-nameserver, remove-nameserver, upsert-zone, remove-zone, update-dns-settings")
 	adminFile := flag.String("file", "", "JSON record file for upsert actions or target ID for remove actions")
 	adminTarget := flag.String("target", "", "target ID for remove actions")
 	flag.Parse()

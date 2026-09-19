@@ -32,6 +32,12 @@ const (
 	TransitionRemoveBudget   = "remove_budget"
 	TransitionUpsertSetupKey = "upsert_setup_key"
 	TransitionRemoveSetupKey = "remove_setup_key"
+	TransitionUpdatePeer     = "update_peer"
+	TransitionUpsertNS       = "upsert_nameserver"
+	TransitionRemoveNS       = "remove_nameserver"
+	TransitionUpsertZone     = "upsert_zone"
+	TransitionRemoveZone     = "remove_zone"
+	TransitionUpdateDNS      = "update_dns_settings"
 )
 
 var (
@@ -42,20 +48,22 @@ var (
 )
 
 type Proposal struct {
-	Height    uint64             `json:"height"`
-	Round     uint64             `json:"round"`
-	NetworkID string             `json:"networkId"`
-	State     model.NetworkState `json:"state"`
-	LeaderID  string             `json:"leaderId"`
+	Height     uint64                `json:"height"`
+	Round      uint64                `json:"round"`
+	NetworkID  string                `json:"networkId"`
+	State      model.NetworkState    `json:"state"`
+	LeaderID   string                `json:"leaderId"`
+	Transition model.StateTransition `json:"transition"`
 }
 
 type Vote struct {
-	Height    uint64 `json:"height"`
-	Round     uint64 `json:"round"`
-	NetworkID string `json:"networkId"`
-	StateHash []byte `json:"stateHash"`
-	VoterID   string `json:"voterId"`
-	Signature []byte `json:"signature"`
+	Height         uint64 `json:"height"`
+	Round          uint64 `json:"round"`
+	NetworkID      string `json:"networkId"`
+	StateHash      []byte `json:"stateHash"`
+	TransitionHash []byte `json:"transitionHash"`
+	VoterID        string `json:"voterId"`
+	Signature      []byte `json:"signature"`
 }
 
 type Engine struct {
@@ -139,16 +147,39 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	normalized.Routes = append([]model.Route{}, state.Routes...)
 	normalized.Budgets = append([]model.TrafficBudget{}, state.Budgets...)
 	normalized.SetupKeys = append([]model.SetupKey{}, state.SetupKeys...)
+	normalized.Nameservers = append([]model.Nameserver{}, state.Nameservers...)
+	normalized.Zones = append([]model.DNSZone{}, state.Zones...)
 	sort.Slice(normalized.Peers, func(i, j int) bool { return normalized.Peers[i].PeerID < normalized.Peers[j].PeerID })
 	sort.Slice(normalized.Groups, func(i, j int) bool { return normalized.Groups[i].ID < normalized.Groups[j].ID })
 	sort.Slice(normalized.Policies, func(i, j int) bool { return normalized.Policies[i].ID < normalized.Policies[j].ID })
 	sort.Slice(normalized.Routes, func(i, j int) bool { return normalized.Routes[i].ID < normalized.Routes[j].ID })
 	sort.Slice(normalized.Budgets, func(i, j int) bool { return normalized.Budgets[i].ID < normalized.Budgets[j].ID })
 	sort.Slice(normalized.SetupKeys, func(i, j int) bool { return normalized.SetupKeys[i].Key < normalized.SetupKeys[j].Key })
+	sort.Slice(normalized.Nameservers, func(i, j int) bool { return normalized.Nameservers[i].ID < normalized.Nameservers[j].ID })
+	sort.Slice(normalized.Zones, func(i, j int) bool { return normalized.Zones[i].ID < normalized.Zones[j].ID })
 	for index := range normalized.Groups {
 		sort.Strings(normalized.Groups[index].UserIDs)
 		sort.Strings(normalized.Groups[index].PeerIDs)
 	}
+	for index := range normalized.Nameservers {
+		sort.Strings(normalized.Nameservers[index].Groups)
+		sort.Strings(normalized.Nameservers[index].MatchDomains)
+		sort.Strings(normalized.Nameservers[index].Servers)
+	}
+	for index := range normalized.Zones {
+		sort.Strings(normalized.Zones[index].Groups)
+		sort.Slice(normalized.Zones[index].Records, func(a, b int) bool {
+			left, right := normalized.Zones[index].Records[a], normalized.Zones[index].Records[b]
+			if left.Name != right.Name {
+				return left.Name < right.Name
+			}
+			if left.Type != right.Type {
+				return left.Type < right.Type
+			}
+			return left.Value < right.Value
+		})
+	}
+	sort.Strings(normalized.DNSSettings.Groups)
 	return normalized
 }
 
@@ -162,9 +193,11 @@ func StateHash(state model.NetworkState) []byte {
 	return hash[:]
 }
 
-func proposalHash(proposal Proposal) []byte {
-	proposal.State = NormalizeState(proposal.State)
-	hash := sha256.Sum256(canonicalValue(proposal))
+// TransitionHash commits a transition into the signed vote. Because the hash is
+// covered by each committee member's signature, the certified snapshot's
+// transition cannot be altered by a single manager without breaking the QC.
+func TransitionHash(transition model.StateTransition) []byte {
+	hash := sha256.Sum256(canonicalValue(transition))
 	return hash[:]
 }
 
@@ -208,6 +241,36 @@ func (engine *Engine) Snapshot(height uint64) (model.SignedSnapshot, bool) {
 	defer engine.mu.RUnlock()
 	snapshot, ok := engine.committed[height]
 	return snapshot, ok
+}
+
+// Activity returns committed snapshots in descending height order, newest
+// first. Entries at or above `before` are skipped so callers can page. Each
+// entry is a certified decision-log record: its transition is covered by the
+// QC and can be re-verified with ValidateSnapshot.
+func (engine *Engine) Activity(limit int, before uint64) []model.SignedSnapshot {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	if limit <= 0 {
+		limit = 100
+	}
+	heights := make([]uint64, 0, len(engine.committed))
+	for height := range engine.committed {
+		if before > 0 && height >= before {
+			continue
+		}
+		heights = append(heights, height)
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] > heights[j] })
+	if len(heights) > limit {
+		heights = heights[:limit]
+	}
+	result := make([]model.SignedSnapshot, 0, len(heights))
+	for _, height := range heights {
+		snapshot := engine.committed[height]
+		snapshot.Committee = append([]model.CommitteeMember(nil), engine.committee...)
+		result = append(result, snapshot)
+	}
+	return result
 }
 
 // LatestSnapshot returns the highest committed snapshot, if any.
@@ -265,7 +328,8 @@ func cloneProposal(proposal Proposal) Proposal {
 func signVote(privateKey ed25519.PrivateKey, vote *Vote) error {
 	hash := sha256.Sum256(canonicalValue(map[string]any{
 		"height": vote.Height, "round": vote.Round, "networkId": vote.NetworkID,
-		"stateHash": vote.StateHash, "voterId": vote.VoterID,
+		"stateHash": vote.StateHash, "transitionHash": vote.TransitionHash,
+		"voterId": vote.VoterID,
 	}))
 	vote.Signature = ed25519.Sign(privateKey, hash[:])
 	return nil
@@ -277,7 +341,8 @@ func verifyVote(publicKey ed25519.PublicKey, vote Vote) bool {
 	}
 	hash := sha256.Sum256(canonicalValue(map[string]any{
 		"height": vote.Height, "round": vote.Round, "networkId": vote.NetworkID,
-		"stateHash": vote.StateHash, "voterId": vote.VoterID,
+		"stateHash": vote.StateHash, "transitionHash": vote.TransitionHash,
+		"voterId": vote.VoterID,
 	}))
 	return ed25519.Verify(publicKey, hash[:], vote.Signature)
 }
@@ -294,7 +359,7 @@ func (engine *Engine) Propose(transition model.StateTransition, round uint64) (P
 	if err := ApplyTransition(&next, transition); err != nil {
 		return Proposal{}, Vote{}, err
 	}
-	proposal := Proposal{Height: height, Round: round, NetworkID: next.NetworkID, State: next, LeaderID: leader.ID}
+	proposal := Proposal{Height: height, Round: round, NetworkID: next.NetworkID, State: next, LeaderID: leader.ID, Transition: transition}
 	vote := engine.localVote(proposal)
 	engine.proposals[proposal.Height] = proposal
 	engine.addVoteLocked(vote)
@@ -303,7 +368,10 @@ func (engine *Engine) Propose(transition model.StateTransition, round uint64) (P
 
 func (engine *Engine) localVote(proposal Proposal) Vote {
 	hash := StateHash(proposal.State)
-	vote := Vote{Height: proposal.Height, Round: proposal.Round, NetworkID: proposal.NetworkID, StateHash: hash, VoterID: engine.localID}
+	vote := Vote{
+		Height: proposal.Height, Round: proposal.Round, NetworkID: proposal.NetworkID,
+		StateHash: hash, TransitionHash: TransitionHash(proposal.Transition), VoterID: engine.localID,
+	}
 	if err := signVote(engine.privateKey, &vote); err != nil {
 		return vote
 	}
@@ -324,6 +392,15 @@ func (engine *Engine) ProcessProposal(proposal Proposal) (Vote, error) {
 	}
 	if proposal.LeaderID != engine.Leader(proposal.Height, proposal.Round).ID {
 		return Vote{}, ErrUnknownLeader
+	}
+	// Re-derive the proposed state from the leader's transition so a byzantine
+	// leader cannot ship a state that its own decision log does not justify.
+	expected := cloneState(engine.current)
+	if err := ApplyTransition(&expected, proposal.Transition); err != nil {
+		return Vote{}, fmt.Errorf("invalid transition: %w", err)
+	}
+	if !bytes.Equal(StateHash(expected), StateHash(proposal.State)) {
+		return Vote{}, fmt.Errorf("proposal state does not match transition")
 	}
 	engine.proposals[proposal.Height] = proposal
 	vote := engine.localVote(proposal)
@@ -354,11 +431,17 @@ func (engine *Engine) ProcessVote(vote Vote) (model.QuorumCertificate, bool, err
 	if !ok || !bytes.Equal(StateHash(proposal.State), vote.StateHash) {
 		return model.QuorumCertificate{}, false, fmt.Errorf("vote does not match proposal")
 	}
+	if !bytes.Equal(TransitionHash(proposal.Transition), vote.TransitionHash) {
+		return model.QuorumCertificate{}, false, fmt.Errorf("vote does not match transition")
+	}
 	engine.addVoteLocked(vote)
 	if len(engine.votes[vote.Height]) < QuorumSize {
 		return model.QuorumCertificate{}, false, nil
 	}
-	qc := model.QuorumCertificate{Height: vote.Height, Round: vote.Round, StateHash: vote.StateHash}
+	qc := model.QuorumCertificate{
+		Height: vote.Height, Round: vote.Round,
+		StateHash: vote.StateHash, TransitionHash: vote.TransitionHash,
+	}
 	count := 0
 	for _, member := range engine.committee {
 		for _, item := range engine.votes[vote.Height] {
@@ -385,6 +468,9 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 		if qc.Height != proposal.Height || !bytes.Equal(qc.StateHash, StateHash(proposal.State)) {
 			return ErrInvalidQC
 		}
+		if !bytes.Equal(qc.TransitionHash, TransitionHash(proposal.Transition)) {
+			return ErrInvalidQC
+		}
 		if proposal.Height != engine.height+1 {
 			return fmt.Errorf("cannot commit non-next height")
 		}
@@ -398,6 +484,7 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 	snapshot := model.SignedSnapshot{
 		Epoch: proposal.Height, Height: proposal.Height, StateHash: append([]byte(nil), qc.StateHash...),
 		State: cloneState(engine.current), Committee: append([]model.CommitteeMember(nil), engine.committee...), QC: qc,
+		Transition: proposal.Transition, LeaderID: proposal.LeaderID,
 	}
 	engine.committed[proposal.Height] = snapshot
 	delete(engine.proposals, proposal.Height)
@@ -425,7 +512,11 @@ func (engine *Engine) verifyQCLocked(qc model.QuorumCertificate) error {
 			return ErrInvalidQC
 		}
 		seen[signerID] = struct{}{}
-		vote := Vote{Height: qc.Height, Round: qc.Round, NetworkID: engine.current.NetworkID, StateHash: qc.StateHash, VoterID: signerID, Signature: qc.Signatures[index]}
+		vote := Vote{
+			Height: qc.Height, Round: qc.Round, NetworkID: engine.current.NetworkID,
+			StateHash: qc.StateHash, TransitionHash: qc.TransitionHash, VoterID: signerID,
+			Signature: qc.Signatures[index],
+		}
 		if !verifyVote(publicKey, vote) {
 			return ErrInvalidQC
 		}
@@ -604,9 +695,111 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			}
 		}
 		return fmt.Errorf("setup key %q not found", transition.TargetID)
+	case TransitionUpdatePeer:
+		if transition.Peer.PeerID == "" {
+			return fmt.Errorf("peer id is required")
+		}
+		for index := range state.Peers {
+			if state.Peers[index].PeerID != transition.Peer.PeerID {
+				continue
+			}
+			// Only metadata and reachability may change here; overlay IP and
+			// group membership stay under manager control.
+			if transition.Peer.OverlayIP != "" {
+				return fmt.Errorf("client may not choose overlay IP")
+			}
+			state.Peers[index].Hostname = transition.Peer.Hostname
+			state.Peers[index].OS = transition.Peer.OS
+			state.Peers[index].ClientVersion = transition.Peer.ClientVersion
+			if len(transition.Peer.Addresses) > 0 {
+				state.Peers[index].Addresses = append([]string(nil), transition.Peer.Addresses...)
+			}
+			return nil
+		}
+		return fmt.Errorf("peer %q not registered", transition.Peer.PeerID)
+	case TransitionUpsertNS:
+		if transition.Nameserver == nil || transition.Nameserver.ID == "" {
+			return fmt.Errorf("nameserver record is required")
+		}
+		if err := requireGroups(state, transition.Nameserver.Groups); err != nil {
+			return err
+		}
+		for index := range state.Nameservers {
+			if state.Nameservers[index].ID == transition.Nameserver.ID {
+				state.Nameservers[index] = *transition.Nameserver
+				return nil
+			}
+		}
+		state.Nameservers = append(state.Nameservers, *transition.Nameserver)
+		return nil
+	case TransitionRemoveNS:
+		if transition.TargetID == "" {
+			return fmt.Errorf("targetId is required")
+		}
+		for index := range state.Nameservers {
+			if state.Nameservers[index].ID == transition.TargetID {
+				state.Nameservers = append(state.Nameservers[:index], state.Nameservers[index+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("nameserver %q not found", transition.TargetID)
+	case TransitionUpsertZone:
+		if transition.Zone == nil || transition.Zone.ID == "" {
+			return fmt.Errorf("zone record is required")
+		}
+		if transition.Zone.Domain == "" {
+			return fmt.Errorf("zone domain is required")
+		}
+		if err := requireGroups(state, transition.Zone.Groups); err != nil {
+			return err
+		}
+		for index := range state.Zones {
+			if state.Zones[index].ID == transition.Zone.ID {
+				state.Zones[index] = *transition.Zone
+				return nil
+			}
+		}
+		state.Zones = append(state.Zones, *transition.Zone)
+		return nil
+	case TransitionRemoveZone:
+		if transition.TargetID == "" {
+			return fmt.Errorf("targetId is required")
+		}
+		for index := range state.Zones {
+			if state.Zones[index].ID == transition.TargetID {
+				state.Zones = append(state.Zones[:index], state.Zones[index+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("zone %q not found", transition.TargetID)
+	case TransitionUpdateDNS:
+		if transition.DNSSettings == nil {
+			return fmt.Errorf("dns settings record is required")
+		}
+		if err := requireGroups(state, transition.DNSSettings.Groups); err != nil {
+			return err
+		}
+		state.DNSSettings = *transition.DNSSettings
+		return nil
 	default:
 		return fmt.Errorf("unknown transition type %q", transition.Type)
 	}
+}
+
+func requireGroups(state *model.NetworkState, groups []string) error {
+	for _, groupID := range groups {
+		found := false
+		for index := range state.Groups {
+			if state.Groups[index].ID == groupID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown group %q", groupID)
+		}
+	}
+	return nil
 }
 
 func allocateAddress(state model.NetworkState) (string, error) {
@@ -647,6 +840,15 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 	if len(qc.Signers) < QuorumSize || len(qc.Signatures) != len(qc.Signers) || qc.Height != snapshot.Height {
 		return ErrInvalidQC
 	}
+	// The transition committed in the snapshot must match the one the
+	// committee signed, otherwise the decision log could be rewritten.
+	if !bytes.Equal(qc.TransitionHash, TransitionHash(snapshot.Transition)) {
+		return fmt.Errorf("snapshot transition hash mismatch")
+	}
+	// The leader that produced this height is determined by the committee order.
+	if snapshot.LeaderID == "" || snapshot.LeaderID != leaderIDFor(snapshot.Committee, snapshot.Height, qc.Round) {
+		return fmt.Errorf("snapshot leader mismatch")
+	}
 	seen := make(map[string]struct{})
 	for index, signerID := range qc.Signers {
 		publicKey, ok := publicKeys[signerID]
@@ -657,10 +859,25 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 			return ErrInvalidQC
 		}
 		seen[signerID] = struct{}{}
-		vote := Vote{Height: qc.Height, Round: qc.Round, NetworkID: snapshot.State.NetworkID, StateHash: qc.StateHash, VoterID: signerID, Signature: qc.Signatures[index]}
+		vote := Vote{
+			Height: qc.Height, Round: qc.Round, NetworkID: snapshot.State.NetworkID,
+			StateHash: qc.StateHash, TransitionHash: qc.TransitionHash, VoterID: signerID,
+			Signature: qc.Signatures[index],
+		}
 		if !verifyVote(publicKey, vote) {
 			return ErrInvalidQC
 		}
 	}
 	return nil
+}
+
+// leaderIDFor mirrors Engine.Leader for a committee snapshot, so a client can
+// check a certified snapshot's leader without holding committee state.
+func leaderIDFor(committee []model.CommitteeMember, height, round uint64) string {
+	if len(committee) == 0 {
+		return ""
+	}
+	ordered := append([]model.CommitteeMember(nil), committee...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
+	return ordered[(height+round)%uint64(len(ordered))].ID
 }
