@@ -31,8 +31,8 @@ func testState() model.NetworkState {
 		NextIPOffset: 1,
 		Groups:       []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
 		SetupKeys: []model.SetupKey{
-			{Key: keyA, Groups: []string{"clients-a"}},
-			{Key: keyB, Groups: []string{"clients-b"}},
+			{ID: keyA, Token: keyA, TokenHash: model.SetupKeyHash(keyA), Groups: []string{"clients-a"}},
+			{ID: keyB, Token: keyB, TokenHash: model.SetupKeyHash(keyB), Groups: []string{"clients-b"}},
 		},
 		Policies: []model.Policy{
 			{

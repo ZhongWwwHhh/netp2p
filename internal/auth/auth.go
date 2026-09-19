@@ -242,6 +242,8 @@ func TransitionPermission(transitionType string) (Module, Operation, bool) {
 		return ModuleBudgets, OpDelete, true
 	case bft.TransitionUpsertSetupKey:
 		return ModuleSetupKeys, OpUpdate, true
+	case bft.TransitionRevokeSetupKey:
+		return ModuleSetupKeys, OpUpdate, true
 	case bft.TransitionRemoveSetupKey:
 		return ModuleSetupKeys, OpDelete, true
 	case bft.TransitionUpsertNS:

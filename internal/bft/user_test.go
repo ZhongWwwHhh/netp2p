@@ -15,7 +15,7 @@ func baseUserState() model.NetworkState {
 			{ID: "ops", Name: "Operations", Issued: model.GroupIssuedJWT},
 			{ID: "servers", Name: "Servers", Issued: model.GroupIssuedAPI},
 		},
-		SetupKeys: []model.SetupKey{{Key: "key", Groups: []string{"servers"}}},
+		SetupKeys: []model.SetupKey{{ID: "key", Token: "key", TokenHash: model.SetupKeyHash("key"), Groups: []string{"servers"}}},
 	}
 }
 

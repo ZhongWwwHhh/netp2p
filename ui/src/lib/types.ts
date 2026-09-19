@@ -60,8 +60,18 @@ export interface Route {
 }
 
 export interface SetupKey {
-  key: string;
+  id: string;
+  name?: string;
+  token?: string;
+  tokenPrefix?: string;
+  type?: string;
   groups: string[];
+  expiresAt?: string;
+  usageLimit?: number;
+  usedCount?: number;
+  revoked?: boolean;
+  createdAt?: string;
+  lastUsedAt?: string;
 }
 
 export interface Budget {
@@ -175,6 +185,7 @@ export type StateTransition =
   | { type: 'upsert_budget'; budget: Budget }
   | { type: 'remove_budget'; targetId: string }
   | { type: 'upsert_setup_key'; setupKeyRecord: SetupKey }
+  | { type: 'revoke_setup_key'; targetId: string }
   | { type: 'remove_setup_key'; targetId: string }
   | { type: 'upsert_nameserver'; nameserver: Nameserver }
   | { type: 'remove_nameserver'; targetId: string }

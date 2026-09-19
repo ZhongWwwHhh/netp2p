@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/netp2p/netp2p/internal/model"
 )
@@ -33,6 +34,7 @@ const (
 	TransitionRemoveBudget     = "remove_budget"
 	TransitionUpsertSetupKey   = "upsert_setup_key"
 	TransitionRemoveSetupKey   = "remove_setup_key"
+	TransitionRevokeSetupKey   = "revoke_setup_key"
 	TransitionUpdatePeer       = "update_peer"
 	TransitionUpsertNS         = "upsert_nameserver"
 	TransitionRemoveNS         = "remove_nameserver"
@@ -163,7 +165,7 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	sort.Slice(normalized.Policies, func(i, j int) bool { return normalized.Policies[i].ID < normalized.Policies[j].ID })
 	sort.Slice(normalized.Routes, func(i, j int) bool { return normalized.Routes[i].ID < normalized.Routes[j].ID })
 	sort.Slice(normalized.Budgets, func(i, j int) bool { return normalized.Budgets[i].ID < normalized.Budgets[j].ID })
-	sort.Slice(normalized.SetupKeys, func(i, j int) bool { return normalized.SetupKeys[i].Key < normalized.SetupKeys[j].Key })
+	sort.Slice(normalized.SetupKeys, func(i, j int) bool { return normalized.SetupKeys[i].ID < normalized.SetupKeys[j].ID })
 	sort.Slice(normalized.Nameservers, func(i, j int) bool { return normalized.Nameservers[i].ID < normalized.Nameservers[j].ID })
 	sort.Slice(normalized.Zones, func(i, j int) bool { return normalized.Zones[i].ID < normalized.Zones[j].ID })
 	for index := range normalized.Groups {
@@ -561,11 +563,16 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		groups := []string{}
 		if transition.SetupKey != "" {
-			setupKey := findSetupKey(*state, transition.SetupKey)
+			setupKey := findSetupKeyByToken(*state, transition.SetupKey)
 			if setupKey == nil {
 				return fmt.Errorf("invalid setup key")
 			}
+			if !setupKey.SetupKeyValid(time.Now().UTC().Format(time.RFC3339)) {
+				return fmt.Errorf("invalid setup key")
+			}
 			groups = append(groups, setupKey.Groups...)
+			setupKey.UsedCount++
+			setupKey.LastUsedAt = time.Now().UTC().Format(time.RFC3339)
 		}
 		if transition.Peer.UserID != "" {
 			user := findUser(*state, transition.Peer.UserID)
@@ -691,23 +698,40 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		return fmt.Errorf("budget %q not found", transition.TargetID)
 	case TransitionUpsertSetupKey:
-		if transition.Record == nil || transition.Record.Key == "" {
+		if transition.Record == nil || transition.Record.ID == "" {
 			return fmt.Errorf("setup key record is required")
 		}
+		if len(transition.Record.Groups) == 0 {
+			return fmt.Errorf("setup key must grant at least one group")
+		}
+		if err := requireGroups(state, transition.Record.Groups); err != nil {
+			return err
+		}
 		for index := range state.SetupKeys {
-			if state.SetupKeys[index].Key == transition.Record.Key {
+			if state.SetupKeys[index].ID == transition.Record.ID {
 				state.SetupKeys[index] = *transition.Record
 				return nil
 			}
 		}
 		state.SetupKeys = append(state.SetupKeys, *transition.Record)
 		return nil
+	case TransitionRevokeSetupKey:
+		if transition.TargetID == "" {
+			return fmt.Errorf("targetId is required")
+		}
+		for index := range state.SetupKeys {
+			if state.SetupKeys[index].ID == transition.TargetID {
+				state.SetupKeys[index].Revoked = true
+				return nil
+			}
+		}
+		return fmt.Errorf("setup key %q not found", transition.TargetID)
 	case TransitionRemoveSetupKey:
 		if transition.TargetID == "" {
 			return fmt.Errorf("targetId is required")
 		}
 		for index := range state.SetupKeys {
-			if state.SetupKeys[index].Key == transition.TargetID {
+			if state.SetupKeys[index].ID == transition.TargetID {
 				state.SetupKeys = append(state.SetupKeys[:index], state.SetupKeys[index+1:]...)
 				return nil
 			}
@@ -930,9 +954,9 @@ func requireGroups(state *model.NetworkState, groups []string) error {
 	return nil
 }
 
-func findSetupKey(state model.NetworkState, key string) *model.SetupKey {
+func findSetupKeyByToken(state model.NetworkState, token string) *model.SetupKey {
 	for index := range state.SetupKeys {
-		if state.SetupKeys[index].Key == key {
+		if bytes.Equal(state.SetupKeys[index].TokenHash, model.SetupKeyHash(token)) {
 			return &state.SetupKeys[index]
 		}
 	}

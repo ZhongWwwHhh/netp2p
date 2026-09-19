@@ -26,8 +26,8 @@ func defaultSeed() config.Seed {
 		AdminToken:  "netp2p-admin-v0",
 		Managers:    managers,
 		SetupKeys: []model.SetupKey{
-			{Key: "setup-key-a", Groups: []string{"clients-a"}},
-			{Key: "setup-key-b", Groups: []string{"clients-b"}},
+			{ID: "setup-key-a", Name: "Bootstrap A", Token: "setup-key-a", TokenPrefix: "setup-key-a"[:8], Type: model.SetupKeyReusable, Groups: []string{"clients-a"}},
+			{ID: "setup-key-b", Name: "Bootstrap B", Token: "setup-key-b", TokenPrefix: "setup-key-b"[:8], Type: model.SetupKeyReusable, Groups: []string{"clients-b"}},
 		},
 		Groups: []model.Group{
 			{ID: "clients-a"},

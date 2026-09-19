@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"crypto/sha256"
+	"time"
+)
 
 type CommitteeMember struct {
 	ID         string `json:"id"`
@@ -57,8 +60,49 @@ type User struct {
 }
 
 type SetupKey struct {
-	Key    string   `json:"key"`
-	Groups []string `json:"groups"`
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+	// Token is the plaintext secret. It only appears in the response that
+	// creates a key; list endpoints return the prefix and hash instead.
+	Token       string   `json:"token,omitempty"`
+	TokenPrefix string   `json:"tokenPrefix,omitempty"`
+	TokenHash   []byte   `json:"tokenHash,omitempty"`
+	Type        string   `json:"type,omitempty"`
+	Groups      []string `json:"groups"`
+	ExpiresAt   string   `json:"expiresAt,omitempty"`
+	UsageLimit  int      `json:"usageLimit,omitempty"`
+	UsedCount   int      `json:"usedCount,omitempty"`
+	Revoked     bool     `json:"revoked,omitempty"`
+	CreatedAt   string   `json:"createdAt,omitempty"`
+	LastUsedAt  string   `json:"lastUsedAt,omitempty"`
+}
+
+const (
+	SetupKeyReusable = "reusable"
+	SetupKeyOneOff   = "one-off"
+)
+
+// SetupKeyValid reports whether a setup key can be used right now.
+func (key SetupKey) SetupKeyValid(now string) bool {
+	if key.Revoked {
+		return false
+	}
+	if key.ExpiresAt != "" && key.ExpiresAt <= now {
+		return false
+	}
+	if key.Type == SetupKeyOneOff {
+		return key.UsedCount < 1
+	}
+	if key.UsageLimit > 0 && key.UsedCount >= key.UsageLimit {
+		return false
+	}
+	return true
+}
+
+// SetupKeyHash computes the stored hash for a plaintext token.
+func SetupKeyHash(token string) []byte {
+	sum := sha256.Sum256([]byte(token))
+	return sum[:]
 }
 
 // Nameserver is a certified DNS resolver that applies to the groups listed in

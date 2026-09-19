@@ -92,6 +92,14 @@ func (seed *Seed) Finalize() {
 		}
 		seed.Managers[index].PeerID = peerID.String()
 	}
+	for index := range seed.SetupKeys {
+		if seed.SetupKeys[index].TokenHash == nil && seed.SetupKeys[index].Token != "" {
+			seed.SetupKeys[index].TokenHash = model.SetupKeyHash(seed.SetupKeys[index].Token)
+		}
+		if seed.SetupKeys[index].Type == "" {
+			seed.SetupKeys[index].Type = model.SetupKeyReusable
+		}
+	}
 }
 
 func (seed Seed) NetworkState() model.NetworkState {

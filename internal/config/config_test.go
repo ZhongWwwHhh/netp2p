@@ -48,7 +48,7 @@ func TestValidateRejectsWrongCommitteeSize(t *testing.T) {
 func TestNetworkStateCopiesConfiguration(t *testing.T) {
 	seed := testSeed()
 	seed.Groups = []model.Group{{ID: "clients-a"}}
-	seed.SetupKeys = []model.SetupKey{{Key: "key-a", Groups: []string{"clients-a"}}}
+	seed.SetupKeys = []model.SetupKey{{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}}}
 	state := seed.NetworkState()
 	if state.NetworkID != seed.NetworkID || state.OverlayCIDR != seed.OverlayCIDR {
 		t.Fatalf("network state mismatch: %+v", state)

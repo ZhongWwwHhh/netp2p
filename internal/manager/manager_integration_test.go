@@ -22,8 +22,8 @@ func TestFourManagerMeshRegistersPeer(t *testing.T) {
 		NextIPOffset: 1,
 		Groups:       []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
 		SetupKeys: []model.SetupKey{
-			{Key: "key-a", Groups: []string{"clients-a"}},
-			{Key: "key-b", Groups: []string{"clients-b"}},
+			{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}},
+			{ID: "key-b", Token: "key-b", TokenHash: model.SetupKeyHash("key-b"), Groups: []string{"clients-b"}},
 		},
 		Policies: []model.Policy{{
 			ID: "allow-a-to-b", SourceGroups: []string{"clients-a"}, DestinationGroups: []string{"clients-b"},
@@ -130,7 +130,7 @@ func TestQuorumSurvivesSingleManagerFailure(t *testing.T) {
 		OverlayCIDR:  "100.64.0.0/24",
 		NextIPOffset: 1,
 		Groups:       []model.Group{{ID: "clients-a"}},
-		SetupKeys:    []model.SetupKey{{Key: "key-a", Groups: []string{"clients-a"}}},
+		SetupKeys:    []model.SetupKey{{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}}},
 	}
 
 	const count = 4
@@ -209,7 +209,7 @@ func TestSubmitWithLeaderDown(t *testing.T) {
 		OverlayCIDR:  "100.64.0.0/24",
 		NextIPOffset: 1,
 		Groups:       []model.Group{{ID: "clients-a"}},
-		SetupKeys:    []model.SetupKey{{Key: "key-a", Groups: []string{"clients-a"}}},
+		SetupKeys:    []model.SetupKey{{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}}},
 	}
 
 	const count = 4

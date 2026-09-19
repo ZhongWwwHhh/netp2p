@@ -34,8 +34,8 @@ func testState() model.NetworkState {
 		NextIPOffset: 1,
 		Groups:       []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
 		SetupKeys: []model.SetupKey{
-			{Key: "key-a", Groups: []string{"clients-a"}},
-			{Key: "key-b", Groups: []string{"clients-b"}},
+			{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}},
+			{ID: "key-b", Token: "key-b", TokenHash: model.SetupKeyHash("key-b"), Groups: []string{"clients-b"}},
 		},
 		Policies: []model.Policy{{
 			ID: "a-to-b", SourceGroups: []string{"clients-a"}, DestinationGroups: []string{"clients-b"},
@@ -265,7 +265,7 @@ func TestRejectInvalidVoteSignature(t *testing.T) {
 // allocation and that a setup key materializes group membership.
 func TestRegisterPeerAllocatesAddressesAndGroups(t *testing.T) {
 	state := testState()
-	state.SetupKeys = append(state.SetupKeys, model.SetupKey{Key: "key-ab", Groups: []string{"clients-a", "clients-b"}})
+	state.SetupKeys = append(state.SetupKeys, model.SetupKey{ID: "key-ab", Token: "key-ab", TokenHash: model.SetupKeyHash("key-ab"), Groups: []string{"clients-a", "clients-b"}})
 	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-1"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +456,7 @@ func TestAdminTransitions(t *testing.T) {
 		t.Fatalf("expected 1 policy after remove, got %d", len(state.Policies))
 	}
 	// Setup key upsert and remove.
-	record := model.SetupKey{Key: "key-c", Groups: []string{"clients-a"}}
+	record := model.SetupKey{ID: "key-c", Token: "key-c", TokenHash: model.SetupKeyHash("key-c"), Groups: []string{"clients-a"}}
 	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertSetupKey, Record: &record}); err != nil {
 		t.Fatal(err)
 	}
@@ -713,7 +713,7 @@ func TestRegisterPeerAssignsDNSLabel(t *testing.T) {
 		NetworkID:   "net-1",
 		OverlayCIDR: "100.64.0.0/24",
 		Groups:      []model.Group{{ID: "clients"}},
-		SetupKeys:   []model.SetupKey{{Key: "key", Groups: []string{"clients"}}},
+		SetupKeys:   []model.SetupKey{{ID: "key", Token: "key", TokenHash: model.SetupKeyHash("key"), Groups: []string{"clients"}}},
 	}
 	transition := model.StateTransition{
 		Type: TransitionRegisterPeer, SetupKey: "key",
