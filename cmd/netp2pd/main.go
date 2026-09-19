@@ -22,6 +22,9 @@ func main() {
 	managerAddr := flag.String("manager", "", "manager libp2p multiaddr")
 	setupKey := flag.String("setup-key", "", "client setup key")
 	packetListen := flag.String("packet-listen", "127.0.0.1:51820", "client userspace UDP packet endpoint")
+	tunName := flag.String("tun", "netp2p0", "client TUN interface name (Linux)")
+	tunMTU := flag.Int("tun-mtu", 1280, "client TUN interface MTU")
+	noTun := flag.Bool("no-tun", false, "force the userspace UDP packet endpoint instead of TUN")
 	statusFile := flag.String("status-file", "", "write client status JSON to this path after login")
 	networkID := flag.String("network", "netp2p-test", "network id")
 	adminToken := flag.String("admin-token", "", "admin auth token from seed")
@@ -46,7 +49,11 @@ func main() {
 		if *managerAddr == "" || *setupKey == "" {
 			log.Fatal("--manager and --setup-key are required for client role")
 		}
-		if err := runClient(ctx, *dataDir, *listen, *managerAddr, *networkID, *setupKey, *packetListen, *statusFile); err != nil {
+		if err := runClient(ctx, clientOptions{
+			dataDir: *dataDir, listenAddr: *listen, managerAddr: *managerAddr,
+			networkID: *networkID, setupKey: *setupKey, packetListen: *packetListen,
+			statusFile: *statusFile, tunName: *tunName, tunMTU: *tunMTU, noTun: *noTun,
+		}); err != nil {
 			log.Fatal(err)
 		}
 		return

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -142,8 +143,46 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	}
 	client.networkMap = networkMap
 	localPeerID := client.node.Host.ID()
+	allowedOverlayIPs := client.allowedOverlayIPsLocked()
 	client.mu.Unlock()
 	client.rememberPeers(snapshot, localPeerID)
+	client.applyRoutes(allowedOverlayIPs)
+}
+
+// allowedOverlayIPsLocked lists the overlay addresses policy currently allows
+// this peer to reach. The caller must hold the client lock.
+func (client *Client) allowedOverlayIPsLocked() []string {
+	result := make([]string, 0, len(client.networkMap.AllowedPeers))
+	for peerID := range client.networkMap.AllowedPeers {
+		for _, record := range client.snapshot.State.Peers {
+			if record.PeerID == peerID && record.OverlayIP != "" {
+				result = append(result, record.OverlayIP)
+				break
+			}
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
+// ReconcileRoutes pushes the current allowed overlay addresses into the kernel
+// routing table. It is called after the device is configured, because the login
+// snapshot is applied before the interface has an address.
+func (client *Client) ReconcileRoutes() {
+	client.mu.RLock()
+	allowed := client.allowedOverlayIPsLocked()
+	client.mu.RUnlock()
+	client.applyRoutes(allowed)
+}
+
+func (client *Client) applyRoutes(overlayIPs []string) {
+	reconciler, ok := client.sink.(packet.RouteReconciler)
+	if !ok {
+		return
+	}
+	if err := reconciler.ReconcileRoutes(overlayIPs); err != nil {
+		log.Printf("overlay route reconcile: %v", err)
+	}
 }
 
 // rememberPeers teaches the libp2p peerstore how to dial overlay peers so that

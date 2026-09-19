@@ -23,6 +23,13 @@ type UserspaceICMP interface {
 	SynthesizeICMP() bool
 }
 
+// RouteReconciler is implemented by sinks backed by a kernel routing table.
+// They must be told which overlay addresses are currently reachable so the
+// operating system sends those destinations into the overlay.
+type RouteReconciler interface {
+	ReconcileRoutes(overlayIPs []string) error
+}
+
 type UDPPacketSink struct {
 	connection *net.UDPConn
 	mu         sync.Mutex

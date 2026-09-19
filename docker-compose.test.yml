@@ -64,3 +64,29 @@ services:
       "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
       "--setup-key", "setup-key-a", "--packet-listen", "127.0.0.1:51820", "--status-file", "/status/client-c.json"]
     volumes: ["./deploy/run:/status"]
+
+  # Real TUN clients. These need NET_ADMIN and /dev/net/tun, so they live
+  # behind the "tun" profile and are not started by the unprivileged default
+  # stack. Traffic is driven with plain ping/nc instead of netp2p-probe.
+  client-a-tun:
+    image: netp2p-test:latest
+    profiles: ["tun"]
+    depends_on: [manager-1]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
+      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
+      "--setup-key", "setup-key-a", "--tun", "netp2p0",
+      "--status-file", "/status/client-a-tun.json"]
+    volumes: ["./deploy/run:/status"]
+  client-b-tun:
+    image: netp2p-test:latest
+    profiles: ["tun"]
+    depends_on: [manager-1]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
+      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
+      "--setup-key", "setup-key-b", "--tun", "netp2p0",
+      "--status-file", "/status/client-b-tun.json"]
+    volumes: ["./deploy/run:/status"]
