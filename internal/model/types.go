@@ -45,6 +45,14 @@ type NetworkSettings struct {
 	JWTGroupsClaimName string `json:"jwtGroupsClaimName,omitempty"`
 	// JWTAllowGroups, when non-empty, restricts access to these IdP groups.
 	JWTAllowGroups []string `json:"jwtAllowGroups,omitempty"`
+	// Link selection tuning. These thresholds parameterise the scoring
+	// function so that relay paths must offer a measurable advantage over
+	// direct connections before clients switch away from P2P.
+	LinkMinBandwidthMbps     float64 `json:"linkMinBandwidthMbps,omitempty"`
+	RelayLatencyAdvantageMs  float64 `json:"relayLatencyAdvantageMs,omitempty"`
+	RelayLossAdvantagePct    float64 `json:"relayLossAdvantagePct,omitempty"`
+	LinkProbeIntervalSeconds int     `json:"linkProbeIntervalSeconds,omitempty"`
+	LinkProbeTimeoutMs       int     `json:"linkProbeTimeoutMs,omitempty"`
 }
 
 // User is an authenticated human identity, mirrored from the IdP.
