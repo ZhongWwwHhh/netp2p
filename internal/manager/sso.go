@@ -206,13 +206,23 @@ func (manager *Manager) checkLoginExpiration(peerID string, claims oidc.Claims, 
 	if err != nil {
 		return "", ""
 	}
-	if !claims.IssuedAt.IsZero() && claims.IssuedAt.After(last) {
-		return "", ""
-	}
-	if now.Sub(last) > time.Duration(days)*24*time.Hour {
+	if loginExpired(days, last, claims.IssuedAt, now) {
 		return protocol.CodeLoginExpired, "login expired; re-authenticate"
 	}
 	return "", ""
+}
+
+// loginExpired decides whether a cached session has outlived the certified
+// window. A token issued after the last recorded login means the client
+// re-authenticated, which restarts the window.
+func loginExpired(days int, lastLogin, issuedAt, now time.Time) bool {
+	if days <= 0 {
+		return false
+	}
+	if !issuedAt.IsZero() && issuedAt.After(lastLogin) {
+		return false
+	}
+	return now.Sub(lastLogin) > time.Duration(days)*24*time.Hour
 }
 
 // shouldRefreshLogin reports whether a routine login should rewrite LastLogin.

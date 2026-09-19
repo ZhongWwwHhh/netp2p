@@ -20,6 +20,9 @@ NetP2P 是一个可管理的去中心化 overlay 网络。项目使用 `github.c
 | `/netp2p/control/login/1.0.0` | 提交身份、OIDC JWT/setup key 与设备信息 |
 | `/netp2p/control/sync/1.0.0` | 请求 certified snapshot 或建立增量同步流 |
 | `/netp2p/control/state-update/1.0.0` | 分发 signed state 和 state proof |
+| `/netp2p/control/admin/1.0.0` | 带凭证的 state transition 提交（CLI / Web 共用一处鉴权） |
+| `/netp2p/web-api/1.0.0` | 浏览器控制台的 HTTP-over-libp2p API |
+| `/netp2p/presence/1.0.0` | committee 之间交换观测在线状态（非认证） |
 | `/netp2p/link/probe/1.0.0` | 采集 RTT、丢包、抖动、带宽估计与路径能力 |
 | `/netp2p/data/frame/1.0.0` | 传输 overlay frame 或服务流量 |
 | `/netp2p/data/quota/1.0.0` | 上报聚合用量，不逐包上报 |
@@ -64,6 +67,27 @@ Client 保留最近 certified snapshot。Manager 短暂不可用时继续使用�
 ### Admin 管理面
 
 libp2p 协议 `/netp2p/control/admin/1.0.0` 接受带静态 token 的 `StateTransition`（upsert/remove group、policy、route、budget、setup key）。Manager 验证 token 后经 BFT Submit 认证，返回 certified snapshot。CLI 通过 `netp2pd --role admin` 提交。
+
+### 权限模型（角色 × 模块 × 操作）
+
+所有控制面写操作都经过同一套矩阵 `internal/auth`，Web 控制台与 admin CLI 共用：
+
+| 角色 | 权限 |
+| --- | --- |
+| `owner` | 全部模块全部操作 |
+| `admin` | peers/groups/policies/routes/dns/nameservers/setup_keys/budgets 全操作；users 读+建+改（不可删）；settings/events/presence 只读 |
+| `network_admin` | 同 admin，但 users 只读 |
+| `auditor` | 全部模块只读 |
+| `usage_viewer` | budgets/events/presence 只读 |
+| `user` | 仅 peers（限定自己的设备）与 settings 只读 |
+
+`StateTransition` 通过 `auth.TransitionPermission` 映射到 `(module, operation)`，`upsert_*` 需要 `update`，`remove_*` 需要 `delete`，用户类 transition 映射到 `users`。静态 admin token 是 break-glass 凭证，映射为 `owner`。
+
+### 去中心化 Manager 的登录
+
+- SSO peer 的登录由 manager 校验 JWT 后转成 `register_user`（首次）或 `update_user_groups`/`update_user_role`（变化时）transition，再提交 `register_peer`；peer 的 groups 由 `setupKey.groups ∪ user.autoGroups` 决定。
+- 登录过期由 `NetworkSettings.LoginExpirationDays` 决定。token 的 `iat` 晚于 `peer.LastLogin` 视为重新认证，刷新窗口；否则超过窗口返回 `Code=login_expired`，client 自动重跑 device flow。
+- 为了防止决策日志被每次 keepalive 撑爆，`LastLogin` 只在距上次记录超过 12 小时时重写一次。
 
 ## Group、Policy 与 Network Map
 
@@ -144,29 +168,49 @@ Peer/relay/gateway 聚合用量后通过 quota protocol 上报。本地执行器
 
 支持 OIDC authorization code + PKCE 和 device authorization flow：
 
-1. client 向 IdP 认证并获得 JWT；
-2. client 通过 libp2p login stream 提交 JWT 和设备公钥绑定；
-3. manager 验证 issuer、audience、signature、expiry、nonce 和 device binding；
-4. manager 从 groups/roles claims 映射到 managed groups；
+1. peer/device 用 device flow，或浏览器用 PKCE；两者都拿到 IdP 的 ID token；
+2. client 通过 libp2p login stream 提交 JWT；
+3. manager 用 `github.com/coreos/go-oidc/v3` 校验 issuer、audience、RS256 签名、expiry 与 JWKS；
+4. manager 从 `groups` claim 映射到 managed groups，`adminGroups` 命中即提升为 `admin`；
 5. membership 变化触发 policy 编译和 NetworkMap 重新发布；
-6. certified signed state 通过 control stream 或 gossipsub 下发。
+6. certified signed state 通过 sync stream 下发。
 
 Setup key 是无人工交互设备的引导凭证，必须有 scope、expiry、使用次数和撤销状态。
+
+### v0 实现
+
+- **peer device flow**：`netp2pd --role client --sso --sso-issuer … --sso-client-id …` 调用 `oauth2.Config.DeviceAuth`，把 verification URI 与 user code 打印到 stderr，然后 `DeviceAccessToken` 轮询直到拿到 ID token，再以该 token 登录；收到 `login_expired` 时自动重跑 device flow。
+- **浏览器 PKCE**：`GET /auth/login` 由 manager 生成 verifier/challenge 并 302 到 IdP；`GET /auth/idp/*` 是 manager 到 issuer 的反向代理（实验室 IdP 的 hostname 只在内网可解析时也可用）；`GET /auth/callback` 用 code + verifier 换取 ID token，再 302 到 `/#id_token=…`。片段不会发给服务器，token 只留在浏览器内存。
+- **用户与组**：`register_user` 由首次登录创建；`jwt-<claim>` 组在 claim 首次出现时创建（`Issued=jwt`、`SSOClaim=<claim>`），JWT 组不能被手工删除；`update_user_groups` 会同步 `Group.UserIDs`/`Group.PeerIDs` 与 `PeerRecord.Groups`。
+- **角色**：`roleClaim` 优先，其次 `adminGroups` 命中为 admin，首个登录用户为 owner，其余为 user。IdP 角色是建议性的：不放行「降级最后一个 owner」这类被 certify 规则拒绝的变更，也不会因此让用户登录失败。
+- **登录过期**：见上一节的 `LoginExpirationDays` 规则。
+- **测试用 IdP**：`internal/oidctest` 提供 discovery/JWKS/device flow/authorization code 的最小实现，`cmd/netp2p-mockidp` 是 Docker 用的薄封装（device flow 自动批准，浏览器用独立 subject）。
+
+## DNS
+
+certified state 中的 `Nameserver` / `DNSZone` / `DNSSettings` 由 manager 下发，client 端 `internal/dns` 在本地监听（默认 `127.0.0.1:53`）：
+
+- 先查 certified zones 的 A 记录，再查自动注册的 peer 名 `<dnsLabel>.<settings.dnsDomain>`（`PeerRecord.DNSLabel` 在注册时确定性分配，冲突追加后缀）；
+- 其余查询按 `MatchDomains` 转发到对本 peer 生效的 certified nameserver，没有匹配则回退到接管前的 host resolver；
+- zone / nameserver 的 `Groups` 与 `DNSSettings.Groups` 按 peer 的 group 过滤；
+- 启用 TUN 且允许时接管 `/etc/resolv.conf`（原文件备份到 `/etc/resolv.conf.netp2p.bak`，SIGTERM/SIGINT 恢复），`--no-dns` / `--dns-manage-resolv-conf=false` 可关闭。
 
 ## 数据面
 
 overlay frame 建立在 libp2p secure stream 上。数据面通过一个统一的 `PacketSink` 接口接入操作系统：
 
-- **UDPPacketSink（v0 默认）**：在本地 `127.0.0.1:51820` 监听 UDP，收发 length-prefixed IPv4 packet。它不依赖 TUN 或 `NET_ADMIN`，可在 WSL、CI 和容器内运行，用于验证数据面。
-- **TUN（规划中）**：Linux 环境下插入同一 `PacketSink` 接口，读取/写回真实 IP packet。TUN 只是操作系统接入层，加密与传输仍由 libp2p 承担。
+- **TUNPacketSink（Linux 默认）**：`/dev/net/tun` + `TUNSETIFF` 创建 `netp2p0`，配置 overlay 地址与 MTU 1280，并把所有 peer 的 `/32` 路由指到该设备。内核对 ICMP 直接应答，不再需要用户态合成。需要 `NET_ADMIN` 与 `/dev/net/tun`，缺失时显式告警并回退 userspace。`--no-tun` 强制 userspace。
+- **UDPPacketSink（兼容模式）**：在本地 `127.0.0.1:51820` 监听 UDP，收发 length-prefixed IPv4 packet。不需要 TUN 或 `NET_ADMIN`，可在 WSL、CI 和容器内运行；`netp2p-probe` 用于替代系统 `ping`。
 
 当前 v0 数据流：
 
 1. 本地 endpoint 收到 IPv4 packet，按目标 overlay IP 查找 `PeerRecord`；
-2. 用 certified state 对 source→destination 方向执行 policy，允许则经 `/netp2p/data/frame/1.0.0` 发给对端；
-3. 接收端校验 `RemotePeer()`、source overlay IP、目标为本机 overlay IP，再按 source→self 方向执行 policy；
-4. 若收到 ICMP echo request，接收端生成 echo reply 并经 frame stream 发回请求方；请求方把 reply 写入本地 endpoint。
+2. 先用 conntrack flow 判断是否为已放行连接的回复；否则用 certified state 对 source→destination 方向执行 policy，允许则经 `/netp2p/data/frame/1.0.0` 发给对端；
+3. 接收端校验 `RemotePeer()`、source overlay IP、目标为本机 overlay IP，再走同样的 flow → policy 判定；
+4. userspace 模式下，若收到 ICMP echo request，接收端生成 echo reply 并经 frame stream 发回请求方；TUN 模式交给内核。
 
-v0 简化：ICMP echo reply 视为已授权请求的响应，通过上述 source 校验后直接投递给本地 endpoint，不再做第二次 policy 检查。否则 `deny B->A` 会连带阻断 `A->B` 的回包。
+Flow 表（`internal/conntrack`）使「请求方向被 allow、回复方向被 deny」的连接仍能工作：reply 只需匹配一个本机已观测过的 flow，不必要求镜像 policy。
 
-Frame payload 是原始 IPv4 packet，外层使用 `Envelope{protocol, payload}` JSON 封装；加密与完整性由 libp2p secure channel 保证。后续迭代会引入显式 frame header（network id、source/destination PeerID、flow id、path id、epoch）与逐 flow 的路径选择。
+数据面不再每包开一条 stream，也不再使用 JSON/base64：`internal/transport.FrameConn` 为每个远端 peer 维持一条长连接，二进制分帧为 `4 字节大端长度 + payload`，写入走有界发送队列（默认 1024，满则按 flow 丢弃并计数），断开后指数退避重连（250ms 起，上限 5s）。控制协议（login/sync/admin/presence/web）继续使用 `Envelope{protocol, payload}` JSON。
+
+加密与完整性由 libp2p secure channel 保证，不需要在 frame 层重复加密。

@@ -14,6 +14,9 @@ genesis → login → sync → frame 数据面，覆盖：
 - `deny B -> A` 方向超时；
 - 停掉 1 个 manager 后剩余 3 个仍能认证新 peer（quorum）；
 - 篡改 state 或删减 QC 签名的 snapshot 被拒绝。
+- SSO device flow：mock IdP 签发 ID token → `register_user` → `upsert_group`（JWT 组）→ peer 绑定 user 且 groups 含 `jwt-eng`。
+
+`internal/oidc`、`internal/web` 另有单元测试覆盖 device flow + 真实 verifier、PKCE 反向代理全链路（login → authorize → callback → verifier 验证）与权限矩阵。
 
 ## Docker E2E
 
@@ -32,6 +35,38 @@ scripts/e2e.sh
 5. 停止 `manager-4` 后启动 `client-c`，验证 height ≥ 4 的新 certified state。
 
 `NETP2P_E2E_KEEP=1 scripts/e2e.sh` 保留容器便于排查；默认退出时 `down -v` 清理。
+
+## Docker：TUN、SSO 与控制台
+
+```bash
+# TUN 客户端（需要 --device /dev/net/tun 与 --cap-add NET_ADMIN）
+sudo -n docker compose --env-file deploy/compose.env -f docker-compose.test.yml --profile tun up -d client-a-tun client-b-tun
+sudo -n docker exec netp2p-client-a-tun-1 ping -c 3 100.64.0.2   # overlay 地址按 deploy/run/*.json 为准
+
+# SSO：mock IdP + device flow 客户端
+sudo -n docker compose --env-file deploy/compose.env -f docker-compose.test.yml --profile sso up -d mock-idp client-sso
+sudo -n docker logs netp2p-client-sso-1        # 会打印 verification URI 与 user code（mock 自动批准）
+
+# 浏览器控制台
+#   http://127.0.0.1:8080  → “Sign in with SSO” 走 PKCE（经 manager 的 /auth 代理）
+#   或输入 admin token netp2p-admin-v0
+```
+
+控制台验证要点：
+
+- `/users` 列出 SSO 用户、角色与 auto groups；`/settings` 的 Session 卡片显示角色与 IdP issuer。
+- 首个登录用户为 `owner`；后续非 `netp2p-admins` 组的用户为 `user`，写操作按钮被隐藏且服务端返回 403。
+- 停掉 1 个 manager 后仍可写入；`GET /api/v1/activity` 的每条记录都能用 snapshot 内 committee 公钥验证。
+
+生成 Docker 栈需要重新构建镜像（前端已嵌进 manager binary）：
+
+```bash
+cd ui && npm run build && cd ..
+sudo -n docker build -t netp2p-test:latest .
+```
+
+迭代调试时不必整镜像重建：`CGO_ENABLED=0 go build -o /tmp/netp2pd ./cmd/netp2pd`，
+再 `docker cp /tmp/netp2pd <container>:/usr/local/bin/netp2pd && docker restart <container>`。
 
 ## 手动运行
 

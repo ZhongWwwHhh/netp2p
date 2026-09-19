@@ -19,7 +19,9 @@
 - [x] 静态 seed、setup key 注册、overlay IP 分配、login/sync 骨架。
 - [x] 无 TUN userspace UDP packet endpoint、IPv4/ICMP codec 和用户态 probe。
 - [x] 两节点端到端数据面验收：policy 允许的 ICMP echo 收到 reply，deny 方向超时（Go 进程内 E2E + Docker E2E）。
-- [ ] TUN 接入（Linux 环境），复用同一 `PacketSink` 接口。
+- [x] TUN 接入（Linux），复用同一 `PacketSink` 接口：`/dev/net/tun` + 路由 reconcile + MTU 1280，缺失时回退 userspace。
+- [x] 持久化二进制帧通道（`4 字节长度 + IPv4 payload`）替换「每包一条 stream + JSON/base64」。
+- [x] TCP/UDP 端口解析接入 policy，flow 表让请求/回复方向各自独立判定。
 
 ## Phase 2：中心式过渡 Manager
 
@@ -27,8 +29,12 @@
 - [x] group/policy/route/budget/setup key 动态 upsert/remove。
 
 - [ ] Network/user/device/group/policy/route CRUD。
-- [ ] OIDC PKCE、device flow、setup key 和撤销。
-- [ ] JWT groups 到 managed groups 的映射。
+- [x] OIDC device flow（peer）与 PKCE（浏览器，经 manager 反向代理）登录。
+- [x] JWT groups 到 managed groups 的映射，user 记录进入 certified state，peer 绑定 user。
+- [x] 完整角色模型（owner/admin/network_admin/auditor/usage_viewer/user）× 模块 × 操作矩阵。
+- [x] 登录过期（`LoginExpirationDays`）与客户端自动重新认证。
+- [x] 本地 DNS 解析器：certified zone、peer 名自动注册、MatchDomains 转发、resolv.conf 接管/恢复。
+- [ ] setup key 的 scope/expiry/使用次数与撤销。
 - [x] sync 流下发 certified snapshot，client 长轮询并重连（`handleSync` + `SyncLoop`）。
 - [x] incremental update 与 decision log 追平（`Engine.Activity` + `/api/v1/activity`）。
 - [x] 控制面 Web 控制台：NetBird 式多页布局、深链接、浅色主题。
@@ -59,5 +65,6 @@
 ## Phase 6：生产化
 
 - [ ] committee reconfiguration、key rotation、灾难恢复。
+- [ ] threshold signature（当前为 2f+1 个独立 Ed25519 签名）。
 - [ ] metrics、tracing、审计、告警与混沌测试。
 - [ ] 多平台客户端、安装器、协议版本升级与安全审计。

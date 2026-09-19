@@ -10,7 +10,7 @@
 | 分区 | 页面 | 数据来源 |
 | --- | --- | --- |
 | Control Center | Peers | 认证元数据 + 观测在线状态 |
-| Access Control | Policies / Groups / Setup Keys | certified state |
+| Access Control | Policies / Groups / Setup Keys / Users | certified state |
 | Network Routing | Routes / Traffic Budgets | certified state |
 | DNS | Nameservers / Zones / DNS Settings | certified state |
 | BFT | Committee / Activity | committee 与认证决策日志 |
@@ -53,11 +53,26 @@ compose 把四个 manager 的 web 端口分别映射到 8080–8083，便于对�
    确认 round 轮换后仍然 commit，且 Activity 中新条目的 `round` 大于 0。
 7. 重新启动被停掉的 manager，确认其 height 追平多数派。
 
+## SSO 登录与权限
+
+manager 的 bootstrap 监听额外提供三个仅用于登录的端点（不修改任何状态）：
+
+- `GET /auth/login`：生成 PKCE verifier/challenge 并跳转到 IdP；
+- `GET /auth/idp/*`：到 issuer 的反向代理，让只在内网可解析的 IdP 也能被浏览器使用；
+- `GET /auth/callback`：用 code 换 ID token，再 302 到 `/#id_token=…`。
+
+验证步骤：
+
+1. 启动 mock IdP：`docker compose --env-file deploy/compose.env -f docker-compose.test.yml --profile sso up -d mock-idp`。
+2. 打开 `http://127.0.0.1:8080/`，点击 “Sign in with SSO”，应自动完成 PKCE 并进入控制台。
+3. `/settings` 的 Session 卡片显示用户与角色；`/users` 列出该用户和 device-flow 用户。
+4. 用非 `netp2p-admins` 组登录时角色为 `user`：写操作按钮隐藏，直接调用写接口返回 403。
+
 ## 已知限制
 
 - DNS 只做控制面：nameserver / zone / settings 会随 certified snapshot 下发，
-  但客户端不修改系统 DNS，需要等 TUN / split-DNS 层。
-- 静态 admin token 是 v0 方案，尚无 OIDC 与细粒度 RBAC。
+  客户端本地解析器已生效，但系统 DNS 接管仅在 TUN 模式且允许时进行。
+- 静态 admin token 仍是 break-glass 凭证（映射为 owner）；SSO 用户按角色矩阵授权。
 - 浏览器通过 libp2p WebRTC-direct 直连 manager，跨 NAT 场景需要 manager 具备
   公网可达地址，TURN / circuit relay 尚未接入。
 - 投票与快照的线格式已包含 transition hash，因此 4 个 manager 必须同版本运行。
