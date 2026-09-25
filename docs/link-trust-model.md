@@ -318,6 +318,23 @@ A -> M1 -> M2 -> B
 
 manager committee 不能强迫 client 使用实测失败路径；client 也不能绕过 committee 选择未经认证的多跳路径。
 
+## 成本模型与 Flow Class
+
+多跳路径的唯一排序仍由 `internal/path.Score` 产生，本轮把成本维度显式化：
+
+- 每个 `PathSpec` 记录 `Cost`，等于沿路每跳 forwarding 成本之和。单跳成本由 certified `TrafficBudget.ForwardingCostLimit`、manager 负载与 hop 数共同决定，hop 越多成本越高，成本会否决那些只是"略微更快"却要多绕两跳的候选。
+- `Route` 与 `Policy` 新增 `FlowClass`，取值 `latency` / `throughput` / `reliability` / `cost`。它切换 `path.Score` 的权重：
+
+  | Flow class | RTT 权重 | 吞吐权重 | 可靠性权重 | 成本权重 |
+  | --- | --- | --- | --- | --- |
+  | `latency`（默认） | 主导 | 低 | 中 | 低 |
+  | `throughput` | 中 | 主导 | 中 | 低 |
+  | `reliability` | 中 | 低 | 主导 | 中 |
+  | `cost` | 中 | 中 | 中 | 主导 |
+
+- 网络默认由 certified `NetworkSettings.DefaultFlowClass` 给出，route/policy 可覆盖。权重和归一化参数全部来自 certified state，因此所有 manager 对同一输入给出同一排序。
+- 成本维度只影响"选路"，不代替配额执行：真正的限速与阻断由 `internal/quota` 在数据面执行，成本高的路径即使被选中也会在转发时受 `ForwardingCostLimit` 约束。
+
 ## EigenSpeed 计算位置
 
 ### v1

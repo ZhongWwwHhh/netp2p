@@ -15,8 +15,28 @@ genesis → login → sync → frame 数据面，覆盖：
 - 停掉 1 个 manager 后剩余 3 个仍能认证新 peer（quorum）；
 - 篡改 state 或删减 QC 签名的 snapshot 被拒绝。
 - SSO device flow：mock IdP 签发 ID token → `register_user` → `upsert_group`（JWT 组）→ peer 绑定 user 且 groups 含 `jwt-eng`。
+- BLS 阈值 QC：3 个分片可聚合验证、2 个失败、篡改 `stateHash`/`transitionHash` 或错群公钥失败。
+- committee 在线替换成员 / 轮换密钥后新 epoch 继续出块；旧 epoch 投票与快照被拒绝。
+- 配额：token bucket 边界、优先级匹配、throttle 有界、`update_budget_usage` 结算与日/月归零。
+- 多跳：planner 产生 1..N 跳候选、`Cost` tie-break、超 hop 拒绝、重复 hop（loop）拒绝。
+- via-manager 数据面：certified assignment 驱动 `A -> M -> B` 转发成功且 `dropped == 0`。
 
 `internal/oidc`、`internal/web` 另有单元测试覆盖 device flow + 真实 verifier、PKCE 反向代理全链路（login → authorize → callback → verifier 验证）与权限矩阵。
+
+## 混沌测试（`internal/chaos`）
+
+`internal/chaos.Controller` 在 libp2p 发送路径上注入确定性故障（`p2p.Node.SetSendHook`），可在单进程内复现真实网络故障而无需真机抖动：
+
+- `Partition(peerID)` 丢弃发往该 peer 的消息；`Isolate(peerID)` 双向切断（同时丢弃该 peer 的出站）。
+- `Fault{Protocol, Loss, Duplicate, Delay}` 按协议过滤做丢包 / 重放 / 延迟。
+- `Stats()` 暴露 dropped / duplicated / delayed 计数，供断言。
+
+`internal/e2e/chaos_test.go` 覆盖：隔离 1 个 manager 后剩余 3 个仍认证新高度且被隔离者落后；恢复后经单步 `sync_request` catch-up 追平且 state hash 一致；重放全部 committee 消息不破坏共识；隔离下一高度 leader 后 committee 轮换到存活 leader 继续出块。
+
+```bash
+go test ./internal/chaos/...
+go test ./internal/e2e -run TestChaos -v
+```
 
 ## Docker E2E
 
@@ -32,7 +52,9 @@ scripts/e2e.sh
 2. 构建 `netp2p-test:latest` 镜像；
 3. 启动 4 个 manager + `client-a`/`client-b`，从 `deploy/run/*.json` 读取 overlay IP；
 4. 验证 `client-a -> client-b` 的 ICMP 收到 reply，反向被 deny；
-5. 停止 `manager-4` 后启动 `client-c`，验证 height ≥ 4 的新 certified state。
+5. 停止 `manager-4` 后启动 `client-c`，验证 height ≥ 4 的新 certified state；
+6. 断言 `client-a` 的 status 文件包含 certified `assignments`（`kind` ∈ `direct`/`via_manager`）与递增 `height`；
+7. 从宿主抓取 `manager-1` 的 `http://127.0.0.1:9100/metrics`，断言存在 `netp2p_bft_height` 与 `netp2p_forward_*` 指标。
 
 `NETP2P_E2E_KEEP=1 scripts/e2e.sh` 保留容器便于排查；默认退出时 `down -v` 清理。
 

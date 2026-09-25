@@ -6,7 +6,7 @@
 - [x] 确定不使用 WireGuard 传输/加密。
 - [x] 定义 protocol IDs、policy/route/quota/network map 核心对象。
 - [x] 定义 BFT certified state 与 client 验证模型。
-- [ ] 输出 protobuf/CDDL schema 与 state transition 图（当前用 canonical JSON）。
+- [x] 输出 protobuf schema（`proto/netp2p/v1`，deterministic 编码替代 canonical JSON）与 mermaid state transition 图（见 `docs/architecture.md`）。
 
 ## Phase 1：libp2p MVP
 
@@ -28,7 +28,7 @@
 - [x] admin CLI + libp2p admin 协议（token 鉴权 → BFT transition → 认证 snapshot）。
 - [x] group/policy/route/budget/setup key 动态 upsert/remove。
 
-- [ ] Network/user/device/group/policy/route CRUD。
+- [x] Network/user/device/group/policy/route CRUD（Web 控制台 + admin CLI，同一权限矩阵）。
 - [x] OIDC device flow（peer）与 PKCE（浏览器，经 manager 反向代理）登录。
 - [x] JWT groups 到 managed groups 的映射，user 记录进入 certified state，peer 绑定 user。
 - [x] 完整角色模型（owner/admin/network_admin/auditor/usage_viewer/user）× 模块 × 操作矩阵。
@@ -48,7 +48,8 @@
 - [x] RTT/loss/jitter/bandwidth probe（`/netp2p/link/probe/1.0.0`）：manager 主动测量 mesh 与 client access 链路，有界突发受 `ProbeBandwidthBudgetKB` 约束。
 - [x] EigenSpeed 式 manager mesh 链路观测网与 client 不可信隔离：trimmed median + 幂迭代主特征向量 + 离群降权，access 段独立于 mesh 矩阵。
 - [x] 评分收敛到 `internal/path.Score`（删除 `link.directScore`），未知带宽不再被硬排除；scheduler 对指标抖动做容差抑制。
-- [ ] flow class 用户可选、路径持久化热备。
+- [x] flow class 用户可选（`Route`/`Policy.FlowClass` + `NetworkSettings.DefaultFlowClass` 接入 `path.Score` 权重）。
+- [ ] 路径持久化 hot-standby（重启后恢复 last-known-good path）。
 - [x] 取消 relay 身份，manager 成为 client/决策/转发/UI 超集。
 - [x] BFT certified RouteAssignment：manager committee 规划 primary/fallback path。
 - [x] via-manager forwarding data plane 与 client end-to-end admission（客户端严格按 certified primary→fallback 选路，manager 按上一跳身份转发并计数）。
@@ -60,17 +61,21 @@
 - [x] decision log（committed map 查询）、落后/重启 manager catch-up。
 - [x] view change：Submit 轮换 round，leader 宕机后仍能出块。
 - [x] 决策日志认证：transition hash 纳入投票签名，snapshot 携带 transition 与 leader。
-- [ ] threshold signature、committee reconfiguration。
+- [x] threshold signature（BLS12-381 分片聚合 QC）。
+- [x] committee reconfiguration（在线替换成员、密钥轮换、epoch 校验）。
 
 ## Phase 5：多跳与配额
 
-- [ ] multi-hop planner 与 relay/gateway 候选池。
-- [ ] token bucket、峰值速率、burst 与成本限制。
-- [ ] committee 权威配额状态和聚合用量结算。
+- [x] multi-hop planner（简单路径枚举、无 loop、`MaxHops`、每跳成本与 `Cost` tie-break）。
+- [x] token bucket、峰值速率、burst 与成本限制（双端执行 + 有界 throttle）。
+- [x] committee 权威配额状态和聚合用量结算（`update_budget_usage`，结算频率硬上限 60s，日/月确定性归零）。
 
 ## Phase 6：生产化
 
-- [ ] committee reconfiguration、key rotation、灾难恢复。
-- [ ] threshold signature（当前为 2f+1 个独立 Ed25519 签名）。
-- [ ] metrics、tracing、审计、告警与混沌测试。
-- [ ] 多平台客户端、安装器、协议版本升级与安全审计。
+- [x] committee reconfiguration、key rotation、灾难恢复（`docs/upgrade.md`）。
+- [x] threshold signature（BLS12-381，替代 2f+1 独立 Ed25519 签名）。
+- [x] metrics、审计、混沌测试（`internal/metrics`、`/api/v1/events`、`internal/chaos`）。
+- [ ] tracing（OTLP 可选导出）与告警 webhook（本地规则已可读，导出未接线）。
+- [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
+- [ ] Windows/macOS TUN 实现（当前仅接口抽象与 stub）与第三方安全审计。
+- [ ] threshold DKG（替代种子确定性派生）、billing。
