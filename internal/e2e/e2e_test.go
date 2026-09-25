@@ -12,6 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/client"
+	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
@@ -61,6 +62,20 @@ func newCluster(t *testing.T, state model.NetworkState) *cluster {
 	return newClusterWithConfig(t, state, manager.Config{})
 }
 
+func newForwardingCluster(t *testing.T, state model.NetworkState) *cluster {
+	return newClusterWithConfig(t, state, manager.Config{Forwarding: true})
+}
+
+// forcedViaManagerState removes the direct path entirely so every packet must
+// traverse the certified manager hop.
+func forcedViaManagerState() model.NetworkState {
+	state := testState()
+	state.Settings = model.NetworkSettings{
+		DirectPathEnabled: false, ViaManagerEnabled: true, MaxManagerHops: 2,
+	}
+	return state
+}
+
 func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager.Config) *cluster {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -79,7 +94,12 @@ func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager
 		if err != nil {
 			t.Fatal(err)
 		}
-		group.members[index] = model.CommitteeMember{ID: managerName(index), PeerID: peerID.String(), KeySeed: seed}
+		group.members[index] = model.CommitteeMember{
+			ID: managerName(index), PeerID: peerID.String(), KeySeed: seed,
+			// Committee members forward by default so via-manager paths are
+			// valid certified state.
+			ForwardingEnabled: true,
+		}
 	}
 	for index := range group.members {
 		node, err := p2p.New(ctx, p2p.Config{IdentitySeed: group.members[index].KeySeed, WebRTCListen: []string{"/ip4/127.0.0.1/udp/0/webrtc-direct"}})
@@ -105,6 +125,9 @@ func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager
 		group.engines = append(group.engines, engine)
 		group.meshes = append(group.meshes, mesh)
 		group.managers = append(group.managers, manager.New(group.nodes[index], engine, mesh, config))
+		if config.Forwarding {
+			group.managers[index].EnableForwarding(ctx)
+		}
 	}
 	for _, mesh := range group.meshes {
 		if err := mesh.Connect(ctx); err != nil {
@@ -249,6 +272,94 @@ func TestOverlayProbeRespectsPolicy(t *testing.T) {
 
 	if _, err := probe(t, sinkB, overlayB, overlayA, 2*time.Second); err == nil {
 		t.Fatal("B->A probe succeeded despite deny policy")
+	}
+}
+
+// TestViaManagerForwardsOverlayProbe proves the data plane honours a certified
+// via-manager assignment: with no direct path certified, an ICMP echo request
+// and its reply must both traverse the manager, and the manager must not drop
+// either frame.
+func TestViaManagerForwardsOverlayProbe(t *testing.T) {
+	group := newForwardingCluster(t, forcedViaManagerState())
+	address := group.members[0].Address
+	hopPeerID := group.members[0].PeerID
+
+	clientA, sinkA := newTestClient(t, 231, address, keyA)
+	clientB, _ := newTestClient(t, 232, address, keyB)
+	waitForPeers(t, clientA, 2)
+	waitForPeers(t, clientB, 2)
+
+	sourceID := clientA.Self().PeerID
+	destinationID := clientB.Self().PeerID
+	viaPath := func(source, destination string) model.RouteAssignment {
+		return model.RouteAssignment{
+			ID: link.AssignmentID(source, destination), NetworkID: networkID,
+			SourcePeerID: source, DestinationPeerID: destination, Epoch: 1,
+			Primary: model.PathSpec{
+				ID:   link.AssignmentID(source, destination) + "-via-" + hopPeerID,
+				Kind: model.PathKindViaManager, ManagerHops: []string{hopPeerID},
+			},
+			UpdatedAt: time.Now().UTC(), RequiresAdmission: true,
+		}
+	}
+	// Assignments are directed, so both directions need one.
+	outbound := viaPath(sourceID, destinationID)
+	inbound := viaPath(destinationID, sourceID)
+	height := uint64(0)
+	for _, assignment := range []model.RouteAssignment{outbound, inbound} {
+		snapshot, err := group.meshes[0].Submit(model.StateTransition{
+			Type: bft.TransitionUpdateAssignment, Assignment: &assignment,
+		})
+		if err != nil {
+			t.Fatalf("submit assignment %s: %v", assignment.ID, err)
+		}
+		height = snapshot.Height
+	}
+	for _, netClient := range []*client.Client{clientA, clientB} {
+		deadline := time.Now().Add(15 * time.Second)
+		for netClient.SnapshotHeight() < height && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if netClient.SnapshotHeight() < height {
+			t.Fatalf("client did not sync certified assignment height %d", height)
+		}
+		certified := make(map[string]model.RouteAssignment)
+		for _, assignment := range netClient.Snapshot().State.Assignments {
+			certified[assignment.ID] = assignment
+		}
+		// Both directions must be certified: the request needs A->B and the
+		// synthesized reply needs B->A.
+		for _, want := range []model.RouteAssignment{outbound, inbound} {
+			got, ok := certified[want.ID]
+			if !ok {
+				t.Fatalf("certified state is missing assignment %s", want.ID)
+			}
+			if got.Primary.Kind != model.PathKindViaManager {
+				t.Fatalf("certified primary is not via-manager: %+v", got.Primary)
+			}
+			if len(got.Primary.ManagerHops) != 1 || got.Primary.ManagerHops[0] != hopPeerID {
+				t.Fatalf("certified hop is not the manager PeerID: %+v", got.Primary.ManagerHops)
+			}
+			// No direct path may exist, otherwise the client could bypass the
+			// manager and the forwarding assertion below would be vacuous.
+			for _, path := range append([]model.PathSpec{got.Primary}, got.Fallbacks...) {
+				if path.Kind == model.PathKindDirect {
+					t.Fatalf("direct path certified in a via-manager-only state: %+v", path)
+				}
+			}
+		}
+	}
+
+	ok, err := probe(t, sinkA, clientA.Self().OverlayIP, clientB.Self().OverlayIP, 10*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("A->B via-manager probe failed: ok=%v err=%v", ok, err)
+	}
+	forwarded, dropped := group.managers[0].ForwardingStats()
+	if forwarded == 0 {
+		t.Fatal("manager never forwarded a frame; the probe did not use the certified path")
+	}
+	if dropped != 0 {
+		t.Fatalf("manager dropped %d frames while forwarding", dropped)
 	}
 }
 
