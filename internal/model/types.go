@@ -6,12 +6,13 @@ import (
 )
 
 type CommitteeMember struct {
-	ID         string `json:"id"`
-	PeerID     string `json:"peerId"`
-	Address    string `json:"address"`
-	KeySeed    int64  `json:"keySeed,omitempty"`
-	PublicKey  []byte `json:"publicKey,omitempty"`
-	ListenAddr string `json:"listenAddr,omitempty"`
+	ID                string `json:"id"`
+	PeerID            string `json:"peerId"`
+	Address           string `json:"address"`
+	KeySeed           int64  `json:"keySeed,omitempty"`
+	PublicKey         []byte `json:"publicKey,omitempty"`
+	ListenAddr        string `json:"listenAddr,omitempty"`
+	ForwardingEnabled bool   `json:"forwardingEnabled"`
 }
 
 type PeerRecord struct {
@@ -53,6 +54,78 @@ type NetworkSettings struct {
 	RelayLossAdvantagePct    float64 `json:"relayLossAdvantagePct,omitempty"`
 	LinkProbeIntervalSeconds int     `json:"linkProbeIntervalSeconds,omitempty"`
 	LinkProbeTimeoutMs       int     `json:"linkProbeTimeoutMs,omitempty"`
+	ViaManagerEnabled        bool    `json:"viaManagerEnabled,omitempty"`
+	DirectPathEnabled        bool    `json:"directPathEnabled,omitempty"`
+	MaxManagerHops           int     `json:"maxManagerHops,omitempty"`
+	ProbeBandwidthBudgetKB   int     `json:"probeBandwidthBudgetKb,omitempty"`
+}
+
+type PathKind string
+
+const (
+	PathKindDirect     PathKind = "direct"
+	PathKindViaManager PathKind = "via_manager"
+	PathKindMultiHop   PathKind = "multi_hop"
+)
+
+type PathSpec struct {
+	ID              string   `json:"id"`
+	Kind            PathKind `json:"kind"`
+	ManagerHops     []string `json:"managerHops,omitempty"`
+	RTTMilliseconds float64  `json:"rttMilliseconds"`
+	LossPercent     float64  `json:"lossPercent"`
+	BandwidthMbps   float64  `json:"bandwidthMbps"`
+	Confidence      float64  `json:"confidence"`
+}
+
+func (path PathSpec) Normalized() PathSpec {
+	if path.ID == "" {
+		path.ID = string(path.Kind)
+	}
+	path.ManagerHops = dedupe(path.ManagerHops)
+	return path
+}
+
+func dedupe(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+type RouteAssignment struct {
+	ID                string     `json:"id"`
+	NetworkID         string     `json:"networkId"`
+	SourcePeerID      string     `json:"sourcePeerId"`
+	DestinationPeerID string     `json:"destinationPeerId"`
+	Epoch             uint64     `json:"epoch"`
+	Primary           PathSpec   `json:"primary"`
+	Fallbacks         []PathSpec `json:"fallbacks"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+	RequiresAdmission bool       `json:"requiresAdmission"`
+}
+
+// Paths returns the primary followed by fallbacks in certified order.
+func (assignment RouteAssignment) Paths() []PathSpec {
+	result := make([]PathSpec, 0, len(assignment.Fallbacks)+1)
+	result = append(result, assignment.Primary)
+	result = append(result, assignment.Fallbacks...)
+	return result
 }
 
 // User is an authenticated human identity, mirrored from the IdP.
@@ -165,6 +238,7 @@ type StateTransition struct {
 	DNSSettings *DNSSettings     `json:"dnsSettings,omitempty"`
 	User        *User            `json:"user,omitempty"`
 	Settings    *NetworkSettings `json:"settings,omitempty"`
+	Assignment  *RouteAssignment `json:"assignment,omitempty"`
 	TargetID    string           `json:"targetId,omitempty"`
 }
 
@@ -189,20 +263,30 @@ type SignedSnapshot struct {
 }
 
 type NetworkState struct {
-	NetworkID    string          `json:"networkId"`
-	OverlayCIDR  string          `json:"overlayCidr"`
-	Peers        []PeerRecord    `json:"peers"`
-	Users        []User          `json:"users"`
-	Groups       []Group         `json:"groups"`
-	Policies     []Policy        `json:"policies"`
-	Routes       []Route         `json:"routes"`
-	Budgets      []TrafficBudget `json:"budgets"`
-	SetupKeys    []SetupKey      `json:"setupKeys"`
-	Nameservers  []Nameserver    `json:"nameservers"`
-	Zones        []DNSZone       `json:"zones"`
-	DNSSettings  DNSSettings     `json:"dnsSettings"`
-	Settings     NetworkSettings `json:"settings"`
-	NextIPOffset uint32          `json:"nextIpOffset"`
+	NetworkID    string            `json:"networkId"`
+	OverlayCIDR  string            `json:"overlayCidr"`
+	Peers        []PeerRecord      `json:"peers"`
+	Users        []User            `json:"users"`
+	Groups       []Group           `json:"groups"`
+	Policies     []Policy          `json:"policies"`
+	Routes       []Route           `json:"routes"`
+	Budgets      []TrafficBudget   `json:"budgets"`
+	SetupKeys    []SetupKey        `json:"setupKeys"`
+	Nameservers  []Nameserver      `json:"nameservers"`
+	Zones        []DNSZone         `json:"zones"`
+	DNSSettings  DNSSettings       `json:"dnsSettings"`
+	Settings     NetworkSettings   `json:"settings"`
+	Assignments  []RouteAssignment `json:"assignments"`
+	NextIPOffset uint32            `json:"nextIpOffset"`
+
+	// EngineCommittee is runtime-only context supplied by BFT. It is never
+	// marshalled into certified state because the authoritative committee list
+	// lives on SignedSnapshot.
+	EngineCommittee []CommitteeMember `json:"-"`
+}
+
+type engineContext struct {
+	EngineCommittee []CommitteeMember `json:"-"`
 }
 
 type Effect string

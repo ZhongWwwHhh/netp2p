@@ -55,6 +55,31 @@ func (seed Seed) Validate() error {
 	if len(seed.Managers) != 4 {
 		return fmt.Errorf("v0 requires exactly 4 committee managers, got %d", len(seed.Managers))
 	}
+	for index := range seed.Managers {
+		seed.Managers[index].ForwardingEnabled = seed.Managers[index].ForwardingEnabled || true
+	}
+	known := make(map[string]struct{}, len(seed.Managers))
+	for _, manager := range seed.Managers {
+		known[manager.ID] = struct{}{}
+	}
+	knownPeerIDs := make(map[string]struct{}, len(seed.Managers))
+	for _, manager := range seed.Managers {
+		if manager.PeerID != "" {
+			knownPeerIDs[manager.PeerID] = struct{}{}
+		}
+	}
+	for _, legacyRelay := range seed.Relays {
+		if _, managerKnown := known[legacyRelay.ID]; managerKnown {
+			continue
+		}
+		if legacyRelay.PeerID != "" {
+			if _, peerKnown := knownPeerIDs[legacyRelay.PeerID]; peerKnown {
+				continue
+			}
+		}
+		return fmt.Errorf("unknown legacy relay %q: relay identity was removed; forwarding nodes must be committee managers", legacyRelay.ID)
+	}
+	seed.Relays = nil
 	seen := make(map[string]struct{})
 	for _, manager := range seed.Managers {
 		if manager.ID == "" || manager.Address == "" {
@@ -120,18 +145,18 @@ func (seed Seed) NetworkState() model.NetworkState {
 	}
 }
 
-// RelayAddrInfos converts seed relay entries into libp2p AddrInfo. Entries
-// without a valid multiaddr are skipped; clients that get no relay candidates
-// simply do not enable AutoRelay.
-func (seed Seed) RelayAddrInfos() ([]peer.AddrInfo, error) {
-	result := make([]peer.AddrInfo, 0, len(seed.Relays))
-	for _, relay := range seed.Relays {
-		if relay.PeerID == "" || relay.Address == "" {
+// BootstrapAddrInfos converts forwarding-capable committee managers into the
+// libp2p addresses used for NAT traversal bootstrap. This preserves circuit
+// relay only as a transport helper; it is no longer an overlay identity.
+func (seed Seed) BootstrapAddrInfos() ([]peer.AddrInfo, error) {
+	result := make([]peer.AddrInfo, 0, len(seed.Managers))
+	for _, manager := range seed.Managers {
+		if !manager.ForwardingEnabled || manager.PeerID == "" || manager.Address == "" {
 			continue
 		}
-		addr, err := peer.AddrInfoFromString(relay.Address + "/p2p/" + relay.PeerID)
+		addr, err := peer.AddrInfoFromString(manager.Address + "/p2p/" + manager.PeerID)
 		if err != nil {
-			return nil, fmt.Errorf("invalid relay address %q: %w", relay.Address, err)
+			return nil, fmt.Errorf("invalid manager address %q: %w", manager.Address, err)
 		}
 		result = append(result, *addr)
 	}

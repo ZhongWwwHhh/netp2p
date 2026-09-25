@@ -46,13 +46,13 @@ func runClient(ctx context.Context, options clientOptions) error {
 	if options.seedPath != "" {
 		seed, err := config.Load(options.seedPath)
 		if err != nil {
-			return fmt.Errorf("load seed for relays: %w", err)
+			return fmt.Errorf("load seed for bootstrap managers: %w", err)
 		}
-		relays, err := seed.RelayAddrInfos()
+		bootstrapManagers, err := seed.BootstrapAddrInfos()
 		if err != nil {
 			return err
 		}
-		p2pConfig.StaticRelays = relays
+		p2pConfig.StaticRelays = bootstrapManagers
 	}
 	node, err := p2p.New(ctx, p2pConfig)
 	if err != nil {

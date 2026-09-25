@@ -294,6 +294,7 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 	// surfacing as a generic consensus timeout. Admin and console callers then
 	// get the real reason, such as an unknown group reference.
 	probe := mesh.engine.CurrentState()
+	probe.EngineCommittee = mesh.engine.CommitteeMembers()
 	if err := bft.ApplyTransition(&probe, transition); err != nil {
 		return model.SignedSnapshot{}, err
 	}

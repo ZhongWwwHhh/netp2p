@@ -47,6 +47,8 @@ const (
 	TransitionRemoveUser       = "remove_user"
 	TransitionSetUserBlocked   = "set_user_blocked"
 	TransitionUpdateSettings   = "update_network_settings"
+	TransitionUpdateAssignment = "update_route_assignment"
+	TransitionRemoveAssignment = "remove_route_assignment"
 )
 
 var (
@@ -88,6 +90,15 @@ type Engine struct {
 	votes      map[uint64][]Vote
 	committed  map[uint64]model.SignedSnapshot
 	listeners  []func(model.SignedSnapshot)
+}
+
+func findPeerRecord(state model.NetworkState, peerID string) *model.PeerRecord {
+	for index := range state.Peers {
+		if state.Peers[index].PeerID == peerID {
+			return &state.Peers[index]
+		}
+	}
+	return nil
 }
 
 func SeededPrivateKey(seed int64) ed25519.PrivateKey {
@@ -159,6 +170,7 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	normalized.SetupKeys = append([]model.SetupKey{}, state.SetupKeys...)
 	normalized.Nameservers = append([]model.Nameserver{}, state.Nameservers...)
 	normalized.Zones = append([]model.DNSZone{}, state.Zones...)
+	normalized.Assignments = append([]model.RouteAssignment{}, state.Assignments...)
 	sort.Slice(normalized.Peers, func(i, j int) bool { return normalized.Peers[i].PeerID < normalized.Peers[j].PeerID })
 	sort.Slice(normalized.Users, func(i, j int) bool { return normalized.Users[i].ID < normalized.Users[j].ID })
 	sort.Slice(normalized.Groups, func(i, j int) bool { return normalized.Groups[i].ID < normalized.Groups[j].ID })
@@ -168,6 +180,7 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	sort.Slice(normalized.SetupKeys, func(i, j int) bool { return normalized.SetupKeys[i].ID < normalized.SetupKeys[j].ID })
 	sort.Slice(normalized.Nameservers, func(i, j int) bool { return normalized.Nameservers[i].ID < normalized.Nameservers[j].ID })
 	sort.Slice(normalized.Zones, func(i, j int) bool { return normalized.Zones[i].ID < normalized.Zones[j].ID })
+	sort.Slice(normalized.Assignments, func(i, j int) bool { return normalized.Assignments[i].ID < normalized.Assignments[j].ID })
 	for index := range normalized.Groups {
 		sort.Strings(normalized.Groups[index].UserIDs)
 		sort.Strings(normalized.Groups[index].PeerIDs)
@@ -193,6 +206,18 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 			}
 			return left.Value < right.Value
 		})
+	}
+	for index := range normalized.Assignments {
+		normalized.Assignments[index].Primary = normalized.Assignments[index].Primary.Normalized()
+		sort.Strings(normalized.Assignments[index].Primary.ManagerHops)
+		normalized.Assignments[index].Fallbacks = append([]model.PathSpec{}, normalized.Assignments[index].Fallbacks...)
+		sort.Slice(normalized.Assignments[index].Fallbacks, func(a, b int) bool {
+			return normalized.Assignments[index].Fallbacks[a].ID < normalized.Assignments[index].Fallbacks[b].ID
+		})
+		for pathIndex := range normalized.Assignments[index].Fallbacks {
+			normalized.Assignments[index].Fallbacks[pathIndex] = normalized.Assignments[index].Fallbacks[pathIndex].Normalized()
+			sort.Strings(normalized.Assignments[index].Fallbacks[pathIndex].ManagerHops)
+		}
 	}
 	sort.Strings(normalized.DNSSettings.Groups)
 	return normalized
@@ -371,9 +396,11 @@ func (engine *Engine) Propose(transition model.StateTransition, round uint64) (P
 		return Proposal{}, Vote{}, fmt.Errorf("%w: local=%s leader=%s height=%d", ErrNotLeader, engine.localID, leader.ID, height)
 	}
 	next := cloneState(engine.current)
+	next.EngineCommittee = append([]model.CommitteeMember(nil), engine.committee...)
 	if err := ApplyTransition(&next, transition); err != nil {
 		return Proposal{}, Vote{}, err
 	}
+	next.EngineCommittee = nil
 	proposal := Proposal{Height: height, Round: round, NetworkID: next.NetworkID, State: next, LeaderID: leader.ID, Transition: transition}
 	vote := engine.localVote(proposal)
 	engine.proposals[proposal.Height] = proposal
@@ -411,9 +438,11 @@ func (engine *Engine) ProcessProposal(proposal Proposal) (Vote, error) {
 	// Re-derive the proposed state from the leader's transition so a byzantine
 	// leader cannot ship a state that its own decision log does not justify.
 	expected := cloneState(engine.current)
+	expected.EngineCommittee = append([]model.CommitteeMember(nil), engine.committee...)
 	if err := ApplyTransition(&expected, proposal.Transition); err != nil {
 		return Vote{}, fmt.Errorf("invalid transition: %w", err)
 	}
+	expected.EngineCommittee = nil
 	if !bytes.Equal(StateHash(expected), StateHash(proposal.State)) {
 		return Vote{}, fmt.Errorf("proposal state does not match transition")
 	}
@@ -549,6 +578,7 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 	if state == nil {
 		return fmt.Errorf("nil state")
 	}
+	engineCommittee := state.EngineCommittee
 	switch transition.Type {
 	case TransitionGenesis:
 		return nil
@@ -933,6 +963,68 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		state.Settings = *transition.Settings
 		return nil
+	case TransitionUpdateAssignment:
+		if transition.Assignment == nil || transition.Assignment.ID == "" {
+			return fmt.Errorf("route assignment is required")
+		}
+		assignment := *transition.Assignment
+		if assignment.NetworkID == "" {
+			assignment.NetworkID = state.NetworkID
+		}
+		if assignment.NetworkID != state.NetworkID {
+			return fmt.Errorf("assignment belongs to another network")
+		}
+		if assignment.SourcePeerID == "" || assignment.DestinationPeerID == "" {
+			return fmt.Errorf("assignment source and destination are required")
+		}
+		if assignment.SourcePeerID == assignment.DestinationPeerID {
+			return fmt.Errorf("assignment source and destination must differ")
+		}
+		if findPeerRecord(*state, assignment.SourcePeerID) == nil || findPeerRecord(*state, assignment.DestinationPeerID) == nil {
+			return fmt.Errorf("assignment references unknown peer")
+		}
+		assignment.Primary = assignment.Primary.Normalized()
+		assignment.Fallbacks = append([]model.PathSpec{}, assignment.Fallbacks...)
+		if assignment.Primary.Kind == model.PathKindViaManager || assignment.Primary.Kind == model.PathKindMultiHop {
+			if err := validateManagerPath(engineCommittee, assignment.Primary); err != nil {
+				return err
+			}
+		}
+		for index := range assignment.Fallbacks {
+			assignment.Fallbacks[index] = assignment.Fallbacks[index].Normalized()
+			switch assignment.Fallbacks[index].Kind {
+			case model.PathKindViaManager, model.PathKindMultiHop:
+				if err := validateManagerPath(engineCommittee, assignment.Fallbacks[index]); err != nil {
+					return err
+				}
+			case model.PathKindDirect:
+			default:
+				return fmt.Errorf("unknown path kind %q", assignment.Fallbacks[index].Kind)
+			}
+		}
+		if assignment.UpdatedAt.IsZero() {
+			assignment.UpdatedAt = time.Now().UTC()
+		}
+		for index := range state.Assignments {
+			if state.Assignments[index].ID != assignment.ID {
+				continue
+			}
+			state.Assignments[index] = assignment
+			return nil
+		}
+		state.Assignments = append(state.Assignments, assignment)
+		return nil
+	case TransitionRemoveAssignment:
+		if transition.TargetID == "" {
+			return fmt.Errorf("targetId is required")
+		}
+		for index := range state.Assignments {
+			if state.Assignments[index].ID == transition.TargetID {
+				state.Assignments = append(state.Assignments[:index], state.Assignments[index+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("assignment %q not found", transition.TargetID)
 	default:
 		return fmt.Errorf("unknown transition type %q", transition.Type)
 	}
@@ -949,6 +1041,25 @@ func requireGroups(state *model.NetworkState, groups []string) error {
 		}
 		if !found {
 			return fmt.Errorf("unknown group %q", groupID)
+		}
+	}
+	return nil
+}
+
+func validateManagerPath(committee []model.CommitteeMember, path model.PathSpec) error {
+	if len(path.ManagerHops) == 0 {
+		return fmt.Errorf("via-manager path requires at least one manager hop")
+	}
+	for _, hop := range path.ManagerHops {
+		forwarding := false
+		for _, member := range committee {
+			if member.ID == hop && member.ForwardingEnabled {
+				forwarding = true
+				break
+			}
+		}
+		if !forwarding {
+			return fmt.Errorf("manager %q is not a forwarding committee member", hop)
 		}
 	}
 	return nil

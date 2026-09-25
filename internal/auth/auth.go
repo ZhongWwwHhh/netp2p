@@ -28,6 +28,7 @@ const (
 	ModuleUsers       Module = "users"
 	ModuleEvents      Module = "events"
 	ModulePresence    Module = "presence"
+	ModulePaths       Module = "paths"
 )
 
 // Operation is what an identity wants to do to a module.
@@ -54,6 +55,7 @@ var AllModules = []Module{
 	ModuleUsers,
 	ModuleEvents,
 	ModulePresence,
+	ModulePaths,
 }
 
 // AllOperations lists every operation in a stable order.
@@ -99,7 +101,7 @@ func merge(grants ...grant) grant {
 // configModules are the resources an operator manages through the console.
 var configModules = []Module{
 	ModulePeers, ModuleGroups, ModulePolicies, ModuleRoutes,
-	ModuleDNS, ModuleNameservers, ModuleSetupKeys, ModuleBudgets,
+	ModuleDNS, ModuleNameservers, ModuleSetupKeys, ModuleBudgets, ModulePaths,
 }
 
 var matrix = map[string]grant{
@@ -262,6 +264,10 @@ func TransitionPermission(transitionType string) (Module, Operation, bool) {
 		return ModuleUsers, OpUpdate, true
 	case bft.TransitionRemoveUser:
 		return ModuleUsers, OpDelete, true
+	case bft.TransitionUpdateAssignment:
+		return ModulePaths, OpUpdate, true
+	case bft.TransitionRemoveAssignment:
+		return ModulePaths, OpDelete, true
 	}
 	return "", "", false
 }
