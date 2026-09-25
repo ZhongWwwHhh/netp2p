@@ -7,7 +7,7 @@ import { multiaddr } from '@multiformats/multiaddr';
 import { normalizePresence, normalizeSnapshot } from './normalize';
 import { httpResource, joinProtocolPath, resolveProtocolBasePath } from './paths';
 import type {
-  ActivityEntry, AdmissionReport, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
+  ActivityEntry, AdmissionReport, Alert, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
   SessionInfo, Snapshot, StateTransition, User,
 } from './types';
 
@@ -81,6 +81,8 @@ export async function apiClient(bootstrap: Bootstrap) {
       }),
       quota: () => request('/api/v1/quota').then((body) =>
         ((body as { usage?: Budget[] } | null)?.usage ?? [])),
+      alerts: () => request('/api/v1/alerts').then((body) =>
+        ((body as { alerts?: Alert[] } | null)?.alerts ?? [])),
     };
   } catch (caught) {
     try {

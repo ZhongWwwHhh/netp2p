@@ -10,6 +10,15 @@ listen: /ip4/0.0.0.0/udp/4001/quic-v1
 webListen: 0.0.0.0:8080
 metricsListen: 127.0.0.1:9100
 
+# Manager-local operational alerts. They are evaluated per manager and never
+# enter certified state. Without a webhook, transitions are only logged.
+alert:
+  webhook: ""            # e.g. https://hooks.example/netp2p
+  webhookSecret: ""      # optional bearer token for the webhook
+  interval: 15s
+  dropCount: 100         # dropped frames in one interval -> forward_drops
+  dropRatePercent: 5     # dropped share of traffic -> forward_drops
+
 # Client-only settings (ignored by the manager role):
 # manager: /dns4/manager-1/udp/4001/quic-v1/p2p/<peer-id>
 # setupKey: <setup-key>

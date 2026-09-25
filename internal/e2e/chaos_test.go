@@ -3,13 +3,17 @@ package e2e
 import (
 	"bytes"
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/netp2p/netp2p/internal/alerts"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/chaos"
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // waitForCommitteeHeight blocks until every committee engine has adopted at
@@ -149,5 +153,90 @@ func TestChaosLeaderChurn(t *testing.T) {
 	}
 	if snapshot.Height < 2 {
 		t.Fatalf("committed height %d, want >= 2", snapshot.Height)
+	}
+}
+
+// recordingSink captures alert transitions for the chaos assertions.
+type recordingSink struct {
+	mu     sync.Mutex
+	events []alerts.Event
+}
+
+func (sink *recordingSink) Send(_ context.Context, event alerts.Event) error {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.events = append(sink.events, event)
+	return nil
+}
+
+func (sink *recordingSink) rules(status string) map[string]bool {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	found := make(map[string]bool)
+	for _, event := range sink.events {
+		if event.Status == status {
+			found[event.Alert.Rule] = true
+		}
+	}
+	return found
+}
+
+// TestChaosQuorumDegradedAlertFires proves the manager-local alerting reacts to
+// a partition and clears when the member returns. Alerts are not certified, so
+// this asserts observation behavior rather than consensus.
+func TestChaosQuorumDegradedAlertFires(t *testing.T) {
+	controller := chaos.New()
+	group := newClusterWithHook(t, testState(), manager.Config{}, controller.HookFor)
+	waitForCommitteeHeight(t, group, 1)
+
+	sink := &recordingSink{}
+	alerter := alerts.New(alerts.Config{Interval: time.Second}, sink)
+	observer := group.managers[0]
+
+	// Baseline: the mesh is connected, so nothing fires.
+	alerter.Evaluate(t.Context(), observer.AlertInput())
+	if len(alerter.Active()) != 0 {
+		t.Fatalf("healthy committee fired %+v", alerter.Active())
+	}
+
+	// The alert rule reads transport connectivity, so the test must actually
+	// drop the connection rather than only dropping application messages.
+	member := group.members[3]
+	memberPeer, err := peer.Decode(member.PeerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := group.nodes[0].Host.Network().ClosePeer(memberPeer); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		alerter.Evaluate(t.Context(), observer.AlertInput())
+		if len(alerter.Active()) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !sink.rules("firing")[alerts.RuleQuorumDegraded] {
+		t.Fatalf("quorum_degraded did not fire after isolation; active=%+v", alerter.Active())
+	}
+
+	// Redial to clear the observation.
+	if err := group.meshes[0].Connect(t.Context()); err != nil {
+		t.Fatalf("redial: %v", err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		alerter.Evaluate(t.Context(), observer.AlertInput())
+		if len(alerter.Active()) == 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(alerter.Active()) != 0 {
+		t.Fatalf("alert did not resolve after reconnect: %+v", alerter.Active())
+	}
+	if !sink.rules("resolved")[alerts.RuleQuorumDegraded] {
+		t.Fatal("quorum_degraded did not resolve")
 	}
 }

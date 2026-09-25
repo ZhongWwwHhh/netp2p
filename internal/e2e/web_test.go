@@ -307,7 +307,7 @@ func TestWebOperationalEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	paths := []string{"/api/v1/events", "/api/v1/diagnostics", "/api/v1/assignments", "/api/v1/quota"}
+	paths := []string{"/api/v1/events", "/api/v1/diagnostics", "/api/v1/assignments", "/api/v1/quota", "/api/v1/alerts"}
 	for _, path := range paths {
 		request, _ := http.NewRequest(http.MethodGet, path, nil)
 		response, err := client.Do(request)

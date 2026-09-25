@@ -221,6 +221,12 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"usage": server.manager.QuotaUsage()})
+	case request.Method == http.MethodGet && path == "/api/v1/alerts":
+		if !identity.Allows(auth.ModuleDiagnostics, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"alerts": server.manager.ActiveAlerts()})
 	case request.Method == http.MethodGet && path == "/api/v1/schema":
 		writeJSON(writer, http.StatusOK, map[string]string{"protocol": string(p2p.WebAPIProtocol)})
 	case request.Method == http.MethodPost && path == "/api/v1/transitions":
@@ -399,6 +405,7 @@ func (server *Server) diagnostics() map[string]any {
 		"presence":        server.manager.Presence(),
 		"forwarding":      map[string]uint64{"forwarded": forwarded, "dropped": dropped},
 		"quotaUsage":      server.manager.QuotaUsage(),
+		"alerts":          server.manager.ActiveAlerts(),
 		"problems":        problems,
 	}
 }

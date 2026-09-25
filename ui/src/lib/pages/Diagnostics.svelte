@@ -77,6 +77,26 @@
     </section>
 
     <section class="surface p-5">
+      <h2 class="text-sm font-semibold text-slate-900">Active alerts</h2>
+      <p class="mt-1 text-xs text-slate-500">Alerts are evaluated per manager and are not certified state.</p>
+      {#if diagnostics.alerts.length === 0}
+        <p class="mt-2 text-sm text-emerald-700">No active alerts.</p>
+      {:else}
+        <ul class="mt-3 space-y-2">
+          {#each diagnostics.alerts as alert (alert.id)}
+            <li class="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <Badge tone={alert.severity === 'critical' ? 'rose' : 'amber'} label={alert.severity} />
+              <div>
+                <p class="text-sm font-medium text-amber-900">{alert.rule}</p>
+                <p class="text-xs text-amber-800">{alert.summary}</p>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </section>
+
+    <section class="surface p-5">
       <h2 class="text-sm font-semibold text-slate-900">Problems</h2>
       {#if diagnostics.problems.length === 0}
         <p class="mt-2 text-sm text-emerald-700">No problems detected.</p>

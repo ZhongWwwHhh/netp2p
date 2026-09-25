@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	libprotocol "github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/netp2p/netp2p/internal/alerts"
 	"github.com/netp2p/netp2p/internal/auth"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/forward"
@@ -44,6 +45,7 @@ type Manager struct {
 	quotaPending   map[string]uint64
 	quotaSettledAt time.Time
 	metrics        *metrics.Metrics
+	alerts         *alerts.Alerter
 	lastForwarded  float64
 	lastDropped    float64
 	sso            *oidc.Verifier
@@ -60,6 +62,8 @@ type Config struct {
 	Forwarding bool
 	// Metrics, when set, receives operational counters and gauges.
 	Metrics *metrics.Metrics
+	// Alerts, when set, evaluates local operational rules on a timer.
+	Alerts *alerts.Alerter
 }
 
 func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config) *Manager {
@@ -67,6 +71,7 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 	manager := &Manager{
 		node: node, engine: engine, mesh: mesh, presence: table, sso: config.SSO, links: config.Links,
 		metrics:    config.Metrics,
+		alerts:     config.Alerts,
 		gossiper:   presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
 		admissions: make(map[string]map[string]protocol.AdmissionReport),
 		waiters:    make(map[chan model.SignedSnapshot]struct{}),
@@ -134,6 +139,90 @@ func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
 func (manager *Manager) RunScheduler(ctx context.Context) {
 	scheduler := link.NewScheduler(manager.mesh, manager.engine.CommitteeMembers(), manager.LinkView)
 	scheduler.Run(ctx, manager.engine.CurrentState)
+}
+
+// RunAlerting evaluates the local operational rules on a timer and delivers
+// only state transitions. Alerts are manager-local: they never enter certified
+// state, so a transient condition on one manager cannot fork consensus.
+func (manager *Manager) RunAlerting(ctx context.Context) {
+	if manager.alerts == nil {
+		return
+	}
+	interval := manager.alerts.Interval()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	// Evaluate immediately so a manager that starts already degraded reports it
+	// without waiting a full interval.
+	manager.alerts.Evaluate(ctx, manager.AlertInput())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			manager.alerts.Evaluate(ctx, manager.AlertInput())
+		}
+	}
+}
+
+// ActiveAlerts returns the currently firing alerts, for the console.
+func (manager *Manager) ActiveAlerts() []alerts.Alert {
+	if manager.alerts == nil {
+		return nil
+	}
+	return manager.alerts.Active()
+}
+
+// AlertInput collects the observations the alert rules reason about.
+func (manager *Manager) AlertInput() alerts.Input {
+	state := manager.engine.CurrentState()
+	linkView := manager.LinkView()
+	forwarded, dropped := manager.ForwardingStats()
+	minConfidence := 0.0
+	for index, segment := range linkView.Segments {
+		if index == 0 || segment.Confidence < minConfidence {
+			minConfidence = segment.Confidence
+		}
+	}
+	for index, segment := range linkView.AccessSegments {
+		if len(linkView.Segments) == 0 && index == 0 {
+			minConfidence = segment.Confidence
+			continue
+		}
+		if segment.Confidence < minConfidence {
+			minConfidence = segment.Confidence
+		}
+	}
+	return alerts.Input{
+		Manager:           manager.LocalID(),
+		Height:            manager.Height(),
+		QuorumSize:        bft.QuorumSize,
+		CommitteeSize:     len(manager.engine.CommitteeMembers()),
+		DisconnectedPeers: manager.DisconnectedMembers(),
+		PeerCount:         len(state.Peers),
+		LinkSegments:      len(linkView.Segments) + len(linkView.AccessSegments),
+		MinLinkConfidence: minConfidence,
+		Forwarded:         forwarded,
+		Dropped:           dropped,
+		Budgets:           state.Budgets,
+	}
+}
+
+// DisconnectedMembers lists committee members this manager cannot currently
+// reach. It is an observation, not certified state, so it only feeds local
+// alerting and diagnostics.
+func (manager *Manager) DisconnectedMembers() []string {
+	members := manager.engine.CommitteeMembers()
+	disconnected := make([]string, 0)
+	for _, member := range members {
+		if member.ID == manager.LocalID() {
+			continue
+		}
+		peerID, err := peer.Decode(member.PeerID)
+		if err != nil || manager.node.Host.Network().Connectedness(peerID) != network.Connected {
+			disconnected = append(disconnected, member.ID)
+		}
+	}
+	return disconnected
 }
 
 // ReconcileAssignments runs a single planner pass now and submits at most one

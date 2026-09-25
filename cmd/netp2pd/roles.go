@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/netp2p/netp2p/internal/alerts"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/link"
@@ -21,7 +22,17 @@ import (
 	"github.com/netp2p/netp2p/internal/web"
 )
 
-func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen, metricsListen string, forwarding bool) error {
+// alertOptions carries the alerting configuration resolved from flags and the
+// config file. Alerting is manager-local and independent of certified state.
+type alertOptions struct {
+	webhook         string
+	webhookSecret   string
+	interval        time.Duration
+	dropCount       uint64
+	dropRatePercent float64
+}
+
+func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen, metricsListen string, forwarding bool, alerting alertOptions) error {
 	seed, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -123,7 +134,25 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen,
 			return err
 		}
 	}
-	netManager := manager.New(node, engine, mesh, manager.Config{SSO: sso, Links: linkGossiper, Forwarding: forwarding, Metrics: collector})
+	// Alerts are always evaluated; without a webhook they are written to the
+	// structured log so an operator still sees a record of every transition.
+	alerter := alerts.New(
+		alerts.Config{
+			Interval: alerting.interval,
+			Thresholds: alerts.Thresholds{
+				DropCount:       alerting.dropCount,
+				DropRatePercent: alerting.dropRatePercent,
+			},
+		},
+		alerts.LogSink{},
+		alerts.NewWebhookSink(alerting.webhook, alerting.webhookSecret),
+	)
+	if alerting.webhook != "" {
+		log.Printf("alerting to webhook %s every %s", alerting.webhook, alerting.interval)
+	}
+	netManager := manager.New(node, engine, mesh, manager.Config{
+		SSO: sso, Links: linkGossiper, Forwarding: forwarding, Metrics: collector, Alerts: alerter,
+	})
 	manager.RegisterAdminHandler(node, mesh, seed.AdminToken)
 	netManager.EnableForwarding(ctx)
 	go netManager.RunPresenceGossip(ctx)
@@ -132,6 +161,7 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen,
 	go netManager.RunLinkProbe(ctx)
 	go netManager.RunScheduler(ctx)
 	go netManager.RunQuotaSettlement(ctx)
+	go netManager.RunAlerting(ctx)
 
 	webServer, err := web.NewServer(node, netManager, web.Config{
 		AdminToken: seed.AdminToken, Authenticator: netManager, OIDC: bootstrapOIDC,

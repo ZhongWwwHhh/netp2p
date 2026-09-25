@@ -1,6 +1,6 @@
 import { apiClient } from './libp2p';
 import type {
-  ActivityEntry, AdmissionReport, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
+  ActivityEntry, AdmissionReport, Alert, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
   SessionInfo, Snapshot, StateTransition, User,
 } from './types';
 
@@ -26,4 +26,5 @@ export interface ApiClient {
   diagnostics(): Promise<Diagnostics>;
   assignments(): Promise<AssignmentsView>;
   quota(): Promise<Budget[]>;
+  alerts(): Promise<Alert[]>;
 }

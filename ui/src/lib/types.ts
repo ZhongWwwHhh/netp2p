@@ -188,7 +188,19 @@ export interface Diagnostics {
   presence: Presence[];
   forwarding: { forwarded: number; dropped: number };
   quotaUsage: Budget[];
+  alerts: Alert[];
   problems: string[];
+}
+
+// Alert is a manager-local operational condition. Alerts are not certified:
+// two managers may see different transient state, so the console labels them
+// as observations.
+export interface Alert {
+  id: string;
+  rule: string;
+  severity: 'info' | 'warning' | 'critical';
+  summary: string;
+  firedAt: string;
 }
 
 export interface State {

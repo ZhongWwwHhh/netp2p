@@ -1,5 +1,5 @@
 import { session } from './session.svelte';
-import type { Presence, Snapshot, StateTransition } from '../types';
+import type { Alert, Presence, Snapshot, StateTransition } from '../types';
 
 // Certified state is the authoritative view. Writes replace it with the
 // snapshot returned by the committee, so the UI never shows uncommitted state.
@@ -7,6 +7,7 @@ export const network = $state<{
   snapshot: Snapshot | null;
   presence: Presence[];
   activity: Snapshot[];
+  alerts: Alert[];
   loading: boolean;
   error: string;
   lastRefresh: number;
@@ -14,6 +15,7 @@ export const network = $state<{
   snapshot: null,
   presence: [],
   activity: [],
+  alerts: [],
   loading: false,
   error: '',
   lastRefresh: 0,
@@ -43,6 +45,18 @@ export async function refreshPresence(): Promise<void> {
     network.presence = await client.presence();
   } catch {
     network.presence = [];
+  }
+}
+
+// Alerts are manager-local observations, so a failure here must not surface as
+// a hard error either.
+export async function refreshAlerts(): Promise<void> {
+  const client = session.client;
+  if (!client) return;
+  try {
+    network.alerts = await client.alerts();
+  } catch {
+    network.alerts = [];
   }
 }
 
@@ -82,6 +96,7 @@ export function reset() {
   network.snapshot = null;
   network.presence = [];
   network.activity = [];
+  network.alerts = [];
   network.error = '';
   network.lastRefresh = 0;
 }

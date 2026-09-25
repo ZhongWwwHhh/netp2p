@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/netp2p/netp2p/internal/p2p"
 )
@@ -40,6 +41,11 @@ func main() {
 	adminFile := flag.String("file", "", "JSON record file for upsert actions or target ID for remove actions")
 	adminTarget := flag.String("target", "", "target ID for remove actions")
 	metricsListen := flag.String("metrics-listen", "", "manager Prometheus /metrics address (empty disables metrics)")
+	alertWebhook := flag.String("alert-webhook", "", "manager alert webhook URL (empty logs only)")
+	alertWebhookSecret := flag.String("alert-webhook-secret", "", "bearer token sent to the alert webhook")
+	alertInterval := flag.Duration("alert-interval", 15*time.Second, "manager alert evaluation interval")
+	alertDropCount := flag.Uint64("alert-drop-count", 100, "dropped frames in one interval that fire the forward_drops alert")
+	alertDropRatePercent := flag.Float64("alert-drop-rate-percent", 5, "dropped share of traffic that fires the forward_drops alert")
 	configFile := flag.String("config-file", "", "YAML or JSON runtime config; command-line flags override it")
 	flag.Parse()
 	if err := applyRuntimeConfig(*configFile); err != nil {
@@ -54,7 +60,10 @@ func main() {
 		if *configPath == "" {
 			log.Fatal("--config is required for manager role")
 		}
-		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen, *metricsListen, !*noForward); err != nil {
+		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen, *metricsListen, !*noForward, alertOptions{
+			webhook: *alertWebhook, webhookSecret: *alertWebhookSecret, interval: *alertInterval,
+			dropCount: *alertDropCount, dropRatePercent: *alertDropRatePercent,
+		}); err != nil {
 			log.Fatal(err)
 		}
 		return
