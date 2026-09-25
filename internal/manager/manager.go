@@ -29,20 +29,22 @@ import (
 )
 
 type Manager struct {
-	node          *p2p.Node
-	engine        *bft.Engine
-	mesh          *CommitteeMesh
-	presence      *presence.Table
-	gossiper      *presence.Gossiper
-	links         *link.Gossiper
-	prober        *link.Prober
-	forwarding    *forward.Table
-	dataTransport *transport.Transport
-	admissions    map[string]map[string]protocol.AdmissionReport
-	sso           *oidc.Verifier
-	mu            sync.RWMutex
-	snapshot      model.SignedSnapshot
-	waiters       map[chan model.SignedSnapshot]struct{}
+	node           *p2p.Node
+	engine         *bft.Engine
+	mesh           *CommitteeMesh
+	presence       *presence.Table
+	gossiper       *presence.Gossiper
+	links          *link.Gossiper
+	prober         *link.Prober
+	forwarding     *forward.Table
+	dataTransport  *transport.Transport
+	admissions     map[string]map[string]protocol.AdmissionReport
+	quotaPending   map[string]uint64
+	quotaSettledAt time.Time
+	sso            *oidc.Verifier
+	mu             sync.RWMutex
+	snapshot       model.SignedSnapshot
+	waiters        map[chan model.SignedSnapshot]struct{}
 }
 
 // Config wires optional capabilities into the manager.
@@ -81,6 +83,7 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 	node.Handle(p2p.ProbeProtocol, link.NewProbeResponder().Handle)
 	node.Handle(p2p.LoginProtocol, manager.handleLogin)
 	node.Handle(p2p.SyncProtocol, manager.handleSync)
+	node.Handle(p2p.QuotaProtocol, manager.handleQuotaReport)
 	engine.OnCommit(manager.onCommit)
 	return manager
 }

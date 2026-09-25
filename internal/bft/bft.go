@@ -1151,9 +1151,35 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		return applyUpdateCommittee(state, transition)
 	case TransitionRotateCommittee:
 		return applyRotateCommitteeKeys(state)
+	case TransitionUpdateBudgetUse:
+		return applyBudgetUsage(state, transition)
 	default:
 		return fmt.Errorf("unknown transition type %q", transition.Type)
 	}
+}
+
+// applyBudgetUsage settles aggregated client usage into certified state. The
+// transition carries absolute counters so every voter derives an identical
+// result; the daily/monthly reset is decided by the proposing manager.
+func applyBudgetUsage(state *model.NetworkState, transition model.StateTransition) error {
+	usage := transition.BudgetUsage
+	if usage == nil || usage.BudgetID == "" {
+		return fmt.Errorf("budget usage is required")
+	}
+	for index := range state.Budgets {
+		if state.Budgets[index].ID != usage.BudgetID {
+			continue
+		}
+		state.Budgets[index].UsedDailyBytes = usage.DailyBytes
+		state.Budgets[index].UsedMonthlyBytes = usage.MonthlyBytes
+		if usage.PeriodDay != "" {
+			if parsed, err := time.Parse("2006-01-02", usage.PeriodDay); err == nil {
+				state.Budgets[index].UpdatedAt = parsed.UTC()
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("budget %q not found", usage.BudgetID)
 }
 
 // applyUpdateCommittee validates and stages a committee member change. The

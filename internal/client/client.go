@@ -23,6 +23,7 @@ import (
 	"github.com/netp2p/netp2p/internal/packet"
 	"github.com/netp2p/netp2p/internal/policy"
 	netproto "github.com/netp2p/netp2p/internal/protocol"
+	"github.com/netp2p/netp2p/internal/quota"
 	"github.com/netp2p/netp2p/internal/transport"
 	"github.com/netp2p/netp2p/internal/version"
 	"github.com/netp2p/netp2p/internal/wire"
@@ -43,6 +44,7 @@ type Client struct {
 	frames          *transport.Transport
 	forwarding      *forward.Table
 	paths           *pathSelector
+	quota           *quota.Enforcer
 	admissionQueue  []netproto.AdmissionReport
 	admissionWaiter *admissionWaiter
 	synthesizeICMP  bool
@@ -199,6 +201,11 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 		client.self = self
 	}
 	client.networkMap = networkMap
+	if client.quota == nil {
+		client.quota = quota.NewEnforcer(snapshot.State.Budgets)
+	} else {
+		client.quota.Replace(snapshot.State.Budgets)
+	}
 	localPeerID := client.node.Host.ID()
 	overlayIPs := client.peerOverlayIPsLocked()
 	client.mu.Unlock()

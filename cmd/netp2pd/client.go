@@ -97,6 +97,7 @@ func runClient(ctx context.Context, options clientOptions) error {
 		netClient.ReconcileRoutes()
 	}
 	go netClient.SyncLoop(ctx)
+	go netClient.RunQuotaReporting(ctx)
 	go func() {
 		if err := netClient.ServePackets(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("packet endpoint stopped: %v", err)

@@ -77,6 +77,9 @@ func (client *Client) forwardLocalPacket(ctx context.Context, raw []byte) {
 }
 
 func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) {
+	if !client.admitOutbound(destination, len(raw)) {
+		return
+	}
 	target, err := peer.Decode(destination.PeerID)
 	if err != nil {
 		return
@@ -85,6 +88,28 @@ func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) {
 		return
 	}
 	client.sendFrame(target, raw)
+}
+
+// admitOutbound applies the source-side half of quota enforcement. The manager
+// enforces the same budget on the forwarding path, so a client that lies about
+// its usage cannot exceed its budget end to end.
+func (client *Client) admitOutbound(destination model.PeerRecord, size int) bool {
+	client.mu.RLock()
+	enforcer := client.quota
+	enforced := client.snapshot.State.Settings.QuotaEnforcementEnabled
+	client.mu.RUnlock()
+	if enforcer == nil {
+		return true
+	}
+	decision := enforcer.Check(destination.PeerID, destination.Groups, "", uint64(size))
+	if !decision.Allowed && enforced {
+		debugDrop("quota: %s blocked by budget %s (%s)", destination.PeerID, decision.BudgetID, decision.Action)
+		return false
+	}
+	if decision.Delay > 0 && enforced {
+		time.Sleep(decision.Delay)
+	}
+	return true
 }
 
 func (client *Client) handleEnvelope(remote peer.ID, wire []byte) {

@@ -973,3 +973,35 @@ func TestStaleEpochVoteRejected(t *testing.T) {
 		t.Fatal("stale-epoch vote accepted")
 	}
 }
+
+// TestUpdateBudgetUsageSettlesCounters verifies that aggregated usage is
+// written into certified state and that the period anchor advances.
+func TestUpdateBudgetUsageSettlesCounters(t *testing.T) {
+	state := testState()
+	state.Budgets = []model.TrafficBudget{{ID: "b1", SubjectType: "peer", SubjectID: "peer-a", DailyBytes: 1000, MonthlyBytes: 1000}}
+	transition := model.StateTransition{
+		Type: TransitionUpdateBudgetUse,
+		BudgetUsage: &model.BudgetUsage{
+			BudgetID: "b1", DailyBytes: 400, MonthlyBytes: 400,
+			PeriodDay: "2026-09-25", PeriodMonth: "2026-09",
+		},
+	}
+	if err := ApplyTransition(&state, transition); err != nil {
+		t.Fatal(err)
+	}
+	if state.Budgets[0].UsedDailyBytes != 400 || state.Budgets[0].UsedMonthlyBytes != 400 {
+		t.Fatalf("usage not settled: %+v", state.Budgets[0])
+	}
+	if state.Budgets[0].UpdatedAt.IsZero() {
+		t.Fatal("period anchor was not advanced")
+	}
+
+	unknown := transition
+	unknown.BudgetUsage = &model.BudgetUsage{BudgetID: "missing", DailyBytes: 1}
+	if err := ApplyTransition(&state, unknown); err == nil {
+		t.Fatal("unknown budget accepted")
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateBudgetUse}); err == nil {
+		t.Fatal("missing usage accepted")
+	}
+}
