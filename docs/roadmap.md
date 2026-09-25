@@ -50,7 +50,7 @@
 - [ ] flow class 约束、路径切换迟滞与热备。
 - [x] 取消 relay 身份，manager 成为 client/决策/转发/UI 超集。
 - [x] BFT certified RouteAssignment：manager committee 规划 primary/fallback path。
-- [ ] via-manager forwarding data plane 与 client end-to-end admission。
+- [x] via-manager forwarding data plane 与 client end-to-end admission（客户端严格按 certified primary→fallback 选路，manager 按上一跳身份转发并计数）。
 
 ## Phase 4：去中心化 Manager
 
