@@ -35,6 +35,7 @@ var (
 	AdminProtocol       = protocol.ID(ProtocolPrefix + "/control/admin/1.0.0")
 	WebAPIProtocol      = protocol.ID(ProtocolPrefix + "/web-api/1.0.0")
 	PresenceProtocol    = protocol.ID(ProtocolPrefix + "/presence/1.0.0")
+	LinkGossipProtocol  = protocol.ID(ProtocolPrefix + "/link/gossip/1.0.0")
 )
 
 type Config struct {

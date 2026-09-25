@@ -10,6 +10,7 @@ import (
 
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/config"
+	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/oidc"
@@ -114,6 +115,9 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 	netManager := manager.New(node, engine, mesh, manager.Config{SSO: sso})
 	manager.RegisterAdminHandler(node, mesh, seed.AdminToken)
 	go netManager.RunPresenceGossip(ctx)
+	linkGossiper := link.NewGossiper(node, mesh.PeerIDs(), 10*time.Second, 90*time.Second, 1000)
+	node.Handle(p2p.LinkGossipProtocol, linkGossiper.Handle)
+	go linkGossiper.Run(ctx)
 
 	webServer, err := web.NewServer(node, netManager, web.Config{
 		AdminToken: seed.AdminToken, Authenticator: netManager, OIDC: bootstrapOIDC,
