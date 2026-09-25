@@ -60,9 +60,40 @@
         return `Removed DNS zone ${transition.targetId ?? ''}`;
       case 'update_dns_settings':
         return 'Updated DNS settings';
+      case 'update_network_settings':
+        return 'Updated network settings';
+      case 'register_user':
+        return `Registered user ${target(transition.user)}`;
+      case 'update_user_groups':
+        return `Synced groups for ${target(transition.user)}`;
+      case 'update_user_role':
+        return `Changed role for ${target(transition.user)}`;
+      case 'set_user_blocked':
+        return `Updated user ${target(transition.user)}`;
+      case 'remove_user':
+        return `Removed user ${transition.targetId ?? ''}`;
+      case 'update_route_assignment':
+        return `Updated path assignment ${target(transition.assignment)}`;
+      case 'remove_route_assignment':
+        return `Removed path assignment ${transition.targetId ?? ''}`;
+      case 'update_committee':
+        return 'Reconfigured the committee';
+      case 'rotate_committee_keys':
+        return 'Rotated committee keys';
+      case 'update_budget_usage':
+        return `Settled budget usage ${target(transition.budgetUsage, 'budgetId')}`;
       default:
         return type;
     }
+  }
+
+  // The actor is the identity the manager recorded for the submission. It is
+  // certified, so showing it is safe; absent actors predate attribution.
+  function actorLabel(entry: Snapshot): string {
+    const actor = entry.transition?.actor;
+    if (!actor) return 'unattributed';
+    const name = actor.name && actor.name !== actor.id ? `${actor.name} (${actor.id})` : actor.id;
+    return actor.role ? `${name} · ${actor.role}` : name;
   }
 
   function transitionTone(type: string | undefined): 'emerald' | 'rose' | 'slate' | 'sky' {
@@ -108,6 +139,7 @@
                 <span class="text-sm text-slate-800">{summarize(entry)}</span>
               </div>
               <div class="flex items-center gap-3 text-xs text-slate-500">
+                <span title="Authenticated actor recorded with this transition">{actorLabel(entry)}</span>
                 <span>leader {entry.leaderId || '—'}</span>
                 <span>{signerCount(entry.qc.signerBitmap)} signatures · epoch {entry.qc.committeeEpoch}</span>
                 <span class="font-mono" title={entry.qc.transitionHash}>{shortHash(entry.qc.transitionHash, 10)}</span>

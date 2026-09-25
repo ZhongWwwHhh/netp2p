@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	libprotocol "github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/netp2p/netp2p/internal/auth"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/link"
@@ -230,7 +231,25 @@ func (manager *Manager) NetworkID() string {
 }
 
 func (manager *Manager) Submit(transition model.StateTransition) (model.SignedSnapshot, error) {
+	return manager.SubmitAs(transition, systemActor("manager"))
+}
+
+// SubmitAs certifies a transition and records who submitted it. The actor is
+// always supplied by the server: any actor already present in the transition is
+// discarded so a caller cannot forge an audit identity. The recorded actor is
+// covered by TransitionHash, which makes the audit log tamper-evident.
+func (manager *Manager) SubmitAs(transition model.StateTransition, actor model.Actor) (model.SignedSnapshot, error) {
+	transition.Actor = nil
+	if actor.ID != "" {
+		transition.Actor = &actor
+	}
 	return manager.mesh.Submit(transition)
+}
+
+// systemActor labels transitions the manager produces on its own (the planner
+// and quota settlement). It is not a human identity.
+func systemActor(name string) model.Actor {
+	return model.Actor{ID: "system:" + name, Name: name, Role: "system"}
 }
 
 func (manager *Manager) handleLogin(stream network.Stream) {
@@ -426,7 +445,7 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 				UserID: registration.UserID, LastLogin: registration.LastLogin,
 			},
 		}
-		snapshot, err := manager.mesh.Submit(transition)
+		snapshot, err := manager.SubmitAs(transition, auth.PeerActor(registration.PeerID))
 		if err != nil {
 			return model.SignedSnapshot{}, model.PeerRecord{}, err
 		}
@@ -441,7 +460,7 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 			UserID: registration.UserID, LastLogin: registration.LastLogin,
 		},
 	}
-	snapshot, err := manager.mesh.Submit(transition)
+	snapshot, err := manager.SubmitAs(transition, auth.PeerActor(registration.PeerID))
 	if err != nil {
 		return model.SignedSnapshot{}, model.PeerRecord{}, err
 	}

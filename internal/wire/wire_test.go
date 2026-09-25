@@ -136,6 +136,7 @@ func TestControlMessagesRoundTrip(t *testing.T) {
 			Type: "register_peer", SetupKey: "k", RequestID: "req-1",
 			Peer:        model.PeerRecord{PeerID: "peer-a", OverlayIP: "100.64.0.1"},
 			BudgetUsage: &model.BudgetUsage{BudgetID: "b1", DailyBytes: 5, PeriodDay: "2026-01-01"},
+			Actor:       &model.Actor{ID: "user-1", Name: "Ada", Role: model.RoleAdmin},
 		}
 		message := wire.StateTransitionToProto(transition)
 		var restored pb.StateTransition
@@ -144,6 +145,23 @@ func TestControlMessagesRoundTrip(t *testing.T) {
 		if got.BudgetUsage == nil || got.BudgetUsage.BudgetID != "b1" {
 			t.Fatalf("transition round trip mismatch: %#v", got)
 		}
+		if got.Actor == nil || got.Actor.ID != "user-1" || got.Actor.Role != model.RoleAdmin || got.Actor.Name != "Ada" {
+			t.Fatalf("actor round trip mismatch: %#v", got.Actor)
+		}
+	}
+}
+
+// TestActorAbsentRoundTripsToNil guards the optional field: a transition
+// without an actor must not gain an empty one, or every hash would change.
+func TestActorAbsentRoundTripsToNil(t *testing.T) {
+	message := wire.StateTransitionToProto(model.StateTransition{Type: "genesis"})
+	if message.GetActor() != nil {
+		t.Fatalf("absent actor should not be set, got %#v", message.GetActor())
+	}
+	var restored pb.StateTransition
+	roundTrip(t, message, &restored)
+	if got := wire.StateTransitionFromProto(&restored); got.Actor != nil {
+		t.Fatalf("absent actor round-tripped to %#v", got.Actor)
 	}
 }
 

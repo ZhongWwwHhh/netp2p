@@ -165,6 +165,7 @@ export interface AuditEvent {
   height: number;
   type: string;
   leaderId: string;
+  actor?: Actor;
   signerBitmap?: number[] | string;
   stateHash: string;
   transitionHash: string;
@@ -257,7 +258,17 @@ export interface DNSSettings {
   groups?: string[];
 }
 
-export type StateTransition =
+// Actor is the audit identity the manager attaches to a certified transition.
+// The console only displays it; the server always overwrites whatever a caller
+// sends, so it is evidence rather than a credential.
+export interface Actor {
+  id: string;
+  name?: string;
+  role?: string;
+  static?: boolean;
+}
+
+export type StateTransition = (
   | { type: 'upsert_group'; group: Group }
   | { type: 'remove_group'; targetId: string }
   | { type: 'upsert_policy'; policy: Policy }
@@ -281,7 +292,8 @@ export type StateTransition =
   | { type: 'update_route_assignment'; assignment: RouteAssignment }
   | { type: 'remove_route_assignment'; targetId: string }
   | { type: 'update_committee'; committee: CommitteeMember[]; committeeConfig?: CommitteeConfig }
-  | { type: 'rotate_committee_keys'; committeeConfig?: CommitteeConfig };
+  | { type: 'rotate_committee_keys'; committeeConfig?: CommitteeConfig }
+) & { actor?: Actor };
 
 // AdmissionReport is a client-observed, non-certified end-to-end probe result.
 export interface AdmissionReport {

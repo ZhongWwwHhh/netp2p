@@ -44,6 +44,11 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 			respondAdmin(stream, AdminResponse{Error: err.Error()})
 			return
 		}
+		// The admin stream cannot carry a structured identity, so every admin
+		// transition is attributed to the break-glass token. Any actor sent on
+		// the wire is discarded here.
+		actor := auth.ActorOf(auth.BreakGlass())
+		transition.Actor = &actor
 		snapshot, err := mesh.Submit(transition)
 		if err != nil {
 			respondAdmin(stream, AdminResponse{Error: err.Error()})

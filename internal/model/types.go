@@ -286,6 +286,21 @@ type StateTransition struct {
 	CommitteeConfig *CommitteeConfig `json:"committeeConfig,omitempty"`
 	// BudgetUsage settles aggregated client-reported usage into certified state.
 	BudgetUsage *BudgetUsage `json:"budgetUsage,omitempty"`
+	// Actor records who submitted the transition. It is assigned by the manager
+	// from the authenticated identity and flows into TransitionHash, so the
+	// decision log cannot be rewritten by a single manager.
+	Actor *Actor `json:"actor,omitempty"`
+}
+
+// Actor is the audit identity attached to a certified transition. ID is the
+// stable subject (user id, peer id or "static-admin"); Name and Role are
+// captured at submission time for display. Actor never participates in
+// authorization — it is evidence, not a credential.
+type Actor struct {
+	ID     string `json:"id"`
+	Name   string `json:"name,omitempty"`
+	Role   string `json:"role,omitempty"`
+	Static bool   `json:"static,omitempty"`
 }
 
 type QuorumCertificate struct {

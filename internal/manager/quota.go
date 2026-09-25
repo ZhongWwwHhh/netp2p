@@ -116,7 +116,7 @@ func (manager *Manager) SettleQuota(now time.Time) {
 				PeriodMonth:  now.Format("2006-01"),
 			},
 		}
-		if _, err := manager.mesh.Submit(transition); err != nil {
+		if _, err := manager.SubmitAs(transition, systemActor("quota")); err != nil {
 			log.Printf("quota settlement for %s failed: %v", id, err)
 		}
 	}

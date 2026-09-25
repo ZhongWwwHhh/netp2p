@@ -233,7 +233,9 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, http.StatusForbidden, err.Error())
 			return
 		}
-		snapshot, err := server.manager.Submit(body.Transition)
+		// The actor is derived from the authenticated identity, never from the
+		// request body, so a caller cannot forge an audit identity.
+		snapshot, err := server.manager.SubmitAs(body.Transition, auth.ActorOf(identity))
 		if err != nil {
 			writeError(writer, http.StatusConflict, err.Error())
 			return
@@ -303,14 +305,15 @@ func (server *Server) handleActivity(writer http.ResponseWriter, request *http.R
 // Every field comes from a certified snapshot, so the log can be recomputed
 // from the quorum certificate rather than trusted from the manager.
 type AuditEvent struct {
-	Height         uint64 `json:"height"`
-	Type           string `json:"type"`
-	LeaderID       string `json:"leaderId"`
-	SignerBitmap   []byte `json:"signerBitmap,omitempty"`
-	StateHash      string `json:"stateHash"`
-	TransitionHash string `json:"transitionHash"`
-	CommitteeEpoch uint64 `json:"committeeEpoch"`
-	RecordedAt     string `json:"recordedAt,omitempty"`
+	Height         uint64       `json:"height"`
+	Type           string       `json:"type"`
+	LeaderID       string       `json:"leaderId"`
+	Actor          *model.Actor `json:"actor,omitempty"`
+	SignerBitmap   []byte       `json:"signerBitmap,omitempty"`
+	StateHash      string       `json:"stateHash"`
+	TransitionHash string       `json:"transitionHash"`
+	CommitteeEpoch uint64       `json:"committeeEpoch"`
+	RecordedAt     string       `json:"recordedAt,omitempty"`
 }
 
 func (server *Server) handleEvents(writer http.ResponseWriter, request *http.Request) {
@@ -336,15 +339,20 @@ func (server *Server) handleEvents(writer http.ResponseWriter, request *http.Req
 		before = parsed
 	}
 	typeFilter := request.URL.Query().Get("type")
+	actorFilter := request.URL.Query().Get("actor")
 	events := make([]AuditEvent, 0, limit)
 	for _, snapshot := range server.manager.Activity(limit, before) {
 		if typeFilter != "" && snapshot.Transition.Type != typeFilter {
+			continue
+		}
+		if actorFilter != "" && (snapshot.Transition.Actor == nil || snapshot.Transition.Actor.ID != actorFilter) {
 			continue
 		}
 		events = append(events, AuditEvent{
 			Height:         snapshot.Height,
 			Type:           snapshot.Transition.Type,
 			LeaderID:       snapshot.LeaderID,
+			Actor:          snapshot.Transition.Actor,
 			SignerBitmap:   snapshot.QC.SignerBitmap,
 			StateHash:      fmt.Sprintf("%x", snapshot.StateHash),
 			TransitionHash: fmt.Sprintf("%x", snapshot.QC.TransitionHash),

@@ -701,6 +701,52 @@ validated:
 	}
 }
 
+// TestTransitionHashCoversActor proves the audit identity is part of the signed
+// transition: two transitions that differ only in their actor must hash
+// differently, and rewriting the actor in a committed snapshot must invalidate
+// the certificate.
+func TestTransitionHashCoversActor(t *testing.T) {
+	base := model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "g"}}
+	withActor := base
+	withActor.Actor = &model.Actor{ID: "user-1", Name: "Ada", Role: model.RoleAdmin}
+	otherActor := base
+	otherActor.Actor = &model.Actor{ID: "user-2", Name: "Bob", Role: model.RoleOwner}
+
+	if bytes.Equal(TransitionHash(base), TransitionHash(withActor)) {
+		t.Fatal("adding an actor did not change the transition hash")
+	}
+	if bytes.Equal(TransitionHash(withActor), TransitionHash(otherActor)) {
+		t.Fatal("different actors produced the same transition hash")
+	}
+
+	committee, privateKeys := testCommittee()
+	engines := make([]*Engine, len(committee))
+	for index := range committee {
+		engine, err := NewEngine(testState(), committee, committee[index].ID, privateKeys[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	transition := model.StateTransition{
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "audited"},
+		Actor: &model.Actor{ID: "user-1", Name: "Ada", Role: model.RoleAdmin},
+	}
+	snapshot := advance(t, privateKeys, engines, transition)
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("freshly committed snapshot should validate: %v", err)
+	}
+	if snapshot.Transition.Actor == nil || snapshot.Transition.Actor.ID != "user-1" {
+		t.Fatalf("committed snapshot lost its actor: %#v", snapshot.Transition.Actor)
+	}
+
+	forged := snapshot
+	forged.Transition.Actor = &model.Actor{ID: "attacker", Role: model.RoleOwner}
+	if err := ValidateSnapshot(forged); err == nil {
+		t.Fatal("a forged actor must invalidate the snapshot")
+	}
+}
+
 func TestAllocateDNSLabelIsUniqueAndDeterministic(t *testing.T) {
 	state := model.NetworkState{
 		Peers: []model.PeerRecord{

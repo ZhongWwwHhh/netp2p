@@ -83,7 +83,7 @@ func (manager *Manager) Authenticate(ctx context.Context, token string) (auth.Id
 // ensureUser creates or updates the certified user record for the claims.
 func (manager *Manager) ensureUser(claims oidc.Claims) (model.User, error) {
 	state := manager.engine.CurrentState()
-	autoGroups, err := manager.ensureClaimGroups(state, claims.Groups)
+	autoGroups, err := manager.ensureClaimGroups(state, claims.Groups, claimsActor(claims, ""))
 	if err != nil {
 		return model.User{}, err
 	}
@@ -95,7 +95,10 @@ func (manager *Manager) ensureUser(claims oidc.Claims) (model.User, error) {
 		Role: manager.initialRole(claims, state), AutoGroups: autoGroups,
 		Issued: model.GroupIssuedJWT, LastLogin: time.Now().UTC().Format(time.RFC3339),
 	}
-	snapshot, err := manager.mesh.Submit(model.StateTransition{Type: bft.TransitionRegisterUser, User: &user})
+	snapshot, err := manager.SubmitAs(
+		model.StateTransition{Type: bft.TransitionRegisterUser, User: &user},
+		claimsActor(claims, user.Role),
+	)
 	if err != nil {
 		return model.User{}, err
 	}
@@ -110,10 +113,13 @@ func (manager *Manager) ensureUser(claims oidc.Claims) (model.User, error) {
 func (manager *Manager) reconcileUser(user model.User, claims oidc.Claims, autoGroups []string) (model.User, error) {
 	current := user
 	if !sameStrings(current.AutoGroups, autoGroups) {
-		snapshot, err := manager.mesh.Submit(model.StateTransition{
-			Type: bft.TransitionUpdateUserGroups,
-			User: &model.User{ID: current.ID, AutoGroups: autoGroups, LastLogin: time.Now().UTC().Format(time.RFC3339)},
-		})
+		snapshot, err := manager.SubmitAs(
+			model.StateTransition{
+				Type: bft.TransitionUpdateUserGroups,
+				User: &model.User{ID: current.ID, AutoGroups: autoGroups, LastLogin: time.Now().UTC().Format(time.RFC3339)},
+			},
+			claimsActor(claims, current.Role),
+		)
 		if err != nil {
 			return model.User{}, err
 		}
@@ -122,10 +128,13 @@ func (manager *Manager) reconcileUser(user model.User, claims oidc.Claims, autoG
 		}
 	}
 	if role, ok := manager.sso.Config().ConfigRole(claims); ok && role != current.Role {
-		snapshot, err := manager.mesh.Submit(model.StateTransition{
-			Type: bft.TransitionUpdateUserRole,
-			User: &model.User{ID: current.ID, Role: role},
-		})
+		snapshot, err := manager.SubmitAs(
+			model.StateTransition{
+				Type: bft.TransitionUpdateUserRole,
+				User: &model.User{ID: current.ID, Role: role},
+			},
+			claimsActor(claims, role),
+		)
 		if err != nil {
 			// The IdP role is advisory. A rejected change (for example, the
 			// certified state refuses to demote the last owner) must not lock
@@ -140,7 +149,7 @@ func (manager *Manager) reconcileUser(user model.User, claims oidc.Claims, autoG
 
 // ensureClaimGroups maps IdP group names onto managed groups, creating a
 // JWT-issued group the first time a name appears.
-func (manager *Manager) ensureClaimGroups(state model.NetworkState, claimGroups []string) ([]string, error) {
+func (manager *Manager) ensureClaimGroups(state model.NetworkState, claimGroups []string, actor model.Actor) ([]string, error) {
 	if !state.Settings.JWTGroupsEnabled {
 		return []string{}, nil
 	}
@@ -156,7 +165,10 @@ func (manager *Manager) ensureClaimGroups(state model.NetworkState, claimGroups 
 			ID: uniqueGroupID(current, name), Name: name,
 			Issued: model.GroupIssuedJWT, SSOClaim: name,
 		}
-		snapshot, err := manager.mesh.Submit(model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &group})
+		snapshot, err := manager.SubmitAs(
+			model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &group},
+			actor,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -180,6 +192,25 @@ func (manager *Manager) initialRole(claims oidc.Claims, state model.NetworkState
 		return role
 	}
 	return model.RoleUser
+}
+
+// claimsActor renders IdP claims as the audit actor for user and group
+// transitions. The role is the effective role where it is known; group
+// synchronization happens before the user record exists, so it falls back to a
+// descriptive label.
+func claimsActor(claims oidc.Claims, role string) model.Actor {
+	id := claims.Subject
+	if id == "" {
+		id = claims.Email
+	}
+	name := claims.Name
+	if name == "" {
+		name = claims.Email
+	}
+	if role == "" {
+		role = "sso"
+	}
+	return model.Actor{ID: id, Name: name, Role: role}
 }
 
 // checkLoginExpiration enforces the certified login lifetime for SSO peers.

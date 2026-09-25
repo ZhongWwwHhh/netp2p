@@ -54,7 +54,26 @@ func StateTransitionToProto(transition model.StateTransition) *pb.StateTransitio
 	if transition.CommitteeConfig != nil {
 		message.CommitteeConfig = CommitteeConfigToProto(*transition.CommitteeConfig)
 	}
+	if transition.Actor != nil {
+		message.Actor = ActorToProto(*transition.Actor)
+	}
 	return message
+}
+
+// ActorToProto and ActorFromProto convert the audit identity. A zero-value
+// actor is treated as unset so a nil pointer round-trips cleanly.
+func ActorToProto(actor model.Actor) *pb.Actor {
+	return &pb.Actor{Id: actor.ID, Name: actor.Name, Role: actor.Role, Static: actor.Static}
+}
+
+func ActorFromProto(message *pb.Actor) *model.Actor {
+	if message == nil {
+		return nil
+	}
+	return &model.Actor{
+		ID: message.GetId(), Name: message.GetName(),
+		Role: message.GetRole(), Static: message.GetStatic(),
+	}
 }
 
 func StateTransitionFromProto(message *pb.StateTransition) model.StateTransition {
@@ -122,6 +141,7 @@ func StateTransitionFromProto(message *pb.StateTransition) model.StateTransition
 	if message.GetBudgetUsage() != nil {
 		transition.BudgetUsage = BudgetUsageFromProto(message.GetBudgetUsage())
 	}
+	transition.Actor = ActorFromProto(message.GetActor())
 	return transition
 }
 

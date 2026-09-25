@@ -106,6 +106,16 @@ message User {
   string last_login = 8;
 }
 
+// Actor records who submitted a state transition. It is assigned by the manager
+// from the authenticated identity and is covered by the transition hash, so the
+// audit log cannot be rewritten by a single manager.
+message Actor {
+  string id = 1;
+  string name = 2;
+  string role = 3;
+  bool static = 4;
+}
+
 message SetupKey {
   string id = 1;
   string name = 2;
@@ -251,6 +261,7 @@ message StateTransition {
   CommitteeConfig committee_config = 17;
   repeated CommitteeMember committee = 18;
   BudgetUsage budget_usage = 19;
+  Actor actor = 20;
 }
 
 message BudgetUsage {

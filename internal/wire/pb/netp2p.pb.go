@@ -806,6 +806,77 @@ func (x *User) GetLastLogin() string {
 	return ""
 }
 
+// Actor records who submitted a state transition. It is assigned by the manager
+// from the authenticated identity and is covered by the transition hash, so the
+// audit log cannot be rewritten by a single manager.
+type Actor struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	Static        bool                   `protobuf:"varint,4,opt,name=static,proto3" json:"static,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Actor) Reset() {
+	*x = Actor{}
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Actor) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Actor) ProtoMessage() {}
+
+func (x *Actor) ProtoReflect() protoreflect.Message {
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Actor.ProtoReflect.Descriptor instead.
+func (*Actor) Descriptor() ([]byte, []int) {
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Actor) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Actor) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Actor) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+func (x *Actor) GetStatic() bool {
+	if x != nil {
+		return x.Static
+	}
+	return false
+}
+
 type SetupKey struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -827,7 +898,7 @@ type SetupKey struct {
 
 func (x *SetupKey) Reset() {
 	*x = SetupKey{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[7]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -839,7 +910,7 @@ func (x *SetupKey) String() string {
 func (*SetupKey) ProtoMessage() {}
 
 func (x *SetupKey) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[7]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -852,7 +923,7 @@ func (x *SetupKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetupKey.ProtoReflect.Descriptor instead.
 func (*SetupKey) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{7}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *SetupKey) GetId() string {
@@ -961,7 +1032,7 @@ type Nameserver struct {
 
 func (x *Nameserver) Reset() {
 	*x = Nameserver{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[8]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -973,7 +1044,7 @@ func (x *Nameserver) String() string {
 func (*Nameserver) ProtoMessage() {}
 
 func (x *Nameserver) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[8]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -986,7 +1057,7 @@ func (x *Nameserver) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Nameserver.ProtoReflect.Descriptor instead.
 func (*Nameserver) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{8}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Nameserver) GetId() string {
@@ -1050,7 +1121,7 @@ type DNSRecord struct {
 
 func (x *DNSRecord) Reset() {
 	*x = DNSRecord{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[9]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1062,7 +1133,7 @@ func (x *DNSRecord) String() string {
 func (*DNSRecord) ProtoMessage() {}
 
 func (x *DNSRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[9]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1075,7 +1146,7 @@ func (x *DNSRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DNSRecord.ProtoReflect.Descriptor instead.
 func (*DNSRecord) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{9}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DNSRecord) GetName() string {
@@ -1119,7 +1190,7 @@ type DNSZone struct {
 
 func (x *DNSZone) Reset() {
 	*x = DNSZone{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[10]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1131,7 +1202,7 @@ func (x *DNSZone) String() string {
 func (*DNSZone) ProtoMessage() {}
 
 func (x *DNSZone) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[10]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1144,7 +1215,7 @@ func (x *DNSZone) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DNSZone.ProtoReflect.Descriptor instead.
 func (*DNSZone) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{10}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *DNSZone) GetId() string {
@@ -1192,7 +1263,7 @@ type DNSSettings struct {
 
 func (x *DNSSettings) Reset() {
 	*x = DNSSettings{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[11]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1204,7 +1275,7 @@ func (x *DNSSettings) String() string {
 func (*DNSSettings) ProtoMessage() {}
 
 func (x *DNSSettings) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[11]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1217,7 +1288,7 @@ func (x *DNSSettings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DNSSettings.ProtoReflect.Descriptor instead.
 func (*DNSSettings) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{11}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *DNSSettings) GetDisabled() bool {
@@ -1249,7 +1320,7 @@ type Group struct {
 
 func (x *Group) Reset() {
 	*x = Group{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[12]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1261,7 +1332,7 @@ func (x *Group) String() string {
 func (*Group) ProtoMessage() {}
 
 func (x *Group) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[12]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1274,7 +1345,7 @@ func (x *Group) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Group.ProtoReflect.Descriptor instead.
 func (*Group) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{12}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Group) GetId() string {
@@ -1337,7 +1408,7 @@ type Service struct {
 
 func (x *Service) Reset() {
 	*x = Service{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[13]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1349,7 +1420,7 @@ func (x *Service) String() string {
 func (*Service) ProtoMessage() {}
 
 func (x *Service) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[13]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1362,7 +1433,7 @@ func (x *Service) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Service.ProtoReflect.Descriptor instead.
 func (*Service) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{13}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Service) GetProtocol() string {
@@ -1404,7 +1475,7 @@ type Policy struct {
 
 func (x *Policy) Reset() {
 	*x = Policy{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[14]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1416,7 +1487,7 @@ func (x *Policy) String() string {
 func (*Policy) ProtoMessage() {}
 
 func (x *Policy) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[14]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1429,7 +1500,7 @@ func (x *Policy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Policy.ProtoReflect.Descriptor instead.
 func (*Policy) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{14}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Policy) GetId() string {
@@ -1519,7 +1590,7 @@ type Route struct {
 
 func (x *Route) Reset() {
 	*x = Route{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[15]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1531,7 +1602,7 @@ func (x *Route) String() string {
 func (*Route) ProtoMessage() {}
 
 func (x *Route) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[15]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1544,7 +1615,7 @@ func (x *Route) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Route.ProtoReflect.Descriptor instead.
 func (*Route) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{15}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Route) GetId() string {
@@ -1630,7 +1701,7 @@ type TrafficBudget struct {
 
 func (x *TrafficBudget) Reset() {
 	*x = TrafficBudget{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[16]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1642,7 +1713,7 @@ func (x *TrafficBudget) String() string {
 func (*TrafficBudget) ProtoMessage() {}
 
 func (x *TrafficBudget) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[16]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1655,7 +1726,7 @@ func (x *TrafficBudget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrafficBudget.ProtoReflect.Descriptor instead.
 func (*TrafficBudget) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{16}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *TrafficBudget) GetId() string {
@@ -1766,7 +1837,7 @@ type NetworkState struct {
 
 func (x *NetworkState) Reset() {
 	*x = NetworkState{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[17]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1778,7 +1849,7 @@ func (x *NetworkState) String() string {
 func (*NetworkState) ProtoMessage() {}
 
 func (x *NetworkState) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[17]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1791,7 +1862,7 @@ func (x *NetworkState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkState.ProtoReflect.Descriptor instead.
 func (*NetworkState) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{17}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *NetworkState) GetNetworkId() string {
@@ -1927,13 +1998,14 @@ type StateTransition struct {
 	CommitteeConfig *CommitteeConfig       `protobuf:"bytes,17,opt,name=committee_config,json=committeeConfig,proto3" json:"committee_config,omitempty"`
 	Committee       []*CommitteeMember     `protobuf:"bytes,18,rep,name=committee,proto3" json:"committee,omitempty"`
 	BudgetUsage     *BudgetUsage           `protobuf:"bytes,19,opt,name=budget_usage,json=budgetUsage,proto3" json:"budget_usage,omitempty"`
+	Actor           *Actor                 `protobuf:"bytes,20,opt,name=actor,proto3" json:"actor,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
 func (x *StateTransition) Reset() {
 	*x = StateTransition{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[18]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1945,7 +2017,7 @@ func (x *StateTransition) String() string {
 func (*StateTransition) ProtoMessage() {}
 
 func (x *StateTransition) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[18]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1958,7 +2030,7 @@ func (x *StateTransition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateTransition.ProtoReflect.Descriptor instead.
 func (*StateTransition) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{18}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *StateTransition) GetType() string {
@@ -2094,6 +2166,13 @@ func (x *StateTransition) GetBudgetUsage() *BudgetUsage {
 	return nil
 }
 
+func (x *StateTransition) GetActor() *Actor {
+	if x != nil {
+		return x.Actor
+	}
+	return nil
+}
+
 type BudgetUsage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	BudgetId      string                 `protobuf:"bytes,1,opt,name=budget_id,json=budgetId,proto3" json:"budget_id,omitempty"`
@@ -2107,7 +2186,7 @@ type BudgetUsage struct {
 
 func (x *BudgetUsage) Reset() {
 	*x = BudgetUsage{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[19]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2119,7 +2198,7 @@ func (x *BudgetUsage) String() string {
 func (*BudgetUsage) ProtoMessage() {}
 
 func (x *BudgetUsage) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[19]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2132,7 +2211,7 @@ func (x *BudgetUsage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BudgetUsage.ProtoReflect.Descriptor instead.
 func (*BudgetUsage) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{19}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *BudgetUsage) GetBudgetId() string {
@@ -2185,7 +2264,7 @@ type QuorumCertificate struct {
 
 func (x *QuorumCertificate) Reset() {
 	*x = QuorumCertificate{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[20]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2197,7 +2276,7 @@ func (x *QuorumCertificate) String() string {
 func (*QuorumCertificate) ProtoMessage() {}
 
 func (x *QuorumCertificate) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[20]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2210,7 +2289,7 @@ func (x *QuorumCertificate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuorumCertificate.ProtoReflect.Descriptor instead.
 func (*QuorumCertificate) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{20}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *QuorumCertificate) GetHeight() uint64 {
@@ -2279,7 +2358,7 @@ type SignedSnapshot struct {
 
 func (x *SignedSnapshot) Reset() {
 	*x = SignedSnapshot{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[21]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2291,7 +2370,7 @@ func (x *SignedSnapshot) String() string {
 func (*SignedSnapshot) ProtoMessage() {}
 
 func (x *SignedSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[21]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2304,7 +2383,7 @@ func (x *SignedSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SignedSnapshot.ProtoReflect.Descriptor instead.
 func (*SignedSnapshot) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{21}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SignedSnapshot) GetEpoch() uint64 {
@@ -2384,7 +2463,7 @@ type Proposal struct {
 
 func (x *Proposal) Reset() {
 	*x = Proposal{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[22]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2396,7 +2475,7 @@ func (x *Proposal) String() string {
 func (*Proposal) ProtoMessage() {}
 
 func (x *Proposal) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[22]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2409,7 +2488,7 @@ func (x *Proposal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Proposal.ProtoReflect.Descriptor instead.
 func (*Proposal) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{22}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *Proposal) GetHeight() uint64 {
@@ -2470,7 +2549,7 @@ type Vote struct {
 
 func (x *Vote) Reset() {
 	*x = Vote{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[23]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2482,7 +2561,7 @@ func (x *Vote) String() string {
 func (*Vote) ProtoMessage() {}
 
 func (x *Vote) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[23]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2495,7 +2574,7 @@ func (x *Vote) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Vote.ProtoReflect.Descriptor instead.
 func (*Vote) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{23}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Vote) GetHeight() uint64 {
@@ -2570,7 +2649,7 @@ type CommitteeEnvelope struct {
 
 func (x *CommitteeEnvelope) Reset() {
 	*x = CommitteeEnvelope{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[24]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2582,7 +2661,7 @@ func (x *CommitteeEnvelope) String() string {
 func (*CommitteeEnvelope) ProtoMessage() {}
 
 func (x *CommitteeEnvelope) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[24]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2595,7 +2674,7 @@ func (x *CommitteeEnvelope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommitteeEnvelope.ProtoReflect.Descriptor instead.
 func (*CommitteeEnvelope) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{24}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *CommitteeEnvelope) GetType() string {
@@ -2665,7 +2744,7 @@ type LoginRequest struct {
 
 func (x *LoginRequest) Reset() {
 	*x = LoginRequest{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[25]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2677,7 +2756,7 @@ func (x *LoginRequest) String() string {
 func (*LoginRequest) ProtoMessage() {}
 
 func (x *LoginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[25]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2690,7 +2769,7 @@ func (x *LoginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoginRequest.ProtoReflect.Descriptor instead.
 func (*LoginRequest) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{25}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *LoginRequest) GetNetworkId() string {
@@ -2777,7 +2856,7 @@ type LoginResponse struct {
 
 func (x *LoginResponse) Reset() {
 	*x = LoginResponse{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[26]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2789,7 +2868,7 @@ func (x *LoginResponse) String() string {
 func (*LoginResponse) ProtoMessage() {}
 
 func (x *LoginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[26]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2802,7 +2881,7 @@ func (x *LoginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoginResponse.ProtoReflect.Descriptor instead.
 func (*LoginResponse) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{26}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *LoginResponse) GetSnapshot() *SignedSnapshot {
@@ -2861,7 +2940,7 @@ type SyncRequest struct {
 
 func (x *SyncRequest) Reset() {
 	*x = SyncRequest{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[27]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2873,7 +2952,7 @@ func (x *SyncRequest) String() string {
 func (*SyncRequest) ProtoMessage() {}
 
 func (x *SyncRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[27]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2886,7 +2965,7 @@ func (x *SyncRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncRequest.ProtoReflect.Descriptor instead.
 func (*SyncRequest) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{27}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *SyncRequest) GetNetworkId() string {
@@ -2945,7 +3024,7 @@ type AdmissionReport struct {
 
 func (x *AdmissionReport) Reset() {
 	*x = AdmissionReport{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[28]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2957,7 +3036,7 @@ func (x *AdmissionReport) String() string {
 func (*AdmissionReport) ProtoMessage() {}
 
 func (x *AdmissionReport) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[28]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2970,7 +3049,7 @@ func (x *AdmissionReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdmissionReport.ProtoReflect.Descriptor instead.
 func (*AdmissionReport) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{28}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *AdmissionReport) GetAssignmentId() string {
@@ -3025,7 +3104,7 @@ type AdminRequest struct {
 
 func (x *AdminRequest) Reset() {
 	*x = AdminRequest{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[29]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3037,7 +3116,7 @@ func (x *AdminRequest) String() string {
 func (*AdminRequest) ProtoMessage() {}
 
 func (x *AdminRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[29]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3050,7 +3129,7 @@ func (x *AdminRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdminRequest.ProtoReflect.Descriptor instead.
 func (*AdminRequest) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{29}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *AdminRequest) GetToken() string {
@@ -3077,7 +3156,7 @@ type AdminResponse struct {
 
 func (x *AdminResponse) Reset() {
 	*x = AdminResponse{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[30]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3089,7 +3168,7 @@ func (x *AdminResponse) String() string {
 func (*AdminResponse) ProtoMessage() {}
 
 func (x *AdminResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[30]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3102,7 +3181,7 @@ func (x *AdminResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdminResponse.ProtoReflect.Descriptor instead.
 func (*AdminResponse) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{30}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *AdminResponse) GetSnapshot() *SignedSnapshot {
@@ -3133,7 +3212,7 @@ type PresenceObservation struct {
 
 func (x *PresenceObservation) Reset() {
 	*x = PresenceObservation{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[31]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3145,7 +3224,7 @@ func (x *PresenceObservation) String() string {
 func (*PresenceObservation) ProtoMessage() {}
 
 func (x *PresenceObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[31]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3158,7 +3237,7 @@ func (x *PresenceObservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresenceObservation.ProtoReflect.Descriptor instead.
 func (*PresenceObservation) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{31}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *PresenceObservation) GetPeerId() string {
@@ -3213,7 +3292,7 @@ type PresenceGossip struct {
 
 func (x *PresenceGossip) Reset() {
 	*x = PresenceGossip{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[32]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3225,7 +3304,7 @@ func (x *PresenceGossip) String() string {
 func (*PresenceGossip) ProtoMessage() {}
 
 func (x *PresenceGossip) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[32]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3238,7 +3317,7 @@ func (x *PresenceGossip) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PresenceGossip.ProtoReflect.Descriptor instead.
 func (*PresenceGossip) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{32}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *PresenceGossip) GetObservedAt() string {
@@ -3275,7 +3354,7 @@ type LinkObservation struct {
 
 func (x *LinkObservation) Reset() {
 	*x = LinkObservation{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[33]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3287,7 +3366,7 @@ func (x *LinkObservation) String() string {
 func (*LinkObservation) ProtoMessage() {}
 
 func (x *LinkObservation) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[33]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3300,7 +3379,7 @@ func (x *LinkObservation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkObservation.ProtoReflect.Descriptor instead.
 func (*LinkObservation) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{33}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *LinkObservation) GetObserverId() string {
@@ -3397,7 +3476,7 @@ type LinkGossip struct {
 
 func (x *LinkGossip) Reset() {
 	*x = LinkGossip{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[34]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3409,7 +3488,7 @@ func (x *LinkGossip) String() string {
 func (*LinkGossip) ProtoMessage() {}
 
 func (x *LinkGossip) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[34]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3422,7 +3501,7 @@ func (x *LinkGossip) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LinkGossip.ProtoReflect.Descriptor instead.
 func (*LinkGossip) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{34}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *LinkGossip) GetObservedAt() string {
@@ -3450,7 +3529,7 @@ type ProbeRequest struct {
 
 func (x *ProbeRequest) Reset() {
 	*x = ProbeRequest{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[35]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3462,7 +3541,7 @@ func (x *ProbeRequest) String() string {
 func (*ProbeRequest) ProtoMessage() {}
 
 func (x *ProbeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[35]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3475,7 +3554,7 @@ func (x *ProbeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeRequest.ProtoReflect.Descriptor instead.
 func (*ProbeRequest) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{35}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ProbeRequest) GetKind() string {
@@ -3509,7 +3588,7 @@ type ProbeReply struct {
 
 func (x *ProbeReply) Reset() {
 	*x = ProbeReply{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[36]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3521,7 +3600,7 @@ func (x *ProbeReply) String() string {
 func (*ProbeReply) ProtoMessage() {}
 
 func (x *ProbeReply) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[36]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3534,7 +3613,7 @@ func (x *ProbeReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProbeReply.ProtoReflect.Descriptor instead.
 func (*ProbeReply) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{36}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ProbeReply) GetNonce() uint64 {
@@ -3565,7 +3644,7 @@ type QuotaReport struct {
 
 func (x *QuotaReport) Reset() {
 	*x = QuotaReport{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[37]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3577,7 +3656,7 @@ func (x *QuotaReport) String() string {
 func (*QuotaReport) ProtoMessage() {}
 
 func (x *QuotaReport) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[37]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3590,7 +3669,7 @@ func (x *QuotaReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuotaReport.ProtoReflect.Descriptor instead.
 func (*QuotaReport) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{37}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *QuotaReport) GetPeerId() string {
@@ -3631,7 +3710,7 @@ type BudgetIncrement struct {
 
 func (x *BudgetIncrement) Reset() {
 	*x = BudgetIncrement{}
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[38]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3643,7 +3722,7 @@ func (x *BudgetIncrement) String() string {
 func (*BudgetIncrement) ProtoMessage() {}
 
 func (x *BudgetIncrement) ProtoReflect() protoreflect.Message {
-	mi := &file_netp2p_v1_netp2p_proto_msgTypes[38]
+	mi := &file_netp2p_v1_netp2p_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3656,7 +3735,7 @@ func (x *BudgetIncrement) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BudgetIncrement.ProtoReflect.Descriptor instead.
 func (*BudgetIncrement) Descriptor() ([]byte, []int) {
-	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{38}
+	return file_netp2p_v1_netp2p_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *BudgetIncrement) GetBudgetId() string {
@@ -3764,7 +3843,12 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\ablocked\x18\x06 \x01(\bR\ablocked\x12\x16\n" +
 	"\x06issued\x18\a \x01(\tR\x06issued\x12\x1d\n" +
 	"\n" +
-	"last_login\x18\b \x01(\tR\tlastLogin\"\xec\x02\n" +
+	"last_login\x18\b \x01(\tR\tlastLogin\"W\n" +
+	"\x05Actor\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role\x12\x16\n" +
+	"\x06static\x18\x04 \x01(\bR\x06static\"\xec\x02\n" +
 	"\bSetupKey\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
@@ -3883,7 +3967,7 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\bsettings\x18\r \x01(\v2\x1a.netp2p.v1.NetworkSettingsR\bsettings\x12<\n" +
 	"\vassignments\x18\x0e \x03(\v2\x1a.netp2p.v1.RouteAssignmentR\vassignments\x12$\n" +
 	"\x0enext_ip_offset\x18\x0f \x01(\rR\fnextIpOffset\x12E\n" +
-	"\x10committee_config\x18\x10 \x01(\v2\x1a.netp2p.v1.CommitteeConfigR\x0fcommitteeConfig\"\x84\a\n" +
+	"\x10committee_config\x18\x10 \x01(\v2\x1a.netp2p.v1.CommitteeConfigR\x0fcommitteeConfig\"\xac\a\n" +
 	"\x0fStateTransition\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12)\n" +
 	"\x04peer\x18\x02 \x01(\v2\x15.netp2p.v1.PeerRecordR\x04peer\x12\x1b\n" +
@@ -3909,7 +3993,8 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\ttarget_id\x18\x10 \x01(\tR\btargetId\x12E\n" +
 	"\x10committee_config\x18\x11 \x01(\v2\x1a.netp2p.v1.CommitteeConfigR\x0fcommitteeConfig\x128\n" +
 	"\tcommittee\x18\x12 \x03(\v2\x1a.netp2p.v1.CommitteeMemberR\tcommittee\x129\n" +
-	"\fbudget_usage\x18\x13 \x01(\v2\x16.netp2p.v1.BudgetUsageR\vbudgetUsage\"\xb2\x01\n" +
+	"\fbudget_usage\x18\x13 \x01(\v2\x16.netp2p.v1.BudgetUsageR\vbudgetUsage\x12&\n" +
+	"\x05actor\x18\x14 \x01(\v2\x10.netp2p.v1.ActorR\x05actor\"\xb2\x01\n" +
 	"\vBudgetUsage\x12\x1b\n" +
 	"\tbudget_id\x18\x01 \x01(\tR\bbudgetId\x12\x1f\n" +
 	"\vdaily_bytes\x18\x02 \x01(\x04R\n" +
@@ -4084,7 +4169,7 @@ func file_netp2p_v1_netp2p_proto_rawDescGZIP() []byte {
 	return file_netp2p_v1_netp2p_proto_rawDescData
 }
 
-var file_netp2p_v1_netp2p_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
+var file_netp2p_v1_netp2p_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_netp2p_v1_netp2p_proto_goTypes = []any{
 	(*CommitteeMember)(nil),     // 0: netp2p.v1.CommitteeMember
 	(*CommitteeConfig)(nil),     // 1: netp2p.v1.CommitteeConfig
@@ -4093,96 +4178,98 @@ var file_netp2p_v1_netp2p_proto_goTypes = []any{
 	(*PathSpec)(nil),            // 4: netp2p.v1.PathSpec
 	(*RouteAssignment)(nil),     // 5: netp2p.v1.RouteAssignment
 	(*User)(nil),                // 6: netp2p.v1.User
-	(*SetupKey)(nil),            // 7: netp2p.v1.SetupKey
-	(*Nameserver)(nil),          // 8: netp2p.v1.Nameserver
-	(*DNSRecord)(nil),           // 9: netp2p.v1.DNSRecord
-	(*DNSZone)(nil),             // 10: netp2p.v1.DNSZone
-	(*DNSSettings)(nil),         // 11: netp2p.v1.DNSSettings
-	(*Group)(nil),               // 12: netp2p.v1.Group
-	(*Service)(nil),             // 13: netp2p.v1.Service
-	(*Policy)(nil),              // 14: netp2p.v1.Policy
-	(*Route)(nil),               // 15: netp2p.v1.Route
-	(*TrafficBudget)(nil),       // 16: netp2p.v1.TrafficBudget
-	(*NetworkState)(nil),        // 17: netp2p.v1.NetworkState
-	(*StateTransition)(nil),     // 18: netp2p.v1.StateTransition
-	(*BudgetUsage)(nil),         // 19: netp2p.v1.BudgetUsage
-	(*QuorumCertificate)(nil),   // 20: netp2p.v1.QuorumCertificate
-	(*SignedSnapshot)(nil),      // 21: netp2p.v1.SignedSnapshot
-	(*Proposal)(nil),            // 22: netp2p.v1.Proposal
-	(*Vote)(nil),                // 23: netp2p.v1.Vote
-	(*CommitteeEnvelope)(nil),   // 24: netp2p.v1.CommitteeEnvelope
-	(*LoginRequest)(nil),        // 25: netp2p.v1.LoginRequest
-	(*LoginResponse)(nil),       // 26: netp2p.v1.LoginResponse
-	(*SyncRequest)(nil),         // 27: netp2p.v1.SyncRequest
-	(*AdmissionReport)(nil),     // 28: netp2p.v1.AdmissionReport
-	(*AdminRequest)(nil),        // 29: netp2p.v1.AdminRequest
-	(*AdminResponse)(nil),       // 30: netp2p.v1.AdminResponse
-	(*PresenceObservation)(nil), // 31: netp2p.v1.PresenceObservation
-	(*PresenceGossip)(nil),      // 32: netp2p.v1.PresenceGossip
-	(*LinkObservation)(nil),     // 33: netp2p.v1.LinkObservation
-	(*LinkGossip)(nil),          // 34: netp2p.v1.LinkGossip
-	(*ProbeRequest)(nil),        // 35: netp2p.v1.ProbeRequest
-	(*ProbeReply)(nil),          // 36: netp2p.v1.ProbeReply
-	(*QuotaReport)(nil),         // 37: netp2p.v1.QuotaReport
-	(*BudgetIncrement)(nil),     // 38: netp2p.v1.BudgetIncrement
+	(*Actor)(nil),               // 7: netp2p.v1.Actor
+	(*SetupKey)(nil),            // 8: netp2p.v1.SetupKey
+	(*Nameserver)(nil),          // 9: netp2p.v1.Nameserver
+	(*DNSRecord)(nil),           // 10: netp2p.v1.DNSRecord
+	(*DNSZone)(nil),             // 11: netp2p.v1.DNSZone
+	(*DNSSettings)(nil),         // 12: netp2p.v1.DNSSettings
+	(*Group)(nil),               // 13: netp2p.v1.Group
+	(*Service)(nil),             // 14: netp2p.v1.Service
+	(*Policy)(nil),              // 15: netp2p.v1.Policy
+	(*Route)(nil),               // 16: netp2p.v1.Route
+	(*TrafficBudget)(nil),       // 17: netp2p.v1.TrafficBudget
+	(*NetworkState)(nil),        // 18: netp2p.v1.NetworkState
+	(*StateTransition)(nil),     // 19: netp2p.v1.StateTransition
+	(*BudgetUsage)(nil),         // 20: netp2p.v1.BudgetUsage
+	(*QuorumCertificate)(nil),   // 21: netp2p.v1.QuorumCertificate
+	(*SignedSnapshot)(nil),      // 22: netp2p.v1.SignedSnapshot
+	(*Proposal)(nil),            // 23: netp2p.v1.Proposal
+	(*Vote)(nil),                // 24: netp2p.v1.Vote
+	(*CommitteeEnvelope)(nil),   // 25: netp2p.v1.CommitteeEnvelope
+	(*LoginRequest)(nil),        // 26: netp2p.v1.LoginRequest
+	(*LoginResponse)(nil),       // 27: netp2p.v1.LoginResponse
+	(*SyncRequest)(nil),         // 28: netp2p.v1.SyncRequest
+	(*AdmissionReport)(nil),     // 29: netp2p.v1.AdmissionReport
+	(*AdminRequest)(nil),        // 30: netp2p.v1.AdminRequest
+	(*AdminResponse)(nil),       // 31: netp2p.v1.AdminResponse
+	(*PresenceObservation)(nil), // 32: netp2p.v1.PresenceObservation
+	(*PresenceGossip)(nil),      // 33: netp2p.v1.PresenceGossip
+	(*LinkObservation)(nil),     // 34: netp2p.v1.LinkObservation
+	(*LinkGossip)(nil),          // 35: netp2p.v1.LinkGossip
+	(*ProbeRequest)(nil),        // 36: netp2p.v1.ProbeRequest
+	(*ProbeReply)(nil),          // 37: netp2p.v1.ProbeReply
+	(*QuotaReport)(nil),         // 38: netp2p.v1.QuotaReport
+	(*BudgetIncrement)(nil),     // 39: netp2p.v1.BudgetIncrement
 }
 var file_netp2p_v1_netp2p_proto_depIdxs = []int32{
 	4,  // 0: netp2p.v1.RouteAssignment.primary:type_name -> netp2p.v1.PathSpec
 	4,  // 1: netp2p.v1.RouteAssignment.fallbacks:type_name -> netp2p.v1.PathSpec
-	9,  // 2: netp2p.v1.DNSZone.records:type_name -> netp2p.v1.DNSRecord
-	13, // 3: netp2p.v1.Policy.services:type_name -> netp2p.v1.Service
+	10, // 2: netp2p.v1.DNSZone.records:type_name -> netp2p.v1.DNSRecord
+	14, // 3: netp2p.v1.Policy.services:type_name -> netp2p.v1.Service
 	2,  // 4: netp2p.v1.NetworkState.peers:type_name -> netp2p.v1.PeerRecord
 	6,  // 5: netp2p.v1.NetworkState.users:type_name -> netp2p.v1.User
-	12, // 6: netp2p.v1.NetworkState.groups:type_name -> netp2p.v1.Group
-	14, // 7: netp2p.v1.NetworkState.policies:type_name -> netp2p.v1.Policy
-	15, // 8: netp2p.v1.NetworkState.routes:type_name -> netp2p.v1.Route
-	16, // 9: netp2p.v1.NetworkState.budgets:type_name -> netp2p.v1.TrafficBudget
-	7,  // 10: netp2p.v1.NetworkState.setup_keys:type_name -> netp2p.v1.SetupKey
-	8,  // 11: netp2p.v1.NetworkState.nameservers:type_name -> netp2p.v1.Nameserver
-	10, // 12: netp2p.v1.NetworkState.zones:type_name -> netp2p.v1.DNSZone
-	11, // 13: netp2p.v1.NetworkState.dns_settings:type_name -> netp2p.v1.DNSSettings
+	13, // 6: netp2p.v1.NetworkState.groups:type_name -> netp2p.v1.Group
+	15, // 7: netp2p.v1.NetworkState.policies:type_name -> netp2p.v1.Policy
+	16, // 8: netp2p.v1.NetworkState.routes:type_name -> netp2p.v1.Route
+	17, // 9: netp2p.v1.NetworkState.budgets:type_name -> netp2p.v1.TrafficBudget
+	8,  // 10: netp2p.v1.NetworkState.setup_keys:type_name -> netp2p.v1.SetupKey
+	9,  // 11: netp2p.v1.NetworkState.nameservers:type_name -> netp2p.v1.Nameserver
+	11, // 12: netp2p.v1.NetworkState.zones:type_name -> netp2p.v1.DNSZone
+	12, // 13: netp2p.v1.NetworkState.dns_settings:type_name -> netp2p.v1.DNSSettings
 	3,  // 14: netp2p.v1.NetworkState.settings:type_name -> netp2p.v1.NetworkSettings
 	5,  // 15: netp2p.v1.NetworkState.assignments:type_name -> netp2p.v1.RouteAssignment
 	1,  // 16: netp2p.v1.NetworkState.committee_config:type_name -> netp2p.v1.CommitteeConfig
 	2,  // 17: netp2p.v1.StateTransition.peer:type_name -> netp2p.v1.PeerRecord
-	12, // 18: netp2p.v1.StateTransition.group:type_name -> netp2p.v1.Group
-	14, // 19: netp2p.v1.StateTransition.policy:type_name -> netp2p.v1.Policy
-	15, // 20: netp2p.v1.StateTransition.route:type_name -> netp2p.v1.Route
-	16, // 21: netp2p.v1.StateTransition.budget:type_name -> netp2p.v1.TrafficBudget
-	7,  // 22: netp2p.v1.StateTransition.setup_key_record:type_name -> netp2p.v1.SetupKey
-	8,  // 23: netp2p.v1.StateTransition.nameserver:type_name -> netp2p.v1.Nameserver
-	10, // 24: netp2p.v1.StateTransition.zone:type_name -> netp2p.v1.DNSZone
-	11, // 25: netp2p.v1.StateTransition.dns_settings:type_name -> netp2p.v1.DNSSettings
+	13, // 18: netp2p.v1.StateTransition.group:type_name -> netp2p.v1.Group
+	15, // 19: netp2p.v1.StateTransition.policy:type_name -> netp2p.v1.Policy
+	16, // 20: netp2p.v1.StateTransition.route:type_name -> netp2p.v1.Route
+	17, // 21: netp2p.v1.StateTransition.budget:type_name -> netp2p.v1.TrafficBudget
+	8,  // 22: netp2p.v1.StateTransition.setup_key_record:type_name -> netp2p.v1.SetupKey
+	9,  // 23: netp2p.v1.StateTransition.nameserver:type_name -> netp2p.v1.Nameserver
+	11, // 24: netp2p.v1.StateTransition.zone:type_name -> netp2p.v1.DNSZone
+	12, // 25: netp2p.v1.StateTransition.dns_settings:type_name -> netp2p.v1.DNSSettings
 	6,  // 26: netp2p.v1.StateTransition.user:type_name -> netp2p.v1.User
 	3,  // 27: netp2p.v1.StateTransition.settings:type_name -> netp2p.v1.NetworkSettings
 	5,  // 28: netp2p.v1.StateTransition.assignment:type_name -> netp2p.v1.RouteAssignment
 	1,  // 29: netp2p.v1.StateTransition.committee_config:type_name -> netp2p.v1.CommitteeConfig
 	0,  // 30: netp2p.v1.StateTransition.committee:type_name -> netp2p.v1.CommitteeMember
-	19, // 31: netp2p.v1.StateTransition.budget_usage:type_name -> netp2p.v1.BudgetUsage
-	17, // 32: netp2p.v1.SignedSnapshot.state:type_name -> netp2p.v1.NetworkState
-	0,  // 33: netp2p.v1.SignedSnapshot.committee:type_name -> netp2p.v1.CommitteeMember
-	20, // 34: netp2p.v1.SignedSnapshot.qc:type_name -> netp2p.v1.QuorumCertificate
-	18, // 35: netp2p.v1.SignedSnapshot.transition:type_name -> netp2p.v1.StateTransition
-	1,  // 36: netp2p.v1.SignedSnapshot.committee_config:type_name -> netp2p.v1.CommitteeConfig
-	17, // 37: netp2p.v1.Proposal.state:type_name -> netp2p.v1.NetworkState
-	18, // 38: netp2p.v1.Proposal.transition:type_name -> netp2p.v1.StateTransition
-	22, // 39: netp2p.v1.CommitteeEnvelope.proposal:type_name -> netp2p.v1.Proposal
-	23, // 40: netp2p.v1.CommitteeEnvelope.vote:type_name -> netp2p.v1.Vote
-	21, // 41: netp2p.v1.CommitteeEnvelope.snapshot:type_name -> netp2p.v1.SignedSnapshot
-	18, // 42: netp2p.v1.CommitteeEnvelope.transition:type_name -> netp2p.v1.StateTransition
-	21, // 43: netp2p.v1.LoginResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
-	2,  // 44: netp2p.v1.LoginResponse.peer:type_name -> netp2p.v1.PeerRecord
-	28, // 45: netp2p.v1.SyncRequest.admissions:type_name -> netp2p.v1.AdmissionReport
-	18, // 46: netp2p.v1.AdminRequest.transition:type_name -> netp2p.v1.StateTransition
-	21, // 47: netp2p.v1.AdminResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
-	31, // 48: netp2p.v1.PresenceGossip.observations:type_name -> netp2p.v1.PresenceObservation
-	33, // 49: netp2p.v1.LinkGossip.observations:type_name -> netp2p.v1.LinkObservation
-	38, // 50: netp2p.v1.QuotaReport.increments:type_name -> netp2p.v1.BudgetIncrement
-	51, // [51:51] is the sub-list for method output_type
-	51, // [51:51] is the sub-list for method input_type
-	51, // [51:51] is the sub-list for extension type_name
-	51, // [51:51] is the sub-list for extension extendee
-	0,  // [0:51] is the sub-list for field type_name
+	20, // 31: netp2p.v1.StateTransition.budget_usage:type_name -> netp2p.v1.BudgetUsage
+	7,  // 32: netp2p.v1.StateTransition.actor:type_name -> netp2p.v1.Actor
+	18, // 33: netp2p.v1.SignedSnapshot.state:type_name -> netp2p.v1.NetworkState
+	0,  // 34: netp2p.v1.SignedSnapshot.committee:type_name -> netp2p.v1.CommitteeMember
+	21, // 35: netp2p.v1.SignedSnapshot.qc:type_name -> netp2p.v1.QuorumCertificate
+	19, // 36: netp2p.v1.SignedSnapshot.transition:type_name -> netp2p.v1.StateTransition
+	1,  // 37: netp2p.v1.SignedSnapshot.committee_config:type_name -> netp2p.v1.CommitteeConfig
+	18, // 38: netp2p.v1.Proposal.state:type_name -> netp2p.v1.NetworkState
+	19, // 39: netp2p.v1.Proposal.transition:type_name -> netp2p.v1.StateTransition
+	23, // 40: netp2p.v1.CommitteeEnvelope.proposal:type_name -> netp2p.v1.Proposal
+	24, // 41: netp2p.v1.CommitteeEnvelope.vote:type_name -> netp2p.v1.Vote
+	22, // 42: netp2p.v1.CommitteeEnvelope.snapshot:type_name -> netp2p.v1.SignedSnapshot
+	19, // 43: netp2p.v1.CommitteeEnvelope.transition:type_name -> netp2p.v1.StateTransition
+	22, // 44: netp2p.v1.LoginResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
+	2,  // 45: netp2p.v1.LoginResponse.peer:type_name -> netp2p.v1.PeerRecord
+	29, // 46: netp2p.v1.SyncRequest.admissions:type_name -> netp2p.v1.AdmissionReport
+	19, // 47: netp2p.v1.AdminRequest.transition:type_name -> netp2p.v1.StateTransition
+	22, // 48: netp2p.v1.AdminResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
+	32, // 49: netp2p.v1.PresenceGossip.observations:type_name -> netp2p.v1.PresenceObservation
+	34, // 50: netp2p.v1.LinkGossip.observations:type_name -> netp2p.v1.LinkObservation
+	39, // 51: netp2p.v1.QuotaReport.increments:type_name -> netp2p.v1.BudgetIncrement
+	52, // [52:52] is the sub-list for method output_type
+	52, // [52:52] is the sub-list for method input_type
+	52, // [52:52] is the sub-list for extension type_name
+	52, // [52:52] is the sub-list for extension extendee
+	0,  // [0:52] is the sub-list for field type_name
 }
 
 func init() { file_netp2p_v1_netp2p_proto_init() }
@@ -4196,7 +4283,7 @@ func file_netp2p_v1_netp2p_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_netp2p_v1_netp2p_proto_rawDesc), len(file_netp2p_v1_netp2p_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   39,
+			NumMessages:   40,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -366,4 +366,73 @@ func TestWebOperationalEndpoints(t *testing.T) {
 	if entry.CommitteeEpoch != 0 && len(entry.SignerBitmap) == 0 {
 		t.Fatalf("audit event lacks a signer bitmap: %+v", entry)
 	}
+
+	// The static admin token maps to a stable break-glass actor, and a caller
+	// must not be able to forge one by sending it in the request body.
+	transition := model.StateTransition{
+		Type:  bft.TransitionUpsertGroup,
+		Group: &model.Group{ID: "actor-forged"},
+		Actor: &model.Actor{ID: "attacker", Name: "Mallory", Role: model.RoleOwner},
+	}
+	body, _ := json.Marshal(web.TransitionRequest{Transition: transition})
+	writeRequest, _ := http.NewRequest(http.MethodPost, "/api/v1/transitions", bytes.NewReader(body))
+	writeRequest.Header.Set("Authorization", "Bearer test-token")
+	writeResponse, err := client.Do(writeRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writeResponse.Body.Close()
+	if writeResponse.StatusCode != http.StatusOK {
+		t.Fatalf("forged-actor transition status %d, want 200", writeResponse.StatusCode)
+	}
+	var certified model.SignedSnapshot
+	if err := json.NewDecoder(writeResponse.Body).Decode(&certified); err != nil {
+		t.Fatal(err)
+	}
+	if certified.Transition.Actor == nil {
+		t.Fatal("certified transition has no actor")
+	}
+	if certified.Transition.Actor.ID != "static-admin" {
+		t.Fatalf("caller-supplied actor was not overridden: %+v", certified.Transition.Actor)
+	}
+
+	// Filtering by actor must return the break-glass events and exclude others.
+	filteredRequest, _ := http.NewRequest(http.MethodGet, "/api/v1/events?actor=static-admin", nil)
+	filteredRequest.Header.Set("Authorization", "Bearer test-token")
+	filteredResponse, err := client.Do(filteredRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer filteredResponse.Body.Close()
+	var filtered struct {
+		Events []web.AuditEvent `json:"events"`
+	}
+	if err := json.NewDecoder(filteredResponse.Body).Decode(&filtered); err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Events) == 0 {
+		t.Fatal("actor filter returned no break-glass events")
+	}
+	for _, event := range filtered.Events {
+		if event.Actor == nil || event.Actor.ID != "static-admin" {
+			t.Fatalf("actor filter leaked a foreign event: %+v", event.Actor)
+		}
+	}
+
+	missingRequest, _ := http.NewRequest(http.MethodGet, "/api/v1/events?actor=nobody", nil)
+	missingRequest.Header.Set("Authorization", "Bearer test-token")
+	missingResponse, err := client.Do(missingRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer missingResponse.Body.Close()
+	var missing struct {
+		Events []web.AuditEvent `json:"events"`
+	}
+	if err := json.NewDecoder(missingResponse.Body).Decode(&missing); err != nil {
+		t.Fatal(err)
+	}
+	if len(missing.Events) != 0 {
+		t.Fatalf("unknown actor returned %d events, want 0", len(missing.Events))
+	}
 }

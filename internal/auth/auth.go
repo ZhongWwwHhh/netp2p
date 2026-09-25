@@ -196,6 +196,33 @@ func BreakGlass() Identity {
 	return Identity{Role: model.RoleOwner, Name: "static admin token", Static: true}
 }
 
+// ActorOf renders an identity as the audit actor attached to a certified
+// transition. The static break-glass token has no subject, so it gets a stable
+// synthetic id. Actor is evidence only and never affects authorization.
+func ActorOf(identity Identity) model.Actor {
+	actor := model.Actor{Name: identity.Name, Role: identity.Role, Static: identity.Static}
+	switch {
+	case identity.Subject != "":
+		actor.ID = identity.Subject
+	case identity.UserID != "":
+		actor.ID = identity.UserID
+	case identity.Static:
+		actor.ID = "static-admin"
+	default:
+		actor.ID = "unknown"
+	}
+	if actor.Name == "" {
+		actor.Name = identity.Email
+	}
+	return actor
+}
+
+// PeerActor is the actor recorded for a device that registers itself through
+// the login stream. There is no human identity, so the peer id is the subject.
+func PeerActor(peerID string) model.Actor {
+	return model.Actor{ID: "peer:" + peerID, Name: peerID, Role: "device"}
+}
+
 // PermissionError describes an authorization failure without leaking state.
 type PermissionError struct {
 	Role   string
