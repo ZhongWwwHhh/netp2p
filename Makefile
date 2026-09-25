@@ -1,7 +1,9 @@
-.PHONY: ui build test e2e proto
+.PHONY: ui build test e2e proto race package
 
 GOBIN := $(shell go env GOPATH)/bin
 PROTOC_GEN_GO_VERSION := v1.36.11
+NFPM_VERSION := v2.47.0
+VERSION ?= 0.0.0-dev
 
 proto:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
@@ -20,6 +22,7 @@ build: ui
 test: ui
 	cd ui && npm test
 	go test ./...
+	go test -race ./internal/...
 	go vet ./...
 
 race:
@@ -27,3 +30,7 @@ race:
 
 e2e:
 	scripts/e2e.sh
+
+package: build
+	go install github.com/goreleaser/nfpm/v2/cmd/nfpm@$(NFPM_VERSION)
+	VERSION=$(VERSION) "$(GOBIN)/nfpm" package -f packaging/nfpm.yaml -p deb -p rpm --target dist

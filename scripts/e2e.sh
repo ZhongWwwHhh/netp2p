@@ -104,4 +104,26 @@ echo "client-c overlayIP=$C_IP certified height=$C_HEIGHT"
 [ "$C_HEIGHT" -ge 4 ] || fail "client-c certified height $C_HEIGHT, want >= 4"
 echo "OK: three managers certified a new registration"
 
+log "client status must report certified assignments and a live height"
+python3 - "$RUN_DIR/client-a.json" <<'PY' || fail "client-a status missing assignment fields"
+import json, sys
+status = json.load(open(sys.argv[1]))
+assert isinstance(status.get("assignments"), list), "assignments must be a list"
+assert int(status.get("height", 0)) >= 2, f"height too low: {status.get('height')}"
+for path in status["assignments"]:
+    assert path.get("kind") in ("direct", "via_manager"), f"unexpected path kind {path.get('kind')}"
+PY
+echo "OK: client-a status carries certified assignment data"
+
+log "manager metrics endpoint must be scrapable"
+metrics=""
+for _ in $(seq 1 20); do
+  metrics="$(curl -fsS http://127.0.0.1:9100/metrics 2>/dev/null || true)"
+  [ -n "$metrics" ] && break
+  sleep 1
+done
+printf '%s' "$metrics" | grep -q 'netp2p_bft_height' || fail "metrics endpoint missing netp2p_bft_height"
+printf '%s' "$metrics" | grep -q 'netp2p_forward' || fail "metrics endpoint missing forwarding metrics"
+echo "OK: /metrics exposes BFT and forwarding metrics"
+
 log "e2e passed"

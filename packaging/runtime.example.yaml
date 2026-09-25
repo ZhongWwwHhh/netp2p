@@ -1,0 +1,18 @@
+# NetP2P runtime configuration. Every key maps to a netp2pd flag, and any flag
+# set explicitly on the command line overrides this file.
+#
+# This file configures how a node runs, not the network topology. The
+# cryptographic topology (committee members, groups, policies) lives in the
+# seed passed with --config.
+role: manager
+dataDir: /var/lib/netp2p
+listen: /ip4/0.0.0.0/udp/4001/quic-v1
+webListen: 0.0.0.0:8080
+metricsListen: 127.0.0.1:9100
+
+# Client-only settings (ignored by the manager role):
+# manager: /dns4/manager-1/udp/4001/quic-v1/p2p/<peer-id>
+# setupKey: <setup-key>
+# tun: netp2p0
+# dnsListen: 127.0.0.1:53
+# dnsManageResolvConf: true

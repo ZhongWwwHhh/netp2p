@@ -1,0 +1,26 @@
+[Unit]
+Description=NetP2P overlay node
+Documentation=https://github.com/netp2p/netp2p
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/netp2pd --role doctor --config-file /etc/netp2p/runtime.yaml
+ExecStart=/usr/bin/netp2pd --config-file /etc/netp2p/runtime.yaml
+Restart=on-failure
+RestartSec=3
+
+# TUN and DNS takeover need CAP_NET_ADMIN; drop everything else. When running
+# without TUN (userspace endpoint) these can be removed entirely.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=netp2p
+ReadWritePaths=/var/lib/netp2p
+
+[Install]
+WantedBy=multi-user.target

@@ -103,11 +103,7 @@ func runClient(ctx context.Context, options clientOptions) error {
 			log.Printf("packet endpoint stopped: %v", err)
 		}
 	}()
-	status, err := json.Marshal(map[string]any{
-		"peerID": node.Host.ID().String(), "overlayIP": netClient.Self().OverlayIP,
-		"height": netClient.SnapshotHeight(), "packetListen": options.packetListen,
-		"mode": clientMode(tunDevice),
-	})
+	status, err := clientStatus(node, netClient, options, tunDevice)
 	if err != nil {
 		return err
 	}
@@ -116,9 +112,52 @@ func runClient(ctx context.Context, options clientOptions) error {
 		if err := os.WriteFile(options.statusFile, status, 0o644); err != nil {
 			return fmt.Errorf("write status file: %w", err)
 		}
+		go runStatusWriter(ctx, node, netClient, options, tunDevice)
 	}
 	<-ctx.Done()
 	return nil
+}
+
+// clientStatus renders the operator-facing status file. Certified assignments
+// are included so tests and operators can see which path the client is using
+// without opening the console.
+func clientStatus(node *p2p.Node, netClient *client.Client, options clientOptions, tunDevice *tun.Device) ([]byte, error) {
+	snapshot := netClient.Snapshot()
+	paths := make([]map[string]any, 0, len(snapshot.State.Assignments))
+	for _, assignment := range snapshot.State.Assignments {
+		if assignment.SourcePeerID != netClient.Self().PeerID {
+			continue
+		}
+		paths = append(paths, map[string]any{
+			"destination": assignment.DestinationPeerID,
+			"kind":        assignment.Primary.Kind,
+			"hops":        assignment.Primary.ManagerHops,
+			"rttMs":       assignment.Primary.RTTMilliseconds,
+			"lossPct":     assignment.Primary.LossPercent,
+		})
+	}
+	return json.Marshal(map[string]any{
+		"peerID": node.Host.ID().String(), "overlayIP": netClient.Self().OverlayIP,
+		"height": netClient.SnapshotHeight(), "packetListen": options.packetListen,
+		"mode": clientMode(tunDevice), "assignments": paths,
+	})
+}
+
+func runStatusWriter(ctx context.Context, node *p2p.Node, netClient *client.Client, options clientOptions, tunDevice *tun.Device) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			status, err := clientStatus(node, netClient, options, tunDevice)
+			if err != nil {
+				continue
+			}
+			_ = os.WriteFile(options.statusFile, status, 0o644)
+		}
+	}
 }
 
 // startDNS brings up the local resolver and optionally points the host at it.

@@ -119,3 +119,35 @@ func TestChaosDuplicateMessagesDoNotBreakConsensus(t *testing.T) {
 		t.Fatal("chaos controller duplicated nothing")
 	}
 }
+
+// TestChaosLeaderChurn isolates whoever leads the next height, proving the
+// committee rotates to a live leader and still commits rather than stalling.
+func TestChaosLeaderChurn(t *testing.T) {
+	controller := chaos.New()
+	group := newClusterWithHook(t, testState(), manager.Config{}, controller.HookFor)
+	waitForCommitteeHeight(t, group, 1)
+
+	leader := group.engines[0].Leader(2, 0)
+	leaderIndex := -1
+	for index, member := range group.members {
+		if member.ID == leader.ID {
+			leaderIndex = index
+		}
+	}
+	if leaderIndex < 0 {
+		t.Fatalf("height-2 leader %q is not a committee member", leader.ID)
+	}
+	controller.Isolate(group.members[leaderIndex].PeerID)
+
+	// Submit through a survivor so the originating node can still reach the
+	// rotated leader once it moves past the isolated round 0.
+	submitter := (leaderIndex + 1) % len(group.meshes)
+	transition := model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "churn-group"}}
+	snapshot, err := group.meshes[submitter].Submit(transition)
+	if err != nil {
+		t.Fatalf("submit after isolating the next leader: %v", err)
+	}
+	if snapshot.Height < 2 {
+		t.Fatalf("committed height %d, want >= 2", snapshot.Height)
+	}
+}

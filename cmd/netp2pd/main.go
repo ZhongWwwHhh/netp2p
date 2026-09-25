@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	role := flag.String("role", "node", "node, manager, client or seedgen")
+	role := flag.String("role", "node", "node, manager, client, admin, doctor or seedgen")
 	dataDir := flag.String("data-dir", ".netp2p", "libp2p identity and node data directory")
 	listen := flag.String("listen", "/ip4/0.0.0.0/udp/0/quic-v1", "libp2p listen multiaddr")
 	webListen := flag.String("web-listen", "0.0.0.0:8080", "manager browser bootstrap HTTP address")
@@ -40,7 +40,11 @@ func main() {
 	adminFile := flag.String("file", "", "JSON record file for upsert actions or target ID for remove actions")
 	adminTarget := flag.String("target", "", "target ID for remove actions")
 	metricsListen := flag.String("metrics-listen", "", "manager Prometheus /metrics address (empty disables metrics)")
+	configFile := flag.String("config-file", "", "YAML or JSON runtime config; command-line flags override it")
 	flag.Parse()
+	if err := applyRuntimeConfig(*configFile); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -82,6 +86,14 @@ func main() {
 		return
 	case "seedgen":
 		if err := writeSeed(*configPath); err != nil {
+			log.Fatal(err)
+		}
+		return
+	case "doctor":
+		if err := runDoctor(ctx, doctorOptions{
+			dataDir: *dataDir, managerAddr: *managerAddr, seedPath: *configPath,
+			tunName: *tunName, dnsListen: *dnsListen,
+		}); err != nil {
 			log.Fatal(err)
 		}
 		return

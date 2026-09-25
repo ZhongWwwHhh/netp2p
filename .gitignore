@@ -6,3 +6,4 @@ deploy/state.json
 ui/node_modules/
 ui/dist/
 bin/
+dist/
