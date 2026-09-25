@@ -11,11 +11,24 @@
 
   const snapshot = $derived(network.snapshot);
   const committee = $derived(snapshot?.committee ?? []);
-  const signed = $derived(new Set(snapshot?.qc.signers ?? []));
+  const ordered = $derived([...committee].sort((left, right) => left.id.localeCompare(right.id)));
+  // The QC records which committee shares contributed as a bitmap over the
+  // sorted committee order.
+  const signed = $derived.by(() => {
+    const set = new Set<string>();
+    const bitmap = snapshot?.qc.signerBitmap;
+    const bytes = typeof bitmap === 'string'
+      ? Array.from(atob(bitmap), (char) => char.charCodeAt(0))
+      : (bitmap ?? []);
+    ordered.forEach((member, index) => {
+      const byte = bytes[Math.floor(index / 8)];
+      if (byte !== undefined && (byte & (1 << (index % 8)))) set.add(member.id);
+    });
+    return set;
+  });
   // The leader of the next height is determined by committee order and round.
   const nextLeader = $derived.by(() => {
     if (!snapshot || committee.length === 0) return '';
-    const ordered = [...committee].sort((left, right) => left.id.localeCompare(right.id));
     return ordered[(snapshot.height + 1) % ordered.length]?.id ?? '';
   });
 </script>
@@ -30,12 +43,12 @@
         <p class="mt-1 text-2xl font-semibold text-slate-900">{snapshot.height}</p>
       </div>
       <div class="surface p-4">
-        <p class="text-xs uppercase tracking-wide text-slate-500">Epoch</p>
-        <p class="mt-1 text-2xl font-semibold text-slate-900">{snapshot.epoch}</p>
+        <p class="text-xs uppercase tracking-wide text-slate-500">Committee epoch</p>
+        <p class="mt-1 text-2xl font-semibold text-slate-900">{snapshot.qc.committeeEpoch}</p>
       </div>
       <div class="surface p-4">
         <p class="text-xs uppercase tracking-wide text-slate-500">QC signers</p>
-        <p class="mt-1 text-2xl font-semibold text-slate-900">{snapshot.qc.signers.length}/{committee.length}</p>
+        <p class="mt-1 text-2xl font-semibold text-slate-900">{signed.size}/{committee.length}</p>
         <p class="text-xs text-slate-500">quorum {QuorumSize}</p>
       </div>
       <div class="surface p-4">

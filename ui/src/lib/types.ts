@@ -147,8 +147,40 @@ export interface QC {
   round: number;
   stateHash: string;
   transitionHash: string;
-  signers: string[];
-  signatures: string[];
+  // Threshold BLS: a single aggregated group signature plus a bitmap of the
+  // committee shares that contributed.
+  aggregateSignature?: string;
+  signerBitmap?: number[] | string;
+  committeeEpoch: number;
+}
+
+export interface AuditEvent {
+  height: number;
+  type: string;
+  leaderId: string;
+  signerBitmap?: number[] | string;
+  stateHash: string;
+  transitionHash: string;
+  committeeEpoch: number;
+}
+
+export interface Diagnostics {
+  protocolVersion: string;
+  manager: string;
+  networkId: string;
+  height: number;
+  quorumSize: number;
+  committeeSize: number;
+  peers: number;
+  groups: number;
+  policies: number;
+  budgets: number;
+  assignments: number;
+  linkSegments: number;
+  presence: Presence[];
+  forwarding: { forwarded: number; dropped: number };
+  quotaUsage: Budget[];
+  problems: string[];
 }
 
 export interface State {
@@ -176,8 +208,16 @@ export interface Snapshot {
   state: State;
   committee: CommitteeMember[];
   qc: QC;
+  committeeConfig?: CommitteeConfig;
   transition: StateTransition;
   leaderId: string;
+}
+
+export interface CommitteeConfig {
+  threshold: number;
+  size: number;
+  groupPublicKey?: string;
+  committeeEpoch: number;
 }
 
 export interface Nameserver {

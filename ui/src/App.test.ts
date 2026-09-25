@@ -3,7 +3,7 @@ import { multiaddr } from '@multiformats/multiaddr';
 import { bitrateLabel, bytesLabel, percent, relativeTime, shortPeerId } from './lib/format';
 import { normalizePresence, normalizeSnapshot } from './lib/normalize';
 import { httpResource, joinProtocolPath } from './lib/paths';
-import { QuorumSize } from './lib/quorum';
+import { QuorumSize, signerCount } from './lib/quorum';
 import { defaultPath, routeTitle, routes } from './lib/router.svelte';
 import type { Presence, Snapshot, StateTransition } from './lib/types';
 import { verifySnapshot } from './lib/verifier';
@@ -32,6 +32,7 @@ function committee(size: number) {
     peerId: `peer-${index + 1}`,
     address: `/dns4/manager-${index + 1}/udp/4001/quic-v1`,
     publicKey: 'AAAA',
+    blsPublicKey: 'BBBB',
   }));
 }
 
@@ -47,9 +48,11 @@ function baseSnapshot(): Snapshot {
       round: 0,
       stateHash: 'hash',
       transitionHash: 'transition',
-      signers: ['manager-1', 'manager-2', 'manager-3'],
-      signatures: ['a', 'b', 'c'],
+      aggregateSignature: 'AAAA',
+      signerBitmap: [0b00000111],
+      committeeEpoch: 0,
     },
+    committeeConfig: { threshold: 3, size: 4, groupPublicKey: 'pub', committeeEpoch: 0 },
     transition: { type: 'upsert_group', group: { id: 'g' } },
     leaderId: 'manager-2',
   };
@@ -160,15 +163,25 @@ describe('snapshot verifier', () => {
     expect(QuorumSize).toBe(3);
   });
 
-  it('rejects a sub-quorum or unknown signers', () => {
+  it('counts contributing shares from the signer bitmap', () => {
+    expect(signerCount([0b00000111])).toBe(3);
+    expect(signerCount([0b00000001, 0b00000100])).toBe(2);
+    expect(signerCount(undefined)).toBe(0);
+    expect(signerCount('Hw==')).toBe(5);
+  });
+
+  it('rejects a sub-quorum or missing aggregate signature', () => {
     const weak = baseSnapshot();
-    weak.qc.signers = ['manager-1'];
-    weak.qc.signatures = ['a'];
+    weak.qc.signerBitmap = [0b1];
     expect(verifySnapshot(weak)).toBe(false);
 
-    const foreign = baseSnapshot();
-    foreign.qc.signers = ['manager-1', 'manager-2', 'ghost'];
-    expect(verifySnapshot(foreign)).toBe(false);
+    const unsigned = baseSnapshot();
+    delete unsigned.qc.aggregateSignature;
+    expect(verifySnapshot(unsigned)).toBe(false);
+
+    const mismatched = baseSnapshot();
+    mismatched.qc.height = 2;
+    expect(verifySnapshot(mismatched)).toBe(false);
   });
 
   it('does not throw on malformed input', () => {

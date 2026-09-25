@@ -4,6 +4,7 @@
   import PageHeader from '../components/PageHeader.svelte';
   import Skeleton from '../components/Skeleton.svelte';
   import { shortHash } from '../format';
+  import { signerCount } from '../quorum';
   import { network, refreshActivity } from '../stores/network.svelte';
   import type { Snapshot } from '../types';
 
@@ -70,6 +71,7 @@
     if (type.startsWith('upsert_') || type.startsWith('update_')) return 'emerald';
     return 'sky';
   }
+
 </script>
 
 <div class="space-y-5">
@@ -107,7 +109,7 @@
               </div>
               <div class="flex items-center gap-3 text-xs text-slate-500">
                 <span>leader {entry.leaderId || '—'}</span>
-                <span>{entry.qc.signers.length} signers</span>
+                <span>{signerCount(entry.qc.signerBitmap)} signatures · epoch {entry.qc.committeeEpoch}</span>
                 <span class="font-mono" title={entry.qc.transitionHash}>{shortHash(entry.qc.transitionHash, 10)}</span>
                 <button class="btn-ghost text-xs" onclick={() => (expanded = expanded === entry.height ? null : entry.height)}>
                   {expanded === entry.height ? 'Hide' : 'Raw'}
@@ -120,7 +122,7 @@
                 <pre class="mt-1 overflow-x-auto font-mono text-xs text-slate-700">{JSON.stringify(entry.transition, null, 2)}</pre>
                 <p class="mt-2 text-xs font-medium text-slate-500">Certificate</p>
                 <p class="mt-1 break-all font-mono text-xs text-slate-700">
-                  state {entry.stateHash} · round {entry.qc.round} · signers {entry.qc.signers.join(', ')}
+                  state {entry.stateHash} · round {entry.qc.round} · epoch {entry.qc.committeeEpoch}
                 </p>
               </div>
             {/if}

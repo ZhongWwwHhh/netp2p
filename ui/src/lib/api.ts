@@ -1,5 +1,7 @@
 import { apiClient } from './libp2p';
-import type { ActivityEntry, Bootstrap, Presence, SessionInfo, Snapshot, StateTransition, User } from './types';
+import type {
+  ActivityEntry, AuditEvent, Bootstrap, Diagnostics, Presence, SessionInfo, Snapshot, StateTransition, User,
+} from './types';
 
 export { apiClient };
 
@@ -14,4 +16,6 @@ export interface ApiClient {
   session(): Promise<SessionInfo>;
   users(): Promise<User[]>;
   activity(limit?: number): Promise<ActivityEntry[]>;
+  events(limit?: number): Promise<AuditEvent[]>;
+  diagnostics(): Promise<Diagnostics>;
 }
