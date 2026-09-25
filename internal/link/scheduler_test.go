@@ -44,10 +44,11 @@ func TestSchedulerCreatesAndUpdatesAssignments(t *testing.T) {
 	committee := []model.CommitteeMember{{
 		ID: "manager-a", PeerID: testCommitteePeerID(t, 301), ForwardingEnabled: true,
 	}}
+	hop := committee[0].PeerID
 	now := time.Now().UTC()
 	view := Aggregate([]Observation{
-		{ObserverID: "client-a", SubjectID: "manager-a", Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 1, MeasuredAt: now},
-		{ObserverID: "manager-a", SubjectID: "client-b", Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 1, MeasuredAt: now},
+		{ObserverID: "client-a", SubjectID: hop, Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 1, MeasuredAt: now},
+		{ObserverID: hop, SubjectID: "client-b", Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 1, MeasuredAt: now},
 	}, now, time.Minute, 100)
 	manager := &stubSchedulerManager{}
 	scheduler := NewScheduler(manager, committee, func() LinkView { return view })
@@ -69,7 +70,7 @@ func TestSchedulerCreatesAndUpdatesAssignments(t *testing.T) {
 	}
 	foundViaManager := false
 	for _, path := range assignment.Fallbacks {
-		if path.Kind == model.PathKindViaManager && len(path.ManagerHops) == 1 && path.ManagerHops[0] == "manager-a" {
+		if path.Kind == model.PathKindViaManager && len(path.ManagerHops) == 1 && path.ManagerHops[0] == hop {
 			foundViaManager = true
 		}
 	}

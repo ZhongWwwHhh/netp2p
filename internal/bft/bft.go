@@ -1053,13 +1053,16 @@ func validateManagerPath(committee []model.CommitteeMember, path model.PathSpec)
 	for _, hop := range path.ManagerHops {
 		forwarding := false
 		for _, member := range committee {
-			if member.ID == hop && member.ForwardingEnabled {
+			// Hops are libp2p PeerIDs. Certified state carries the committee
+			// PeerIDs, so the forwarding check is on the same identity the
+			// data plane dials.
+			if member.PeerID == hop && member.ForwardingEnabled {
 				forwarding = true
 				break
 			}
 		}
 		if !forwarding {
-			return fmt.Errorf("manager %q is not a forwarding committee member", hop)
+			return fmt.Errorf("manager with peer id %q is not a forwarding committee member", hop)
 		}
 	}
 	return nil

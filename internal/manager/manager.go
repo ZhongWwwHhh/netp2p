@@ -55,10 +55,15 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 		waiters:    make(map[chan model.SignedSnapshot]struct{}),
 	}
 	if config.Forwarding {
-		manager.forwarding = forward.NewTable(engine.CurrentState(), engine.LocalID(), func(remote peer.ID, envelope forward.Envelope) error {
+		// The forwarding table keys hops by libp2p PeerID, so the local
+		// identity must be the host peer ID rather than the committee label.
+		manager.forwarding = forward.NewTable(engine.CurrentState(), node.Host.ID().String(), func(remote peer.ID, envelope forward.Envelope) error {
 			wire, err := forward.EncodeEnvelope(envelope)
 			if err != nil {
 				return err
+			}
+			if manager.dataTransport == nil {
+				return fmt.Errorf("frame transport not started")
 			}
 			return manager.dataTransport.Send(remote, wire)
 		})
@@ -87,11 +92,7 @@ func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
 	if err != nil {
 		return
 	}
-	source, err := peer.Decode(envelope.Header.SourcePeerID)
-	if err != nil || source != remote {
-		return
-	}
-	if _, err := manager.forwarding.Accept(envelope); err != nil {
+	if _, err := manager.forwarding.Accept(remote, envelope); err != nil {
 		log.Printf("forward frame: %v", err)
 	}
 }
@@ -169,6 +170,15 @@ func (manager *Manager) Height() uint64 {
 
 func (manager *Manager) LocalID() string {
 	return manager.engine.LocalID()
+}
+
+// ForwardingStats reports how many frames this manager forwarded onward and
+// how many it dropped. It is a diagnostic for tests and operators.
+func (manager *Manager) ForwardingStats() (forwarded, dropped uint64) {
+	if manager.forwarding == nil {
+		return 0, 0
+	}
+	return manager.forwarding.Stats()
 }
 
 func (manager *Manager) Leader(height, round uint64) model.CommitteeMember {

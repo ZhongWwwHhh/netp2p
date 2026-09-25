@@ -18,6 +18,9 @@ func TestEnvelopeWireRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if wire[0] != MagicByte {
+		t.Fatalf("envelope magic = %#x, want %#x", wire[0], MagicByte)
+	}
 	decoded, err := DecodeEnvelope(wire)
 	if err != nil {
 		t.Fatal(err)
@@ -41,9 +44,23 @@ func TestEnvelopeWireRejectsMalformed(t *testing.T) {
 	if _, err := DecodeEnvelope(wire[:headerSize-1]); err == nil {
 		t.Fatal("short envelope accepted")
 	}
+	missingMagic := append([]byte{}, wire...)
+	missingMagic[0] = 0x45
+	if _, err := DecodeEnvelope(missingMagic); !errors.Is(err, ErrMalformedEnvelope) {
+		t.Fatalf("missing magic error = %v", err)
+	}
 	truncated := append([]byte{}, wire...)
-	truncated[0] = 99
+	// Corrupt the assignment length so the declared header is inconsistent
+	// with the actual frame size.
+	truncated[5] = 0xff
+	truncated[6] = 0xff
 	if _, err := DecodeEnvelope(truncated); err == nil {
 		t.Fatal("inconsistent header accepted")
+	}
+	oversized := append([]byte{}, wire...)
+	oversized[1] = 0xff
+	oversized[2] = 0xff
+	if _, err := DecodeEnvelope(oversized); err == nil {
+		t.Fatal("oversized source length accepted")
 	}
 }

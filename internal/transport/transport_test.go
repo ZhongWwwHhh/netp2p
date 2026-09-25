@@ -23,7 +23,11 @@ func newTestNode(t *testing.T) (*p2p.Node, context.CancelFunc) {
 	return node, cancel
 }
 
-func TestTransportEnvelopeOnlyWhenPacketHandlerAbsent(t *testing.T) {
+// TestTransportDispatchesBothHandlers verifies that a peer may register both
+// handlers on the shared frame protocol: direct frames reach the packet
+// handler and forwarded envelopes reach the envelope handler, each rejecting
+// the other's framing at the application layer.
+func TestTransportDispatchesBothHandlers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	left, cancelLeft := newTestNode(t)
@@ -36,19 +40,40 @@ func TestTransportEnvelopeOnlyWhenPacketHandlerAbsent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	packets := make(chan []byte, 1)
-	envelopes := make(chan []byte, 1)
+	packets := make(chan []byte, 4)
+	envelopes := make(chan []byte, 4)
 	receiver := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, func(_ peer.ID, payload []byte) {
+		// A direct frame is a raw IPv4 packet; an envelope is rejected by the
+		// magic byte check the client performs.
+		if len(payload) == 0 || payload[0] == forward.MagicByte {
+			return
+		}
 		packets <- payload
 	}, func(_ peer.ID, payload []byte) {
+		if _, err := forward.DecodeEnvelope(payload); err != nil {
+			return
+		}
 		envelopes <- payload
 	})
 	defer receiver.Close()
 	sender := New(ctx, left.Host, p2p.FrameProtocol, nil)
 	defer sender.Close()
 
-	payload := []byte("direct frame")
+	payload := []byte{0x45, 0x00, 0x00, 0x14, 'd', 'i', 'r', 'e', 'c', 't'}
 	if err := sender.Send(right.Host.ID(), payload); err != nil {
+		t.Fatal(err)
+	}
+	envelope, err := forward.EncodeEnvelope(forward.Envelope{
+		Header: forward.Header{
+			SourcePeerID: left.Host.ID().String(), DestinationPeerID: right.Host.ID().String(),
+			AssignmentID: "assignment", PathID: "path", TTL: 3,
+		},
+		Payload: []byte("forwarded"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.Send(right.Host.ID(), envelope); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -61,8 +86,11 @@ func TestTransportEnvelopeOnlyWhenPacketHandlerAbsent(t *testing.T) {
 	}
 	select {
 	case got := <-envelopes:
-		t.Fatalf("envelope handler called for direct packet: %s", got)
-	case <-time.After(50 * time.Millisecond):
+		if !bytes.Equal(got, envelope) {
+			t.Fatal("envelope mismatch")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("envelope handler was not called")
 	}
 }
 

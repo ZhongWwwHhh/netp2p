@@ -739,3 +739,49 @@ func TestNormalizeStateEmitsUsersArray(t *testing.T) {
 		t.Fatalf("state json %s missing empty users array", encoded)
 	}
 }
+
+// TestApplyTransitionValidatesManagerHopsAgainstPeerIDs locks the hop identity
+// contract: route assignment hops are libp2p PeerIDs, matched against the
+// committee's PeerIDs and their forwarding capability.
+func TestApplyTransitionValidatesManagerHopsAgainstPeerIDs(t *testing.T) {
+	state := model.NetworkState{
+		NetworkID:   "net-1",
+		OverlayCIDR: "100.64.0.0/24",
+		Peers: []model.PeerRecord{
+			{PeerID: "client-a", OverlayIP: "100.64.0.1"},
+			{PeerID: "client-b", OverlayIP: "100.64.0.2"},
+		},
+		EngineCommittee: []model.CommitteeMember{
+			{ID: "manager-1", PeerID: "peer-manager-1", ForwardingEnabled: true},
+			{ID: "manager-2", PeerID: "peer-manager-2", ForwardingEnabled: false},
+		},
+	}
+	base := model.RouteAssignment{
+		ID: "assignment", NetworkID: "net-1", SourcePeerID: "client-a", DestinationPeerID: "client-b",
+		Primary: model.PathSpec{ID: "via", Kind: model.PathKindViaManager, ManagerHops: []string{"peer-manager-1"}},
+	}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateAssignment, Assignment: &base}); err != nil {
+		t.Fatalf("peer-id hop rejected: %v", err)
+	}
+
+	// A committee label is not a hop identity.
+	labelHop := base
+	labelHop.Primary = model.PathSpec{ID: "via", Kind: model.PathKindViaManager, ManagerHops: []string{"manager-1"}}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateAssignment, Assignment: &labelHop}); err == nil {
+		t.Fatal("committee label accepted as a hop")
+	}
+
+	// A known PeerID that cannot forward is rejected.
+	nonForwarding := base
+	nonForwarding.Primary = model.PathSpec{ID: "via", Kind: model.PathKindViaManager, ManagerHops: []string{"peer-manager-2"}}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateAssignment, Assignment: &nonForwarding}); err == nil {
+		t.Fatal("non-forwarding manager accepted as a hop")
+	}
+
+	// An empty hop list is rejected outright.
+	empty := base
+	empty.Primary = model.PathSpec{ID: "via", Kind: model.PathKindViaManager}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateAssignment, Assignment: &empty}); err == nil {
+		t.Fatal("empty manager hop list accepted")
+	}
+}

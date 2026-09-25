@@ -5,7 +5,12 @@ import (
 	"errors"
 )
 
-const headerSize = 2 + 2 + 2 + 2 + 1
+const headerSize = 1 + 2 + 2 + 2 + 2 + 1
+
+// MagicByte prefixes every forwarding envelope. Direct overlay frames start
+// with an IPv4 header whose first byte is 0x4X, so the two framing schemes can
+// share one libp2p protocol without ambiguity.
+const MagicByte = 0x02
 
 // MaxFrameSize matches the IPv4 maximum and the framed transport limit.
 const MaxFrameSize = 65535
@@ -13,7 +18,7 @@ const MaxFrameSize = 65535
 var ErrMalformedEnvelope = errors.New("malformed forwarding envelope")
 
 // EncodeEnvelope uses a compact little-endian header:
-// sourceLen | destinationLen | assignmentLen | pathLen | ttl.
+// magic | sourceLen | destinationLen | assignmentLen | pathLen | ttl.
 // libp2p already authenticates the transport peer; strings are carried in-band
 // so the destination can bind them to certified assignments.
 func EncodeEnvelope(envelope Envelope) ([]byte, error) {
@@ -32,6 +37,7 @@ func EncodeEnvelope(envelope Envelope) ([]byte, error) {
 	}
 	size := headerSize + len(source) + len(destination) + len(assignment) + len(path) + len(envelope.Payload)
 	wire := make([]byte, 0, size)
+	wire = append(wire, MagicByte)
 	wire = appendU16(wire, len(source))
 	wire = appendU16(wire, len(destination))
 	wire = appendU16(wire, len(assignment))
@@ -49,11 +55,14 @@ func DecodeEnvelope(wire []byte) (Envelope, error) {
 	if len(wire) < headerSize {
 		return Envelope{}, ErrMalformedEnvelope
 	}
-	sourceLength := int(binary.LittleEndian.Uint16(wire[0:2]))
-	destinationLength := int(binary.LittleEndian.Uint16(wire[2:4]))
-	assignmentLength := int(binary.LittleEndian.Uint16(wire[4:6]))
-	pathLength := int(binary.LittleEndian.Uint16(wire[6:8]))
-	ttl := wire[8]
+	if wire[0] != MagicByte {
+		return Envelope{}, ErrMalformedEnvelope
+	}
+	sourceLength := int(binary.LittleEndian.Uint16(wire[1:3]))
+	destinationLength := int(binary.LittleEndian.Uint16(wire[3:5]))
+	assignmentLength := int(binary.LittleEndian.Uint16(wire[5:7]))
+	pathLength := int(binary.LittleEndian.Uint16(wire[7:9]))
+	ttl := wire[9]
 	required := headerSize + sourceLength + destinationLength + assignmentLength + pathLength
 	if sourceLength == 0 || destinationLength == 0 || assignmentLength == 0 || pathLength == 0 ||
 		required > len(wire) {

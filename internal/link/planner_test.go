@@ -20,14 +20,16 @@ func TestPlannerGeneratesDirectAndManagerFallback(t *testing.T) {
 		},
 	}
 	committee := []model.CommitteeMember{
-		{ID: "manager-a", ForwardingEnabled: true},
-		{ID: "manager-b", ForwardingEnabled: true},
+		{ID: "manager-a", PeerID: testCommitteePeerID(t, 401), ForwardingEnabled: true},
+		{ID: "manager-b", PeerID: testCommitteePeerID(t, 402), ForwardingEnabled: true},
 	}
+	hopA := committee[0].PeerID
+	hopB := committee[1].PeerID
 	now := time.Now().UTC()
 	view := Aggregate([]Observation{
-		{ObserverID: "manager-a", SubjectID: "manager-b", Scope: ScopeManagerMesh, RTTMilliseconds: 20, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
-		{ObserverID: "client-a", SubjectID: "manager-a", Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
-		{ObserverID: "manager-b", SubjectID: "client-b", Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: hopA, SubjectID: hopB, Scope: ScopeManagerMesh, RTTMilliseconds: 20, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: "client-a", SubjectID: hopA, Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: hopB, SubjectID: "client-b", Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
 	}, now, time.Minute, 100)
 
 	assignment, ok := AssignmentFor(AssignmentInput{State: state, Committee: committee, View: view}, "client-a", "client-b", 5)
@@ -40,9 +42,17 @@ func TestPlannerGeneratesDirectAndManagerFallback(t *testing.T) {
 	t.Logf("candidates assignment=%+v view=%+v", assignment, view)
 	foundManagerFallback := false
 	for _, fallback := range assignment.Fallbacks {
-		if fallback.Kind == model.PathKindViaManager && len(fallback.ManagerHops) > 0 {
-			foundManagerFallback = true
+		if fallback.Kind != model.PathKindViaManager || len(fallback.ManagerHops) == 0 {
+			continue
 		}
+		// Hops must be libp2p PeerIDs so the data plane can dial them and BFT
+		// can verify them against the committee.
+		for _, hop := range fallback.ManagerHops {
+			if hop != hopA && hop != hopB {
+				t.Fatalf("hop %q is not a committee PeerID", hop)
+			}
+		}
+		foundManagerFallback = true
 	}
 	if !foundManagerFallback {
 		t.Fatalf("manager fallback missing: %+v", assignment)

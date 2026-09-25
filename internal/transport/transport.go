@@ -119,7 +119,7 @@ func (transport *Transport) handleStream(stream network.Stream) {
 		if transport.onPacket != nil {
 			transport.onPacket(remote, payload)
 		}
-		if transport.onEnvelope != nil && transport.onPacket == nil {
+		if transport.onEnvelope != nil {
 			transport.onEnvelope(remote, payload)
 		}
 	}

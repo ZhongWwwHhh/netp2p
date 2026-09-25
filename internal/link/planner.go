@@ -83,15 +83,15 @@ func candidatePaths(source, destination string, managers []model.CommitteeMember
 		maxHops = 2
 	}
 	for _, first := range managers {
-		appendViaManagerPath(&result, source, destination, []string{first.ID}, view, settings)
+		appendViaManagerPath(&result, source, destination, []string{first.PeerID}, view, settings)
 		if maxHops < 2 {
 			continue
 		}
 		for _, second := range managers {
-			if first.ID == second.ID {
+			if first.PeerID == second.PeerID {
 				continue
 			}
-			appendViaManagerPath(&result, source, destination, []string{first.ID, second.ID}, view, settings)
+			appendViaManagerPath(&result, source, destination, []string{first.PeerID, second.PeerID}, view, settings)
 		}
 	}
 	return result
