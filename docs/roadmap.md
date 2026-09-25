@@ -76,6 +76,7 @@
 - [x] threshold signature（BLS12-381，替代 2f+1 独立 Ed25519 签名）。
 - [x] metrics、审计、混沌测试（`internal/metrics`、`/api/v1/events`、`internal/chaos`）。
 - [ ] tracing（OTLP 可选导出）与告警 webhook（本地规则已可读，导出未接线）。
+- [ ] Docker compose `quota` / `multihop` / `chaos` / `path` profile（当前 chaos/path/quota 场景在进程内 `go test ./internal/...` 覆盖；compose 仅新增 `/metrics` 抓取断言）。
 - [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
 - [ ] Windows/macOS TUN 实现（当前仅接口抽象与 stub）与第三方安全审计。
 - [ ] threshold DKG（替代种子确定性派生）、billing。
