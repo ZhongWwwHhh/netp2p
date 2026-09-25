@@ -18,7 +18,7 @@ import (
 	"github.com/netp2p/netp2p/internal/web"
 )
 
-func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen string) error {
+func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen string, forwarding bool) error {
 	seed, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -51,7 +51,7 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 	node, err := p2p.New(ctx, p2p.Config{
 		DataDir: dataDir, Listen: []string{listenAddr},
 		WebRTCListen: []string{webrtcListen}, IdentitySeed: local.KeySeed,
-		EnableRelayService: true,
+		EnableRelayService: forwarding,
 	})
 	if err != nil {
 		return err

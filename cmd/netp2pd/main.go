@@ -29,6 +29,7 @@ func main() {
 	dnsListen := flag.String("dns-listen", "127.0.0.1:53", "client local DNS resolver address")
 	dnsManage := flag.Bool("dns-manage-resolv-conf", true, "point /etc/resolv.conf at the overlay resolver (TUN mode only)")
 	noDNS := flag.Bool("no-dns", false, "do not start the local DNS resolver")
+	noForward := flag.Bool("no-forward", false, "disable manager forwarding for certified overlay paths")
 	sso := flag.Bool("sso", false, "authenticate the client with an OIDC device flow")
 	ssoIssuer := flag.String("sso-issuer", "", "OIDC issuer URL used with --sso")
 	ssoClientID := flag.String("sso-client-id", "", "OIDC client id used with --sso")
@@ -48,7 +49,7 @@ func main() {
 		if *configPath == "" {
 			log.Fatal("--config is required for manager role")
 		}
-		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen); err != nil {
+		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen, !*noForward); err != nil {
 			log.Fatal(err)
 		}
 		return
