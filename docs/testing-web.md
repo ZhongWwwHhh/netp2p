@@ -38,7 +38,7 @@ presence 与问题清单；配额用量同时展示在 Traffic Budgets 页（进
 ## 运行
 
 ```bash
-make ui                 # 安装依赖、类型检查、构建 ui/dist
+make ui                 # 安装依赖、类型检查、构建 internal/web/dist（已入库，需一并提交）
 docker build -t netp2p-test:latest .
 sudo docker compose --env-file deploy/compose.env -f docker-compose.test.yml up -d
 ```

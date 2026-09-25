@@ -29,11 +29,14 @@ certified snapshot，由 certified state 驱动的 policy 允许/拒绝 overlay 
 ## 快速开始
 
 ```bash
-make ui              # 构建 Svelte 控制台到 Go embed 目录
+make ui              # 构建 Svelte 控制台到 Go embed 目录（internal/web/dist 已入库）
 make build           # 构建内嵌 UI 的 Go binary
 make test            # 前端测试 + 单元 + 进程内 E2E
 scripts/e2e.sh       # Docker E2E（4 manager + 2 client，无 TUN）
 ```
+
+`internal/web/dist` 的构建产物已入库，因此不加 `make ui` 直接 `go build ./...`
+也能嵌入可用的控制台；改动前端后用 `make ui` 刷新并按需提交。
 
 启动 manager 后访问：
 
