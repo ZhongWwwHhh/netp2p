@@ -167,8 +167,10 @@ func (client *Client) handleFrame(remote peer.ID, raw []byte) {
 	if client.synthesizeICMP {
 		if reply, ok := buildEchoReply(ipPacket); ok {
 			// The userspace endpoint has no kernel to answer the echo request,
-			// so build the reply here.
-			client.sendFrame(remote, reply)
+			// so build the reply here. Route it through the same certified
+			// assignment lookup as any other outbound packet so a
+			// via-manager-only network can answer.
+			client.sendToPeer(source, reply)
 			return
 		}
 	}

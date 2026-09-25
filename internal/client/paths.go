@@ -10,7 +10,6 @@ import (
 
 const (
 	admissionThreshold = 2
-	pathMinimumDwell   = 10 * time.Second
 )
 
 type admissionState struct {
@@ -60,14 +59,12 @@ func (selector *pathSelector) replaceAssignments(assignments []model.RouteAssign
 func (selector *pathSelector) record(pathID string, ok bool) {
 	now := selector.now()
 	state := selector.admissions[pathID]
-	changed := false
 	if ok {
 		state.consecutiveOK++
 		state.consecutiveFailed = 0
 		if !state.ok && state.consecutiveOK >= admissionThreshold {
 			state.ok = true
 			state.lastChanged = now
-			changed = true
 		}
 	} else {
 		state.consecutiveFailed++
@@ -75,10 +72,9 @@ func (selector *pathSelector) record(pathID string, ok bool) {
 		if state.ok && state.consecutiveFailed >= admissionThreshold {
 			state.ok = false
 			state.lastChanged = now
-			changed = true
 		}
 	}
-	if !changed && state.lastChanged.IsZero() {
+	if state.lastChanged.IsZero() {
 		state.lastChanged = now
 	}
 	selector.admissions[pathID] = state
@@ -97,26 +93,11 @@ func (selector *pathSelector) selectFor(source, destination peer.ID) (model.Rout
 	if !exists || assignment.SourcePeerID != source.String() || assignment.DestinationPeerID != destination.String() {
 		return model.RouteAssignment{}, model.PathSpec{}, false
 	}
-	paths := assignment.Paths()
-	if len(paths) == 0 {
-		return model.RouteAssignment{}, model.PathSpec{}, false
-	}
 	destinationKey := destination.String()
-	for _, path := range paths {
-		if path.Kind == model.PathKindDirect && selector.usable(path) {
-			selector.record(path.ID, true)
-			selector.current[destinationKey] = path.ID
-			return assignment, path, true
-		}
-	}
-	if currentPathID, hasCurrent := selector.current[destinationKey]; hasCurrent {
-		for _, path := range paths {
-			if path.ID == currentPathID && selector.usable(path) {
-				return assignment, path, true
-			}
-		}
-	}
-	for _, path := range paths {
+	// The certified order is authoritative: try Primary first, then each
+	// fallback in sequence. Local admission state only skips paths already
+	// proven unreachable; it never reorders or invents a path.
+	for _, path := range assignment.Paths() {
 		if path.ID == "" || !selector.usable(path) {
 			continue
 		}
