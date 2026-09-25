@@ -192,6 +192,38 @@
           <span class="label">Probe timeout (ms)</span>
           <input class="input" type="number" min="100" bind:value={settings.linkProbeTimeoutMs} disabled={!canWrite} placeholder="3000" />
         </label>
+        <label class="block">
+          <span class="label">Probe bandwidth budget (KB)</span>
+          <input class="input" type="number" min="0" bind:value={settings.probeBandwidthBudgetKb} disabled={!canWrite} placeholder="128" />
+        </label>
+        <label class="block">
+          <span class="label">Max manager hops</span>
+          <input class="input" type="number" min="1" bind:value={settings.maxManagerHops} disabled={!canWrite} placeholder="2" />
+        </label>
+        <label class="block">
+          <span class="label">Default flow class</span>
+          <select class="input" bind:value={settings.defaultFlowClass} disabled={!canWrite}>
+            {#each ['', 'latency', 'throughput', 'reliability', 'cost'] as flowClass (flowClass)}
+              <option value={flowClass}>{flowClass || 'default (latency)'}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="block">
+          <span class="label">Quota report interval (seconds)</span>
+          <input class="input" type="number" min="1" bind:value={settings.quotaReportIntervalSeconds} disabled={!canWrite} placeholder="30" />
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="checkbox" bind:checked={settings.viaManagerEnabled} disabled={!canWrite} />
+          <span class="text-sm text-slate-700">Allow via-manager paths</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="checkbox" bind:checked={settings.directPathEnabled} disabled={!canWrite} />
+          <span class="text-sm text-slate-700">Allow direct P2P paths</span>
+        </label>
+        <label class="flex items-center gap-2 md:col-span-2">
+          <input type="checkbox" bind:checked={settings.quotaEnforcementEnabled} disabled={!canWrite} />
+          <span class="text-sm text-slate-700">Enforce traffic budgets (blocks, throttles and path switches)</span>
+        </label>
       </div>
       {#if canWrite}
         <div class="mt-4 flex justify-end">

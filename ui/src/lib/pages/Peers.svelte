@@ -8,7 +8,7 @@
   import TrustBadge from '../components/TrustBadge.svelte';
   import { relativeTime, shortPeerId } from '../format';
   import { network, presenceFor } from '../stores/network.svelte';
-  import type { Peer } from '../types';
+  import type { Peer, RouteAssignment } from '../types';
 
   let query = $state('');
   let statusFilter = $state('');
@@ -19,6 +19,19 @@
 
   const peers = $derived(network.snapshot?.state.peers ?? []);
   const groups = $derived(network.snapshot?.state.groups ?? []);
+  const assignments = $derived(network.snapshot?.state.assignments ?? []);
+
+  // Assignments are directional, so a peer both originates and receives paths.
+  // The certified view is what the committee committed; it is not a live probe.
+  function outboundFor(peerId: string): RouteAssignment | undefined {
+    return assignments.find((assignment) => assignment.sourcePeerId === peerId);
+  }
+
+  function pathsInvolving(peerId: string): RouteAssignment[] {
+    return assignments.filter(
+      (assignment) => assignment.sourcePeerId === peerId || assignment.destinationPeerId === peerId,
+    );
+  }
 
   const filtered = $derived.by(() => {
     const needle = query.trim().toLowerCase();
@@ -58,6 +71,7 @@
     { key: 'name', label: 'Name', sortable: true },
     { key: 'address', label: 'Address', sortable: true },
     { key: 'groups', label: 'Groups' },
+    { key: 'path', label: 'Path (certified)' },
     { key: 'os', label: 'OS / Version', sortable: true },
     { key: 'lastSeen', label: 'Last seen', sortable: true },
     { key: 'status', label: 'Status' },
@@ -128,6 +142,18 @@
                 <span class="text-xs text-slate-400">none</span>
               {/if}
             </div>
+          {:else if key === 'path'}
+            {@const assignment = outboundFor(peer.peerId)}
+            {#if assignment}
+              <Badge tone={assignment.primary.kind === 'direct' ? 'emerald' : 'sky'} label={assignment.primary.kind} />
+              {#if (assignment.primary.managerHops ?? []).length > 0}
+                <div class="mt-1 font-mono text-xs text-slate-400">
+                  via {(assignment.primary.managerHops ?? []).map((hop) => shortPeerId(hop, 6)).join(' → ')}
+                </div>
+              {/if}
+            {:else}
+              <span class="text-xs text-slate-400">—</span>
+            {/if}
           {:else if key === 'os'}
             <span class="text-sm text-slate-700">{peer.os || 'unknown'}</span>
             <div class="text-xs text-slate-400">{peer.clientVersion ? `v${peer.clientVersion}` : '—'}</div>
@@ -174,6 +200,32 @@
         {#if observation}
           <dd class="mt-1 text-xs text-slate-500">Observer: {observation.observer} · {observation.remoteAddr ?? 'unknown address'}</dd>
         {/if}
+      </div>
+      <div>
+        <dt class="text-xs uppercase tracking-wide text-slate-400">Certified paths</dt>
+        <dd class="mt-1 space-y-2">
+          {#if pathsInvolving(selected.peerId).length === 0}
+            <span class="text-xs text-slate-400">no certified assignment</span>
+          {:else}
+            {#each pathsInvolving(selected.peerId) as assignment (assignment.id)}
+              <div class="rounded-lg border border-slate-200 p-2">
+                <p class="text-xs text-slate-500">
+                  {assignment.sourcePeerId === selected.peerId ? 'outbound' : 'inbound'} ·
+                  {shortPeerId(assignment.sourcePeerId, 8)} → {shortPeerId(assignment.destinationPeerId, 8)}
+                </p>
+                <div class="mt-1 flex items-center gap-2">
+                  <Badge tone={assignment.primary.kind === 'direct' ? 'emerald' : 'sky'} label={assignment.primary.kind} />
+                  <span class="text-xs text-slate-500">
+                    {assignment.primary.rttMilliseconds.toFixed(0)} ms · {assignment.primary.lossPercent.toFixed(1)}% loss
+                  </span>
+                </div>
+                {#if (assignment.primary.managerHops ?? []).length > 0}
+                  <p class="mt-1 break-all font-mono text-xs text-slate-400">{(assignment.primary.managerHops ?? []).join(' → ')}</p>
+                {/if}
+              </div>
+            {/each}
+          {/if}
+        </dd>
       </div>
       <div>
         <dt class="text-xs uppercase tracking-wide text-slate-400">Libp2p addresses</dt>

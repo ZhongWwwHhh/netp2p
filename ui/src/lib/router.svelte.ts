@@ -14,11 +14,13 @@ export const routes: Route[] = [
   { path: '/users', title: 'Users', group: 'Access Control' },
   { path: '/routes', title: 'Routes', group: 'Network Routing' },
   { path: '/budgets', title: 'Traffic Budgets', group: 'Network Routing' },
+  { path: '/paths', title: 'Paths', group: 'Network Routing' },
   { path: '/dns/nameservers', title: 'Nameservers', group: 'DNS' },
   { path: '/dns/zones', title: 'Zones', group: 'DNS' },
   { path: '/dns/settings', title: 'DNS Settings', group: 'DNS' },
   { path: '/committee', title: 'Committee', group: 'BFT' },
   { path: '/activity', title: 'Activity', group: 'BFT' },
+  { path: '/diagnostics', title: 'Diagnostics', group: 'Operations' },
   { path: '/settings', title: 'Settings', group: 'Settings' },
 ];
 

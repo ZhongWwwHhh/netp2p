@@ -124,6 +124,11 @@ describe('routing table', () => {
   it('exposes the SSO users page', () => {
     expect(routes.some((route) => route.path === '/users')).toBe(true);
   });
+
+  it('exposes the operator pages for paths and diagnostics', () => {
+    expect(routes.some((route) => route.path === '/paths')).toBe(true);
+    expect(routes.some((route) => route.path === '/diagnostics')).toBe(true);
+  });
 });
 
 describe('formatting', () => {

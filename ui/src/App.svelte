@@ -5,10 +5,12 @@
   import Activity from './lib/pages/Activity.svelte';
   import Budgets from './lib/pages/Budgets.svelte';
   import Committee from './lib/pages/Committee.svelte';
+  import Diagnostics from './lib/pages/Diagnostics.svelte';
   import DnsSettings from './lib/pages/DnsSettings.svelte';
   import Groups from './lib/pages/Groups.svelte';
   import Login from './lib/pages/Login.svelte';
   import Nameservers from './lib/pages/Nameservers.svelte';
+  import Paths from './lib/pages/Paths.svelte';
   import Peers from './lib/pages/Peers.svelte';
   import Policies from './lib/pages/Policies.svelte';
   import Routes from './lib/pages/Routes.svelte';
@@ -38,11 +40,13 @@
     '/users': Users,
     '/routes': Routes,
     '/budgets': Budgets,
+    '/paths': Paths,
     '/dns/nameservers': Nameservers,
     '/dns/zones': Zones,
     '/dns/settings': DnsSettings,
     '/committee': Committee,
     '/activity': Activity,
+    '/diagnostics': Diagnostics,
     '/settings': Settings,
   };
 

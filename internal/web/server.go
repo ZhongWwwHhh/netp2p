@@ -206,6 +206,21 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"linkView": server.manager.LinkView()})
+	case request.Method == http.MethodGet && path == "/api/v1/assignments":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"assignments": server.manager.Snapshot().State.Assignments,
+			"admissions":  server.manager.Admissions(),
+		})
+	case request.Method == http.MethodGet && path == "/api/v1/quota":
+		if !identity.Allows(auth.ModuleBudgets, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"usage": server.manager.QuotaUsage()})
 	case request.Method == http.MethodGet && path == "/api/v1/schema":
 		writeJSON(writer, http.StatusOK, map[string]string{"protocol": string(p2p.WebAPIProtocol)})
 	case request.Method == http.MethodPost && path == "/api/v1/transitions":

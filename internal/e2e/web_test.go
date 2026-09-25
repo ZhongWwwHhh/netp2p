@@ -288,3 +288,82 @@ func TestWebSPAFallbackAndActivity(t *testing.T) {
 		t.Fatalf("unknown height status %d, want 404", missingResponse.StatusCode)
 	}
 }
+
+// TestWebOperationalEndpoints covers the diagnostics/audit/path/quota surface
+// added for operators: every endpoint must require a token, and the payload
+// must be derived from certified state plus explicitly non-certified local
+// observations.
+func TestWebOperationalEndpoints(t *testing.T) {
+	group := newCluster(t, testState())
+	server, _ := newWebServer(t, group, 0)
+	go func() { _ = server.HTTPHost().Serve() }()
+	otherServer, _ := newWebServer(t, group, 1)
+	go func() { _ = otherServer.HTTPHost().Serve() }()
+	client, err := otherServer.HTTPHost().NamespacedClient(
+		p2p.WebAPIProtocol,
+		peer.AddrInfo{ID: group.nodes[0].Host.ID(), Addrs: group.nodes[0].Host.Addrs()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paths := []string{"/api/v1/events", "/api/v1/diagnostics", "/api/v1/assignments", "/api/v1/quota"}
+	for _, path := range paths {
+		request, _ := http.NewRequest(http.MethodGet, path, nil)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s without a token status %d, want 401", path, response.StatusCode)
+		}
+	}
+
+	for _, path := range paths {
+		request, _ := http.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer test-token")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]json.RawMessage
+		decodeErr := json.NewDecoder(response.Body).Decode(&decoded)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s status %d, want 200", path, response.StatusCode)
+		}
+		if decodeErr != nil {
+			t.Fatalf("%s decode: %v", path, decodeErr)
+		}
+		if len(decoded) == 0 {
+			t.Fatalf("%s returned an empty object", path)
+		}
+	}
+
+	// The audit log is the authenticated decision log, so every event must map
+	// back to a certified snapshot.
+	eventsRequest, _ := http.NewRequest(http.MethodGet, "/api/v1/events?limit=10", nil)
+	eventsRequest.Header.Set("Authorization", "Bearer test-token")
+	eventsResponse, err := client.Do(eventsRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eventsResponse.Body.Close()
+	var events struct {
+		Events []web.AuditEvent `json:"events"`
+	}
+	if err := json.NewDecoder(eventsResponse.Body).Decode(&events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events.Events) == 0 {
+		t.Fatal("audit event log is empty")
+	}
+	entry := events.Events[0]
+	if entry.Height == 0 || entry.Type == "" || entry.TransitionHash == "" || entry.StateHash == "" {
+		t.Fatalf("incomplete audit event: %+v", entry)
+	}
+	if entry.CommitteeEpoch != 0 && len(entry.SignerBitmap) == 0 {
+		t.Fatalf("audit event lacks a signer bitmap: %+v", entry)
+	}
+}

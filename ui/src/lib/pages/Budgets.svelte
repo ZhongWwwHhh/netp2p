@@ -36,6 +36,7 @@
       dailyBytes: 0,
       monthlyBytes: 0,
       peakBps: 0,
+      peakBurstBytes: 0,
       forwardingCostLimit: 0,
       onExhausted: 'throttle',
       usedDailyBytes: 0,
@@ -159,15 +160,20 @@
         <FormField label="Peak rate (bps)" hint="0 means unlimited.">
           <input class="input" type="number" min="0" bind:value={editing.peakBps} />
         </FormField>
+        <FormField label="Peak burst (bytes)" hint="Token bucket burst; 0 uses the rate.">
+          <input class="input" type="number" min="0" bind:value={editing.peakBurstBytes} />
+        </FormField>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
         <FormField label="Forwarding cost limit">
           <input class="input" type="number" min="0" bind:value={editing.forwardingCostLimit} />
         </FormField>
+        <FormField label="On exhaustion">
+          <select class="input" bind:value={editing.onExhausted}>
+            {#each exhaustActions as action (action)}<option value={action}>{action}</option>{/each}
+          </select>
+        </FormField>
       </div>
-      <FormField label="On exhaustion">
-        <select class="input" bind:value={editing.onExhausted}>
-          {#each exhaustActions as action (action)}<option value={action}>{action}</option>{/each}
-        </select>
-      </FormField>
     </div>
   {/if}
   {#snippet footer()}

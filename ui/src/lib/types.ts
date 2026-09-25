@@ -55,6 +55,9 @@ export interface NetworkSettings {
   directPathEnabled?: boolean;
   maxManagerHops?: number;
   probeBandwidthBudgetKb?: number;
+  quotaEnforcementEnabled?: boolean;
+  quotaReportIntervalSeconds?: number;
+  defaultFlowClass?: string;
 }
 
 export type PathKind = 'direct' | 'via_manager' | 'multi_hop';
@@ -67,6 +70,7 @@ export interface PathSpec {
   lossPercent: number;
   bandwidthMbps: number;
   confidence: number;
+  cost?: number;
 }
 
 export interface RouteAssignment {
@@ -77,6 +81,7 @@ export interface RouteAssignment {
   epoch: number;
   primary: PathSpec;
   fallbacks: PathSpec[];
+  maxHops?: number;
   updatedAt: string;
   requiresAdmission: boolean;
 }
@@ -118,6 +123,7 @@ export interface Budget {
   onExhausted: string;
   usedDailyBytes: number;
   usedMonthlyBytes: number;
+  peakBurstBytes?: number;
 }
 
 export interface Peer {
@@ -138,6 +144,7 @@ export interface CommitteeMember {
   peerId: string;
   address: string;
   publicKey?: string;
+  blsPublicKey?: string;
   listenAddr?: string;
   forwardingEnabled?: boolean;
 }
@@ -272,7 +279,19 @@ export type StateTransition =
   | { type: 'remove_user'; targetId: string }
   | { type: 'update_network_settings'; settings: NetworkSettings }
   | { type: 'update_route_assignment'; assignment: RouteAssignment }
-  | { type: 'remove_route_assignment'; targetId: string };
+  | { type: 'remove_route_assignment'; targetId: string }
+  | { type: 'update_committee'; committee: CommitteeMember[]; committeeConfig?: CommitteeConfig }
+  | { type: 'rotate_committee_keys'; committeeConfig?: CommitteeConfig };
+
+// AdmissionReport is a client-observed, non-certified end-to-end probe result.
+export interface AdmissionReport {
+  assignmentId: string;
+  pathId: string;
+  ok: boolean;
+  rttMs: number;
+  lossPct: number;
+  observedAt: string;
+}
 
 export type Operation = 'create' | 'read' | 'update' | 'delete';
 

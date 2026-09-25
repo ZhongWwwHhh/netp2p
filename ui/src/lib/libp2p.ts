@@ -7,7 +7,8 @@ import { multiaddr } from '@multiformats/multiaddr';
 import { normalizePresence, normalizeSnapshot } from './normalize';
 import { httpResource, joinProtocolPath, resolveProtocolBasePath } from './paths';
 import type {
-  ActivityEntry, AuditEvent, Bootstrap, Diagnostics, Presence, SessionInfo, Snapshot, StateTransition, User,
+  ActivityEntry, AdmissionReport, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
+  SessionInfo, Snapshot, StateTransition, User,
 } from './types';
 
 export async function createConsoleNode() {
@@ -74,6 +75,12 @@ export async function apiClient(bootstrap: Bootstrap) {
       events: (limit = 200) => request(`/api/v1/events?limit=${limit}`).then((body) =>
         ((body as { events?: AuditEvent[] } | null)?.events ?? [])),
       diagnostics: () => request('/api/v1/diagnostics') as Promise<Diagnostics>,
+      assignments: () => request('/api/v1/assignments').then((body) => {
+        const payload = body as { assignments?: RouteAssignment[]; admissions?: Record<string, Record<string, AdmissionReport>> } | null;
+        return { assignments: payload?.assignments ?? [], admissions: payload?.admissions ?? {} };
+      }),
+      quota: () => request('/api/v1/quota').then((body) =>
+        ((body as { usage?: Budget[] } | null)?.usage ?? [])),
     };
   } catch (caught) {
     try {
