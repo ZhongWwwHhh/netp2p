@@ -9,10 +9,9 @@ import (
 type PathType string
 
 const (
-	PathDirect   PathType = "direct"
-	PathRelay    PathType = "relay"
-	PathMultiHop PathType = "multi-hop"
-	PathGateway  PathType = "gateway"
+	PathDirect     PathType = "direct"
+	PathViaManager PathType = "via-manager"
+	PathMultiHop   PathType = "multi-hop"
 )
 
 type FlowClass string
@@ -34,8 +33,7 @@ type LinkProfile struct {
 	BandwidthMbps      float64  `json:"bandwidthMbps"`
 	Stability          float64  `json:"stability"`
 	Congestion         float64  `json:"congestion"`
-	RelayCost          float64  `json:"relayCost"`
-	PublicRelay        bool     `json:"publicRelay"`
+	ForwardingCost     float64  `json:"forwardingCost"`
 }
 
 type Constraints struct {
@@ -44,14 +42,13 @@ type Constraints struct {
 	MaxRTTMilliseconds   float64    `json:"maxRttMilliseconds"`
 	MaxLossPercent       float64    `json:"maxLossPercent"`
 	MinBandwidthMbps     float64    `json:"minBandwidthMbps"`
-	MaxRelayCost         float64    `json:"maxRelayCost"`
-	AllowPublicRelay     bool       `json:"allowPublicRelay"`
+	MaxForwardingCost    float64    `json:"maxForwardingCost"`
 	SwitchLatencyPenalty float64    `json:"switchLatencyPenalty"`
-	// RelayLatencyAdvantageMs and RelayLossAdvantagePct define the
-	// normalisation window: relay RTT and loss must be measurably better
-	// than direct within these thresholds before the score favours relay.
-	RelayLatencyAdvantageMs float64 `json:"relayLatencyAdvantageMs,omitempty"`
-	RelayLossAdvantagePct   float64 `json:"relayLossAdvantagePct,omitempty"`
+	// ViaManagerLatencyAdvantageMs and ViaManagerLossAdvantagePct define the
+	// normalisation window: a via-manager path must be measurably better than
+	// direct within these thresholds before the score favours it.
+	ViaManagerLatencyAdvantageMs float64 `json:"viaManagerLatencyAdvantageMs,omitempty"`
+	ViaManagerLossAdvantagePct   float64 `json:"viaManagerLossAdvantagePct,omitempty"`
 }
 
 func typeAllowed(candidate LinkProfile, constraints Constraints) bool {
@@ -88,13 +85,16 @@ func weights(class FlowClass) (latency, throughput, reliability, cost float64) {
 }
 
 // Score returns 0..100. A candidate failing a hard constraint scores zero.
+//
+// A zero BandwidthMbps means "not measured yet" rather than "no bandwidth":
+// unknown bandwidth neither trips the minimum-bandwidth constraint nor zeroes
+// the throughput dimension, it just contributes a neutral score.
 func Score(candidate LinkProfile, constraints Constraints) float64 {
 	if !typeAllowed(candidate, constraints) ||
 		(constraints.MaxRTTMilliseconds > 0 && candidate.RTTMilliseconds > constraints.MaxRTTMilliseconds) ||
 		(constraints.MaxLossPercent > 0 && candidate.LossPercent > constraints.MaxLossPercent) ||
-		(constraints.MinBandwidthMbps > 0 && candidate.BandwidthMbps < constraints.MinBandwidthMbps) ||
-		(constraints.MaxRelayCost > 0 && candidate.RelayCost > constraints.MaxRelayCost) ||
-		(!constraints.AllowPublicRelay && candidate.PublicRelay) {
+		(constraints.MinBandwidthMbps > 0 && candidate.BandwidthMbps > 0 && candidate.BandwidthMbps < constraints.MinBandwidthMbps) ||
+		(constraints.MaxForwardingCost > 0 && candidate.ForwardingCost > constraints.MaxForwardingCost) {
 		return 0
 	}
 
@@ -103,19 +103,22 @@ func Score(candidate LinkProfile, constraints Constraints) float64 {
 		minBW = 10
 	}
 	latencyGood := 10.0
-	latencyAdvantage := constraints.RelayLatencyAdvantageMs
+	latencyAdvantage := constraints.ViaManagerLatencyAdvantageMs
 	if latencyAdvantage <= 0 {
 		latencyAdvantage = 50
 	}
-	lossAdvantage := constraints.RelayLossAdvantagePct
+	lossAdvantage := constraints.ViaManagerLossAdvantagePct
 	if lossAdvantage <= 0 {
 		lossAdvantage = 5
 	}
 	latencyScore := 1 - normalize(candidate.RTTMilliseconds, latencyGood, 300)
 	jitterScore := 1 - normalize(candidate.JitterMilliseconds, 2, 60)
-	bandwidthScore := normalize(candidate.BandwidthMbps, minBW, 500)
+	bandwidthScore := 0.5
+	if candidate.BandwidthMbps > 0 {
+		bandwidthScore = normalize(candidate.BandwidthMbps, minBW, 500)
+	}
 	reliabilityScore := candidate.Stability * (1 - normalize(candidate.LossPercent, 0, 15)) * (1 - normalize(candidate.Congestion, 0, 1))
-	costScore := 1 - normalize(candidate.RelayCost, 0, 100)
+	costScore := 1 - normalize(candidate.ForwardingCost, 0, 100)
 	switchPenalty := constraints.SwitchLatencyPenalty
 	if switchPenalty <= 0 {
 		switchPenalty = 0.15
@@ -128,12 +131,12 @@ func Score(candidate LinkProfile, constraints Constraints) float64 {
 	if candidate.Type != PathDirect {
 		score -= switchPenalty
 	}
-	// The relay advantage is modelled as a bonus: if a relay path is
+	// The via-manager advantage is modelled as a bonus: if a via-manager path is
 	// measurably better than direct on latency or loss (within the
 	// normalisation window), it earns extra score that offsets the default
-	// preference for direct. This ensures relay wins when the user's
+	// preference for direct. This ensures via-manager wins when the user's
 	// threshold conditions are satisfied.
-	if candidate.Type == PathRelay {
+	if candidate.Type == PathViaManager || candidate.Type == PathMultiHop {
 		latencyBonus := normalize(candidate.RTTMilliseconds, latencyGood, latencyGood+latencyAdvantage)
 		lossBonus := normalize(candidate.LossPercent, 0, lossAdvantage)
 		score += 0.23 * math.Max(latencyBonus, lossBonus)

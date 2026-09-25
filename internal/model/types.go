@@ -47,17 +47,17 @@ type NetworkSettings struct {
 	// JWTAllowGroups, when non-empty, restricts access to these IdP groups.
 	JWTAllowGroups []string `json:"jwtAllowGroups,omitempty"`
 	// Link selection tuning. These thresholds parameterise the scoring
-	// function so that relay paths must offer a measurable advantage over
-	// direct connections before clients switch away from P2P.
-	LinkMinBandwidthMbps     float64 `json:"linkMinBandwidthMbps,omitempty"`
-	RelayLatencyAdvantageMs  float64 `json:"relayLatencyAdvantageMs,omitempty"`
-	RelayLossAdvantagePct    float64 `json:"relayLossAdvantagePct,omitempty"`
-	LinkProbeIntervalSeconds int     `json:"linkProbeIntervalSeconds,omitempty"`
-	LinkProbeTimeoutMs       int     `json:"linkProbeTimeoutMs,omitempty"`
-	ViaManagerEnabled        bool    `json:"viaManagerEnabled,omitempty"`
-	DirectPathEnabled        bool    `json:"directPathEnabled,omitempty"`
-	MaxManagerHops           int     `json:"maxManagerHops,omitempty"`
-	ProbeBandwidthBudgetKB   int     `json:"probeBandwidthBudgetKb,omitempty"`
+	// function so that via-manager paths must offer a measurable advantage over
+	// direct connections before the planner switches away from P2P.
+	LinkMinBandwidthMbps         float64 `json:"linkMinBandwidthMbps,omitempty"`
+	ViaManagerLatencyAdvantageMs float64 `json:"viaManagerLatencyAdvantageMs,omitempty"`
+	ViaManagerLossAdvantagePct   float64 `json:"viaManagerLossAdvantagePct,omitempty"`
+	LinkProbeIntervalSeconds     int     `json:"linkProbeIntervalSeconds,omitempty"`
+	LinkProbeTimeoutMs           int     `json:"linkProbeTimeoutMs,omitempty"`
+	ViaManagerEnabled            bool    `json:"viaManagerEnabled,omitempty"`
+	DirectPathEnabled            bool    `json:"directPathEnabled,omitempty"`
+	MaxManagerHops               int     `json:"maxManagerHops,omitempty"`
+	ProbeBandwidthBudgetKB       int     `json:"probeBandwidthBudgetKb,omitempty"`
 }
 
 type PathKind string
@@ -369,15 +369,15 @@ type Route struct {
 }
 
 type TrafficBudget struct {
-	ID               string    `json:"id"`
-	SubjectType      string    `json:"subjectType"`
-	SubjectID        string    `json:"subjectID"`
-	DailyBytes       uint64    `json:"dailyBytes"`
-	MonthlyBytes     uint64    `json:"monthlyBytes"`
-	PeakBPS          uint64    `json:"peakBps"`
-	RelayCostLimit   uint64    `json:"relayCostLimit"`
-	OnExhausted      string    `json:"onExhausted"`
-	UsedDailyBytes   uint64    `json:"usedDailyBytes"`
-	UsedMonthlyBytes uint64    `json:"usedMonthlyBytes"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                  string    `json:"id"`
+	SubjectType         string    `json:"subjectType"`
+	SubjectID           string    `json:"subjectID"`
+	DailyBytes          uint64    `json:"dailyBytes"`
+	MonthlyBytes        uint64    `json:"monthlyBytes"`
+	PeakBPS             uint64    `json:"peakBps"`
+	ForwardingCostLimit uint64    `json:"forwardingCostLimit"`
+	OnExhausted         string    `json:"onExhausted"`
+	UsedDailyBytes      uint64    `json:"usedDailyBytes"`
+	UsedMonthlyBytes    uint64    `json:"usedMonthlyBytes"`
+	UpdatedAt           time.Time `json:"updatedAt"`
 }
