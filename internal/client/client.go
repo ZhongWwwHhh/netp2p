@@ -18,6 +18,7 @@ import (
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/conntrack"
 	"github.com/netp2p/netp2p/internal/forward"
+	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
@@ -71,6 +72,8 @@ func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, e
 	if marker, ok := sink.(packet.UserspaceICMP); ok {
 		client.synthesizeICMP = marker.SynthesizeICMP()
 	}
+	// Answer manager probes so the committee can estimate access-link quality.
+	node.Handle(p2p.ProbeProtocol, link.NewProbeResponder().Handle)
 	return client, nil
 }
 

@@ -56,6 +56,7 @@ type cluster struct {
 	engines  []*bft.Engine
 	meshes   []*manager.CommitteeMesh
 	managers []*manager.Manager
+	links    []*link.Gossiper
 }
 
 func newCluster(t *testing.T, state model.NetworkState) *cluster {
@@ -72,6 +73,26 @@ func forcedViaManagerState() model.NetworkState {
 	state := testState()
 	state.Settings = model.NetworkSettings{
 		DirectPathEnabled: false, ViaManagerEnabled: true, MaxManagerHops: 2,
+	}
+	return state
+}
+
+// probeDrivenState is a via-manager-only network with fast link probes and a
+// bidirectional allow policy, so the planner can certify both directions from
+// measurements alone.
+func probeDrivenState() model.NetworkState {
+	state := testState()
+	state.Policies = []model.Policy{{
+		ID:                "allow-clients-icmp",
+		SourceGroups:      []string{"clients-a", "clients-b"},
+		DestinationGroups: []string{"clients-a", "clients-b"},
+		Services:          []model.Service{{Protocol: "icmp"}},
+		Effect:            model.EffectAllow,
+		Direction:         model.DirectionBidirectional,
+	}}
+	state.Settings = model.NetworkSettings{
+		DirectPathEnabled: false, ViaManagerEnabled: true, MaxManagerHops: 2,
+		LinkProbeIntervalSeconds: 1, LinkProbeTimeoutMs: 500,
 	}
 	return state
 }
@@ -122,12 +143,20 @@ func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager
 		if err != nil {
 			t.Fatal(err)
 		}
+		gossiper := link.NewGossiper(group.nodes[index], mesh.PeerIDs(), engine.LocalID(), 10*time.Second, 90*time.Second, 1000)
+		group.nodes[index].Handle(p2p.LinkGossipProtocol, gossiper.Handle)
+		group.links = append(group.links, gossiper)
+		scoped := config
+		scoped.Links = gossiper
 		group.engines = append(group.engines, engine)
 		group.meshes = append(group.meshes, mesh)
-		group.managers = append(group.managers, manager.New(group.nodes[index], engine, mesh, config))
+		netManager := manager.New(group.nodes[index], engine, mesh, scoped)
+		group.managers = append(group.managers, netManager)
 		if config.Forwarding {
-			group.managers[index].EnableForwarding(ctx)
+			netManager.EnableForwarding(ctx)
 		}
+		go gossiper.Run(ctx)
+		go netManager.RunLinkProbe(ctx)
 	}
 	for _, mesh := range group.meshes {
 		if err := mesh.Connect(ctx); err != nil {
@@ -361,6 +390,90 @@ func TestViaManagerForwardsOverlayProbe(t *testing.T) {
 	if dropped != 0 {
 		t.Fatalf("manager dropped %d frames while forwarding", dropped)
 	}
+}
+
+// TestProbeDrivenViaManagerAssignment closes the loop end to end: real manager
+// probes produce access segments, the planner turns them into certified
+// via-manager assignments, and the data plane then forwards a userspace probe.
+func TestProbeDrivenViaManagerAssignment(t *testing.T) {
+	group := newForwardingCluster(t, probeDrivenState())
+	address := group.members[0].Address
+	managerID := group.nodes[0].Host.ID().String()
+
+	clientA, sinkA := newTestClient(t, 241, address, keyA)
+	clientB, _ := newTestClient(t, 242, address, keyB)
+	waitForPeers(t, clientA, 2)
+	waitForPeers(t, clientB, 2)
+
+	sourceID := clientA.Self().PeerID
+	destinationID := clientB.Self().PeerID
+	waitForAccessSegments(t, group.managers[0], managerID, sourceID, destinationID)
+	waitForCertifiedAssignments(t, group, sourceID, destinationID)
+
+	ok, err := probe(t, sinkA, clientA.Self().OverlayIP, clientB.Self().OverlayIP, 10*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("A->B probe over a measured assignment failed: ok=%v err=%v", ok, err)
+	}
+	forwarded, dropped := group.managers[0].ForwardingStats()
+	if forwarded == 0 {
+		t.Fatal("manager never forwarded a frame")
+	}
+	if dropped != 0 {
+		t.Fatalf("manager dropped %d frames", dropped)
+	}
+}
+
+func waitForAccessSegments(t *testing.T, netManager *manager.Manager, managerID string, peers ...string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasAccessSegments(netManager.LinkView(), managerID, peers) {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("manager %s never measured access segments for %v: %+v", managerID, peers, netManager.LinkView())
+}
+
+func hasAccessSegments(view link.LinkView, managerID string, peers []string) bool {
+	for _, peerID := range peers {
+		found := false
+		for _, segment := range view.AccessSegments {
+			if (segment.From == managerID && segment.To == peerID) || (segment.From == peerID && segment.To == managerID) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// waitForCertifiedAssignments drives the planner until both directions are
+// certified. Each reconcile pass submits at most one changed assignment, so the
+// loop may need several passes.
+func waitForCertifiedAssignments(t *testing.T, group *cluster, sourceID, destinationID string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := group.managers[0].ReconcileAssignments(); err != nil {
+			t.Logf("reconcile assignments: %v", err)
+		}
+		found := make(map[string]bool)
+		for _, assignment := range group.engines[0].CurrentState().Assignments {
+			if assignment.Primary.Kind != model.PathKindViaManager {
+				continue
+			}
+			found[assignment.SourcePeerID+"->"+assignment.DestinationPeerID] = true
+		}
+		if found[sourceID+"->"+destinationID] && found[destinationID+"->"+sourceID] {
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("planner never certified via-manager assignments for %s/%s", sourceID, destinationID)
 }
 
 func TestQuorumCertifiesAfterManagerFailure(t *testing.T) {

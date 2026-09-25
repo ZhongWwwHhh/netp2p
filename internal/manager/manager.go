@@ -11,6 +11,8 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/link"
@@ -29,6 +31,7 @@ type Manager struct {
 	presence      *presence.Table
 	gossiper      *presence.Gossiper
 	links         *link.Gossiper
+	prober        *link.Prober
 	forwarding    *forward.Table
 	dataTransport *transport.Transport
 	admissions    map[string]map[string]protocol.AdmissionReport
@@ -68,10 +71,24 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 			return manager.dataTransport.Send(remote, wire)
 		})
 	}
+	if config.Links != nil {
+		manager.prober = link.NewProber(node, engine.CurrentState, engine.CommitteeMembers, config.Links)
+	}
+	node.Handle(p2p.ProbeProtocol, link.NewProbeResponder().Handle)
 	node.Handle(p2p.LoginProtocol, manager.handleLogin)
 	node.Handle(p2p.SyncProtocol, manager.handleSync)
 	engine.OnCommit(manager.onCommit)
 	return manager
+}
+
+// RunLinkProbe measures the manager mesh and its client access links until ctx
+// is cancelled. Measurements are non-certified observations; only the planner
+// output is certified.
+func (manager *Manager) RunLinkProbe(ctx context.Context) {
+	if manager.prober == nil {
+		return
+	}
+	manager.prober.Run(ctx)
 }
 
 // EnableForwarding installs the persistent binary frame listener used for
@@ -102,6 +119,15 @@ func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
 func (manager *Manager) RunScheduler(ctx context.Context) {
 	scheduler := link.NewScheduler(manager.mesh, manager.engine.CommitteeMembers(), manager.LinkView)
 	scheduler.Run(ctx, manager.engine.CurrentState)
+}
+
+// ReconcileAssignments runs a single planner pass now and submits at most one
+// changed assignment. It is exposed for tests and admin tooling that need to
+// drive the planner deterministically instead of waiting for the ticker.
+func (manager *Manager) ReconcileAssignments() error {
+	scheduler := link.NewScheduler(manager.mesh, manager.engine.CommitteeMembers(), manager.LinkView)
+	scheduler.SetCooldown(0)
+	return scheduler.Reconcile(manager.engine.CurrentState())
 }
 
 // RunPresenceGossip exchanges observed peer presence with the other committee
@@ -209,6 +235,9 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 		manager.respond(stream, protocol.LoginResponse{Error: "peer id mismatch"})
 		return
 	}
+	// Remember how to reach the client so the link prober can dial it back and
+	// measure the access segment even when the client is idle.
+	manager.rememberAddrs(request.PeerID, request.Addresses)
 	manager.presence.Observe(request.PeerID, stream.Conn().RemoteMultiaddr().String(), manager.engine.LocalID())
 	registration, code, message := manager.authenticate(request)
 	if message != "" {
@@ -221,6 +250,25 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 		return
 	}
 	manager.respond(stream, protocol.LoginResponse{Snapshot: snapshot, Peer: peerRecord})
+}
+
+func (manager *Manager) rememberAddrs(peerID string, addresses []string) {
+	target, err := peer.Decode(peerID)
+	if err != nil {
+		return
+	}
+	parsed := make([]multiaddr.Multiaddr, 0, len(addresses))
+	for _, value := range addresses {
+		address, err := multiaddr.NewMultiaddr(value)
+		if err != nil {
+			continue
+		}
+		parsed = append(parsed, address)
+	}
+	if len(parsed) == 0 {
+		return
+	}
+	manager.node.Host.Peerstore().AddAddrs(target, parsed, peerstore.PermanentAddrTTL)
 }
 
 func toRegistration(request protocol.LoginRequest) Registration {
