@@ -112,10 +112,10 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 		}
 		log.Printf("sso enabled with issuer %s", seed.OIDC.Issuer)
 	}
-	netManager := manager.New(node, engine, mesh, manager.Config{SSO: sso})
+	linkGossiper := link.NewGossiper(node, mesh.PeerIDs(), 10*time.Second, 90*time.Second, 1000)
+	netManager := manager.New(node, engine, mesh, manager.Config{SSO: sso, Links: linkGossiper})
 	manager.RegisterAdminHandler(node, mesh, seed.AdminToken)
 	go netManager.RunPresenceGossip(ctx)
-	linkGossiper := link.NewGossiper(node, mesh.PeerIDs(), 10*time.Second, 90*time.Second, 1000)
 	node.Handle(p2p.LinkGossipProtocol, linkGossiper.Handle)
 	go linkGossiper.Run(ctx)
 

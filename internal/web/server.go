@@ -188,6 +188,12 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		server.handleActivity(writer, request)
 	case request.Method == http.MethodGet && path == "/api/v1/committee/status":
 		writeJSON(writer, http.StatusOK, server.committeeStatus())
+	case request.Method == http.MethodGet && path == "/api/v1/link-view":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"linkView": server.manager.LinkView()})
 	case request.Method == http.MethodGet && path == "/api/v1/schema":
 		writeJSON(writer, http.StatusOK, map[string]string{"protocol": string(p2p.WebAPIProtocol)})
 	case request.Method == http.MethodPost && path == "/api/v1/transitions":

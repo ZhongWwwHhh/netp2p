@@ -10,6 +10,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/netp2p/netp2p/internal/bft"
+	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
@@ -23,6 +24,7 @@ type Manager struct {
 	mesh     *CommitteeMesh
 	presence *presence.Table
 	gossiper *presence.Gossiper
+	links    *link.Gossiper
 	sso      *oidc.Verifier
 	mu       sync.RWMutex
 	snapshot model.SignedSnapshot
@@ -32,13 +34,14 @@ type Manager struct {
 // Config wires optional capabilities into the manager.
 type Config struct {
 	// SSO, when set, verifies ID tokens for peer and console logins.
-	SSO *oidc.Verifier
+	SSO   *oidc.Verifier
+	Links *link.Gossiper
 }
 
 func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config) *Manager {
 	table := presence.NewTable()
 	manager := &Manager{
-		node: node, engine: engine, mesh: mesh, presence: table, sso: config.SSO,
+		node: node, engine: engine, mesh: mesh, presence: table, sso: config.SSO, links: config.Links,
 		gossiper: presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
 		waiters:  make(map[chan model.SignedSnapshot]struct{}),
 	}
@@ -57,6 +60,14 @@ func (manager *Manager) RunPresenceGossip(ctx context.Context) {
 // Presence returns the merged, non-certified view of which peers are online.
 func (manager *Manager) Presence() []presence.Observation {
 	return manager.presence.Snapshot()
+}
+
+// LinkView returns the non-certified manager mesh observation snapshot.
+func (manager *Manager) LinkView() link.LinkView {
+	if manager.links == nil {
+		return link.LinkView{}
+	}
+	return manager.links.View()
 }
 
 // Activity returns certified decision-log records, newest first.
