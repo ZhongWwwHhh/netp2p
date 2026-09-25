@@ -28,13 +28,19 @@ var ErrQueueFull = errors.New("frame queue full")
 // PacketHandler receives a decoded frame from a remote peer.
 type PacketHandler func(remote peer.ID, payload []byte)
 
+// EnvelopeHandler receives a binary forwarding frame without decoding it. The
+// forwarding codec lives with the forwarding table so client and manager cannot
+// drift apart.
+type EnvelopeHandler func(remote peer.ID, wire []byte)
+
 // Transport multiplexes framed overlay packets over persistent libp2p streams,
 // one outbound stream per remote peer.
 type Transport struct {
-	host     host.Host
-	protocol protocol.ID
-	onPacket PacketHandler
-	depth    int
+	host       host.Host
+	protocol   protocol.ID
+	onPacket   PacketHandler
+	onEnvelope EnvelopeHandler
+	depth      int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -46,15 +52,20 @@ type Transport struct {
 
 // New installs the inbound stream handler and returns a Transport bound to ctx.
 func New(ctx context.Context, node host.Host, protocolID protocol.ID, onPacket PacketHandler) *Transport {
+	return NewWithEnvelope(ctx, node, protocolID, onPacket, nil)
+}
+
+func NewWithEnvelope(ctx context.Context, node host.Host, protocolID protocol.ID, onPacket PacketHandler, onEnvelope EnvelopeHandler) *Transport {
 	child, cancel := context.WithCancel(ctx)
 	transport := &Transport{
-		host:     node,
-		protocol: protocolID,
-		onPacket: onPacket,
-		depth:    defaultQueueDepth,
-		ctx:      child,
-		cancel:   cancel,
-		conns:    make(map[peer.ID]*frameConn),
+		host:       node,
+		protocol:   protocolID,
+		onPacket:   onPacket,
+		onEnvelope: onEnvelope,
+		depth:      defaultQueueDepth,
+		ctx:        child,
+		cancel:     cancel,
+		conns:      make(map[peer.ID]*frameConn),
 	}
 	node.SetStreamHandler(protocolID, transport.handleStream)
 	return transport
@@ -107,6 +118,9 @@ func (transport *Transport) handleStream(stream network.Stream) {
 		}
 		if transport.onPacket != nil {
 			transport.onPacket(remote, payload)
+		}
+		if transport.onEnvelope != nil && transport.onPacket == nil {
+			transport.onEnvelope(remote, payload)
 		}
 	}
 }

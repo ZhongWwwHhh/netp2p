@@ -6,6 +6,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/conntrack"
+	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
@@ -15,7 +16,7 @@ import (
 const maxOverlayPacket = 65535
 
 func (client *Client) ServePackets(ctx context.Context) error {
-	frames := transport.New(ctx, client.node.Host, p2p.FrameProtocol, client.handleFrame)
+	frames := transport.NewWithEnvelope(ctx, client.node.Host, p2p.FrameProtocol, client.handleFrame, client.handleEnvelope)
 	defer frames.Close()
 	client.mu.Lock()
 	client.frames = frames
@@ -80,7 +81,32 @@ func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) {
 	if err != nil {
 		return
 	}
+	if client.sendViaAssignment(client.selfPeerID(), target.String(), raw) {
+		return
+	}
 	client.sendFrame(target, raw)
+}
+
+func (client *Client) handleEnvelope(remote peer.ID, wire []byte) {
+	envelope, err := forward.DecodeEnvelope(wire)
+	if err != nil {
+		debugDrop("forwarded envelope: %v", err)
+		return
+	}
+	source, err := peer.Decode(envelope.Header.SourcePeerID)
+	if err != nil {
+		debugDrop("forwarded source: %v", err)
+		return
+	}
+	if remote == source {
+		debugDrop("forwarded envelope from source peer")
+		return
+	}
+	if envelope.Header.DestinationPeerID != client.selfPeerID() {
+		debugDrop("forwarded envelope destination mismatch")
+		return
+	}
+	client.handleFrame(source, envelope.Payload)
 }
 
 func (client *Client) sendFrame(target peer.ID, raw []byte) {
@@ -113,6 +139,9 @@ func (client *Client) handleFrame(remote peer.ID, raw []byte) {
 	}
 	if source.OverlayIP != ipPacket.Source().String() {
 		debugDrop("inbound: source %s does not own %s", source.OverlayIP, ipPacket.Source())
+		return
+	}
+	if isEchoReply(ipPacket) && client.deliverAdmission(ipPacket) {
 		return
 	}
 	if ipPacket.Destination().String() != client.selfOverlayIP() {

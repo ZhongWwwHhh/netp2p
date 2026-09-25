@@ -2,7 +2,11 @@
 // manager and client so the two sides cannot drift apart.
 package protocol
 
-import "github.com/netp2p/netp2p/internal/model"
+import (
+	"time"
+
+	"github.com/netp2p/netp2p/internal/model"
+)
 
 type LoginRequest struct {
 	NetworkID     string   `json:"networkId"`
@@ -32,7 +36,18 @@ const (
 )
 
 type SyncRequest struct {
-	NetworkID string `json:"networkId"`
-	PeerID    string `json:"peerId"`
-	Height    uint64 `json:"height"`
+	NetworkID         string            `json:"networkId"`
+	PeerID            string            `json:"peerId"`
+	Height            uint64            `json:"height"`
+	AssignmentsHeight uint64            `json:"assignmentsHeight,omitempty"`
+	Admissions        []AdmissionReport `json:"admissions,omitempty"`
+}
+
+type AdmissionReport struct {
+	AssignmentID string    `json:"assignmentId"`
+	PathID       string    `json:"pathId"`
+	OK           bool      `json:"ok"`
+	RTTMs        float64   `json:"rttMs"`
+	LossPct      float64   `json:"lossPct"`
+	ObservedAt   time.Time `json:"observedAt"`
 }

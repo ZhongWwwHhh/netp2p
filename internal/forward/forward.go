@@ -78,8 +78,7 @@ func (table *Table) Accept(envelope Envelope) (bool, error) {
 		table.dropped.Add(1)
 		return false, ErrInvalidSource
 	}
-	if containsPeerID(assignment.Primary.ManagerHops, table.localID) ||
-		pathContains(assignment.Fallbacks, envelope.Header.PathID, table.localID) {
+	if pathContains(assignment.Paths(), envelope.Header.PathID, table.localID) {
 		next, ok := nextHop(assignment, envelope.Header.PathID, table.localID)
 		if !ok {
 			return true, nil

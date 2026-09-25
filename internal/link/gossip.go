@@ -78,6 +78,17 @@ func (gossiper *Gossiper) exchange(ctx context.Context) {
 	}
 }
 
+// PublishManagerObservation feeds a manager-to-manager measurement into the
+// certified-observer matrix. Client admissions never enter this path.
+func (gossiper *Gossiper) PublishManagerObservation(observer, subject string, rttMs, lossPct float64) {
+	observation := Observation{
+		ObserverID: observer, SubjectID: subject, Scope: ScopeManagerMesh,
+		Direction: DirectionRoundTrip, RTTMilliseconds: rttMs, LossPercent: lossPct,
+		BandwidthMbps: 0, Samples: 1, MeasuredAt: time.Now().UTC(), Sequence: uint64(time.Now().UnixNano()),
+	}
+	gossiper.Publish([]Observation{observation})
+}
+
 func (gossiper *Gossiper) Handle(stream network.Stream) {
 	defer stream.Close()
 	envelope, err := p2p.DecodeEnvelope(stream)

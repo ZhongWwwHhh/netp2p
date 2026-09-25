@@ -5,50 +5,102 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/bft"
+	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/presence"
 	"github.com/netp2p/netp2p/internal/protocol"
+	"github.com/netp2p/netp2p/internal/transport"
 )
 
 type Manager struct {
-	node     *p2p.Node
-	engine   *bft.Engine
-	mesh     *CommitteeMesh
-	presence *presence.Table
-	gossiper *presence.Gossiper
-	links    *link.Gossiper
-	sso      *oidc.Verifier
-	mu       sync.RWMutex
-	snapshot model.SignedSnapshot
-	waiters  map[chan model.SignedSnapshot]struct{}
+	node          *p2p.Node
+	engine        *bft.Engine
+	mesh          *CommitteeMesh
+	presence      *presence.Table
+	gossiper      *presence.Gossiper
+	links         *link.Gossiper
+	forwarding    *forward.Table
+	dataTransport *transport.Transport
+	admissions    map[string]map[string]protocol.AdmissionReport
+	sso           *oidc.Verifier
+	mu            sync.RWMutex
+	snapshot      model.SignedSnapshot
+	waiters       map[chan model.SignedSnapshot]struct{}
 }
 
 // Config wires optional capabilities into the manager.
 type Config struct {
 	// SSO, when set, verifies ID tokens for peer and console logins.
-	SSO   *oidc.Verifier
-	Links *link.Gossiper
+	SSO        *oidc.Verifier
+	Links      *link.Gossiper
+	Forwarding bool
 }
 
 func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config) *Manager {
 	table := presence.NewTable()
 	manager := &Manager{
 		node: node, engine: engine, mesh: mesh, presence: table, sso: config.SSO, links: config.Links,
-		gossiper: presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
-		waiters:  make(map[chan model.SignedSnapshot]struct{}),
+		gossiper:   presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
+		admissions: make(map[string]map[string]protocol.AdmissionReport),
+		waiters:    make(map[chan model.SignedSnapshot]struct{}),
+	}
+	if config.Forwarding {
+		manager.forwarding = forward.NewTable(engine.CurrentState(), engine.LocalID(), func(remote peer.ID, envelope forward.Envelope) error {
+			wire, err := forward.EncodeEnvelope(envelope)
+			if err != nil {
+				return err
+			}
+			return manager.dataTransport.Send(remote, wire)
+		})
 	}
 	node.Handle(p2p.LoginProtocol, manager.handleLogin)
 	node.Handle(p2p.SyncProtocol, manager.handleSync)
 	engine.OnCommit(manager.onCommit)
 	return manager
+}
+
+// EnableForwarding installs the persistent binary frame listener used for
+// certified via-manager paths.
+func (manager *Manager) EnableForwarding(ctx context.Context) {
+	if manager.forwarding == nil {
+		return
+	}
+	manager.dataTransport = transport.NewWithEnvelope(ctx, manager.node.Host, p2p.FrameProtocol, nil, manager.handleForwardedWire)
+	manager.forwarding.Replace(manager.engine.CurrentState())
+}
+
+func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
+	if manager.forwarding == nil {
+		return
+	}
+	envelope, err := forward.DecodeEnvelope(wire)
+	if err != nil {
+		return
+	}
+	source, err := peer.Decode(envelope.Header.SourcePeerID)
+	if err != nil || source != remote {
+		return
+	}
+	if _, err := manager.forwarding.Accept(envelope); err != nil {
+		log.Printf("forward frame: %v", err)
+	}
+}
+
+// RunScheduler periodically converts manager mesh observations into certified
+// route assignments. Transitions remain quorum-certified.
+func (manager *Manager) RunScheduler(ctx context.Context) {
+	scheduler := link.NewScheduler(manager.mesh, manager.engine.CommitteeMembers(), manager.LinkView)
+	scheduler.Run(ctx, manager.engine.CurrentState)
 }
 
 // RunPresenceGossip exchanges observed peer presence with the other committee
@@ -68,6 +120,21 @@ func (manager *Manager) LinkView() link.LinkView {
 		return link.LinkView{}
 	}
 	return manager.links.View()
+}
+
+// Admissions returns non-certified client observations, newest per path. They
+// can influence the planner but cannot alter certified state by themselves.
+func (manager *Manager) Admissions() map[string]map[string]protocol.AdmissionReport {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	result := make(map[string]map[string]protocol.AdmissionReport, len(manager.admissions))
+	for peerID, paths := range manager.admissions {
+		result[peerID] = make(map[string]protocol.AdmissionReport, len(paths))
+		for pathID, report := range paths {
+			result[peerID][pathID] = report
+		}
+	}
+	return result
 }
 
 // Activity returns certified decision-log records, newest first.
@@ -171,6 +238,7 @@ func (manager *Manager) handleSync(stream network.Stream) {
 		return
 	}
 	manager.presence.Observe(request.PeerID, stream.Conn().RemoteMultiaddr().String(), manager.engine.LocalID())
+	manager.observeAdmissions(request.PeerID, request.Admissions)
 	snapshot := manager.Snapshot()
 	if snapshot.Height > request.Height {
 		writeJSON(stream, snapshot)
@@ -192,6 +260,45 @@ func (manager *Manager) handleSync(stream network.Stream) {
 		writeJSON(stream, snapshot)
 	case <-waitContext.Done():
 	}
+}
+
+func (manager *Manager) observeAdmissions(peerID string, reports []protocol.AdmissionReport) {
+	if len(reports) == 0 {
+		return
+	}
+	state := manager.engine.CurrentState()
+	for _, report := range reports {
+		if !validAdmission(state, peerID, report) {
+			continue
+		}
+		manager.mu.Lock()
+		paths := manager.admissions[peerID]
+		if paths == nil {
+			paths = make(map[string]protocol.AdmissionReport)
+			manager.admissions[peerID] = paths
+		}
+		if existing, ok := paths[report.PathID]; !ok || !report.ObservedAt.Before(existing.ObservedAt) {
+			paths[report.PathID] = report
+		}
+		manager.mu.Unlock()
+	}
+}
+
+func validAdmission(state model.NetworkState, peerID string, report protocol.AdmissionReport) bool {
+	if report.AssignmentID == "" || report.PathID == "" || report.RTTMs < 0 || report.LossPct < 0 || report.LossPct > 100 {
+		return false
+	}
+	for _, assignment := range state.Assignments {
+		if assignment.ID != report.AssignmentID || assignment.SourcePeerID != peerID {
+			continue
+		}
+		for _, path := range assignment.Paths() {
+			if path.ID == report.PathID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Registration is what a client presents when it logs in.
@@ -292,6 +399,9 @@ func (manager *Manager) onCommit(snapshot model.SignedSnapshot) {
 	manager.mu.Unlock()
 	for _, waiter := range waiters {
 		waiter <- snapshot
+	}
+	if manager.forwarding != nil {
+		manager.forwarding.Replace(snapshot.State)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/p2p"
 )
 
@@ -20,6 +21,93 @@ func newTestNode(t *testing.T) (*p2p.Node, context.CancelFunc) {
 		t.Fatal(err)
 	}
 	return node, cancel
+}
+
+func TestTransportEnvelopeOnlyWhenPacketHandlerAbsent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	left, cancelLeft := newTestNode(t)
+	defer cancelLeft()
+	defer left.Close()
+	right, cancelRight := newTestNode(t)
+	defer cancelRight()
+	defer right.Close()
+	if err := left.Host.Connect(ctx, peer.AddrInfo{ID: right.Host.ID(), Addrs: right.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+
+	packets := make(chan []byte, 1)
+	envelopes := make(chan []byte, 1)
+	receiver := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, func(_ peer.ID, payload []byte) {
+		packets <- payload
+	}, func(_ peer.ID, payload []byte) {
+		envelopes <- payload
+	})
+	defer receiver.Close()
+	sender := New(ctx, left.Host, p2p.FrameProtocol, nil)
+	defer sender.Close()
+
+	payload := []byte("direct frame")
+	if err := sender.Send(right.Host.ID(), payload); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-packets:
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("packet mismatch: %s", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("packet handler was not called")
+	}
+	select {
+	case got := <-envelopes:
+		t.Fatalf("envelope handler called for direct packet: %s", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestTransportDeliversEnvelopes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	left, cancelLeft := newTestNode(t)
+	defer cancelLeft()
+	defer left.Close()
+	right, cancelRight := newTestNode(t)
+	defer cancelRight()
+	defer right.Close()
+	if err := left.Host.Connect(ctx, peer.AddrInfo{ID: right.Host.ID(), Addrs: right.Host.Addrs()}); err != nil {
+		t.Fatal(err)
+	}
+
+	envelopes := make(chan []byte, 1)
+	receiver := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, nil, func(_ peer.ID, payload []byte) {
+		envelopes <- payload
+	})
+	defer receiver.Close()
+	sender := New(ctx, left.Host, p2p.FrameProtocol, nil)
+	defer sender.Close()
+
+	envelope, err := forward.EncodeEnvelope(forward.Envelope{
+		Header: forward.Header{
+			SourcePeerID: left.Host.ID().String(), DestinationPeerID: right.Host.ID().String(),
+			AssignmentID: "assignment", PathID: "path", TTL: 3,
+		},
+		Payload: []byte("forwarded"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.Send(right.Host.ID(), envelope); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-envelopes:
+		if !bytes.Equal(got, envelope) {
+			t.Fatal("envelope mismatch")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("envelope was not delivered")
+	}
 }
 
 // TestTransportDeliversFramesBetweenHosts exercises the persistent stream in

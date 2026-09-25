@@ -178,3 +178,32 @@ func Authorize(state State, sourcePeer, destinationPeer, protocol string, port u
 	}
 	return allowed, nil
 }
+
+// AllowedServices reports the merged service list a source may send to one
+// destination, applying deny precedence. It is used by the route scheduler.
+func AllowedServices(state State, sourcePeer, destinationPeer string) ([]model.Service, bool) {
+	if sourcePeer == "" || destinationPeer == "" || sourcePeer == destinationPeer {
+		return nil, false
+	}
+	groupIndex := indexGroups(state.Groups)
+	denied := false
+	allowed := make([]model.Service, 0)
+	for _, item := range state.Policies {
+		if _, ok := members(groupIndex, item.SourceGroups)[sourcePeer]; !ok {
+			continue
+		}
+		if _, ok := members(groupIndex, item.DestinationGroups)[destinationPeer]; !ok {
+			continue
+		}
+		switch item.Effect {
+		case model.EffectDeny:
+			denied = true
+		case model.EffectAllow:
+			allowed = append(allowed, item.Services...)
+		}
+	}
+	if denied {
+		return nil, false
+	}
+	return allowed, len(allowed) > 0
+}

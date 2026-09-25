@@ -17,6 +17,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/conntrack"
+	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
@@ -35,12 +36,16 @@ type Client struct {
 	networkMap policy.NetworkMap
 	mu         sync.RWMutex
 
-	flows          *conntrack.Table
-	frames         *transport.Transport
-	synthesizeICMP bool
-	routesReady    bool
-	dnsUpdater     DNSUpdater
-	dnsUpstreams   []string
+	flows           *conntrack.Table
+	frames          *transport.Transport
+	forwarding      *forward.Table
+	paths           *pathSelector
+	admissionQueue  []netproto.AdmissionReport
+	admissionWaiter *admissionWaiter
+	synthesizeICMP  bool
+	routesReady     bool
+	dnsUpdater      DNSUpdater
+	dnsUpstreams    []string
 }
 
 func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, error) {
@@ -49,9 +54,20 @@ func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, e
 		return nil, fmt.Errorf("invalid manager address: %w", err)
 	}
 	client := &Client{
-		node: node, manager: *info, sink: sink,
-		flows: conntrack.NewTable(),
+		node: node, manager: *info, sink: sink, flows: conntrack.NewTable(),
 	}
+	client.forwarding = forward.NewTable(model.NetworkState{}, node.Host.ID().String(), func(remote peer.ID, envelope forward.Envelope) error {
+		frames := client.frameTransport()
+		if frames == nil {
+			return fmt.Errorf("frame transport unavailable")
+		}
+		wire, err := forward.EncodeEnvelope(envelope)
+		if err != nil {
+			return err
+		}
+		return frames.Send(remote, wire)
+	})
+	client.paths = newPathSelector(client.forwarding)
 	if marker, ok := sink.(packet.UserspaceICMP); ok {
 		client.synthesizeICMP = marker.SynthesizeICMP()
 	}
@@ -106,18 +122,23 @@ func (client *Client) Sync(ctx context.Context) error {
 	client.mu.RLock()
 	height := client.snapshot.Height
 	networkID := client.snapshot.State.NetworkID
+	assignmentHeight := assignmentHeightLocked(client.snapshot)
+	admissions := client.admissionQueue
+	client.admissionQueue = nil
 	client.mu.RUnlock()
 	if err := client.connect(ctx); err != nil {
 		return fmt.Errorf("connect manager: %w", err)
 	}
 	var snapshot model.SignedSnapshot
-	if err := client.request(ctx, p2p.SyncProtocol, netproto.SyncRequest{NetworkID: networkID, PeerID: client.node.Host.ID().String(), Height: height}, &snapshot); err != nil {
+	if err := client.request(ctx, p2p.SyncProtocol, netproto.SyncRequest{NetworkID: networkID, PeerID: client.node.Host.ID().String(), Height: height, AssignmentsHeight: assignmentHeight, Admissions: admissions}, &snapshot); err != nil {
+		client.queueAdmissions(admissions)
 		return err
 	}
 	if err := bft.ValidateSnapshot(snapshot); err != nil {
 		return err
 	}
 	if snapshot.Height <= height {
+		client.queueAdmissions(admissions)
 		return fmt.Errorf("manager did not provide newer snapshot")
 	}
 	client.mu.RLock()
@@ -171,6 +192,30 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	client.rememberPeers(snapshot, localPeerID)
 	client.reconcileRoutesWhenReady(overlayIPs)
 	client.publishDNS()
+	client.paths.replaceAssignments(snapshot.State.Assignments)
+	client.forwarding.Replace(snapshot.State)
+	go client.runAdmissionProbe(snapshot, self.PeerID)
+}
+
+func (client *Client) queueAdmissions(reports []netproto.AdmissionReport) {
+	if len(reports) == 0 {
+		return
+	}
+	client.mu.Lock()
+	client.admissionQueue = append(reports, client.admissionQueue...)
+	client.mu.Unlock()
+}
+
+func (client *Client) reportAdmission(report netproto.AdmissionReport) {
+	client.mu.Lock()
+	client.admissionQueue = append(client.admissionQueue, report)
+	client.mu.Unlock()
+}
+
+func (client *Client) frameTransport() *transport.Transport {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	return client.frames
 }
 
 // peerOverlayIPsLocked lists every other peer's overlay address.
