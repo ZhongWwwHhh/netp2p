@@ -146,7 +146,7 @@ describe('transition payload shapes', () => {
       { type: 'remove_zone', targetId: 'z' },
       { type: 'update_dns_settings', dnsSettings: { disabled: true, groups: [] } },
       { type: 'upsert_route', route: { id: 'r', destination: '10.0.0.0/8', routingGroup: 'g', distributionGroups: [], metric: 1 } },
-      { type: 'upsert_budget', budget: { id: 'b', subjectType: 'group', subjectId: 'g', dailyBytes: 0, monthlyBytes: 0, peakBps: 0, relayCostLimit: 0, onExhausted: 'block', usedDailyBytes: 0, usedMonthlyBytes: 0 } },
+      { type: 'upsert_budget', budget: { id: 'b', subjectType: 'group', subjectId: 'g', dailyBytes: 0, monthlyBytes: 0, peakBps: 0, forwardingCostLimit: 0, onExhausted: 'block', usedDailyBytes: 0, usedMonthlyBytes: 0 } },
       { type: 'remove_setup_key', targetId: 'k' },
     ];
     expect(transitions.map((transition) => transition.type)).toContain('update_dns_settings');

@@ -36,7 +36,7 @@
       dailyBytes: 0,
       monthlyBytes: 0,
       peakBps: 0,
-      relayCostLimit: 0,
+      forwardingCostLimit: 0,
       onExhausted: 'throttle',
       usedDailyBytes: 0,
       usedMonthlyBytes: 0,
@@ -159,8 +159,8 @@
         <FormField label="Peak rate (bps)" hint="0 means unlimited.">
           <input class="input" type="number" min="0" bind:value={editing.peakBps} />
         </FormField>
-        <FormField label="Relay cost limit">
-          <input class="input" type="number" min="0" bind:value={editing.relayCostLimit} />
+        <FormField label="Forwarding cost limit">
+          <input class="input" type="number" min="0" bind:value={editing.forwardingCostLimit} />
         </FormField>
       </div>
       <FormField label="On exhaustion">

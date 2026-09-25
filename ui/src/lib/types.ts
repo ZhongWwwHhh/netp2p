@@ -47,8 +47,8 @@ export interface NetworkSettings {
   jwtGroupsClaimName?: string;
   jwtAllowGroups?: string[];
   linkMinBandwidthMbps?: number;
-  relayLatencyAdvantageMs?: number;
-  relayLossAdvantagePct?: number;
+  viaManagerLatencyAdvantageMs?: number;
+  viaManagerLossAdvantagePct?: number;
   linkProbeIntervalSeconds?: number;
   linkProbeTimeoutMs?: number;
   viaManagerEnabled?: boolean;
@@ -114,7 +114,7 @@ export interface Budget {
   dailyBytes: number;
   monthlyBytes: number;
   peakBps: number;
-  relayCostLimit: number;
+  forwardingCostLimit: number;
   onExhausted: string;
   usedDailyBytes: number;
   usedMonthlyBytes: number;

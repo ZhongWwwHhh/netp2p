@@ -177,12 +177,12 @@
           <input class="input" type="number" min="0" step="1" bind:value={settings.linkMinBandwidthMbps} disabled={!canWrite} placeholder="10" />
         </label>
         <label class="block">
-          <span class="label">Relay latency advantage (ms)</span>
-          <input class="input" type="number" min="0" step="1" bind:value={settings.relayLatencyAdvantageMs} disabled={!canWrite} placeholder="50" />
+          <span class="label">Via-manager latency advantage (ms)</span>
+          <input class="input" type="number" min="0" step="1" bind:value={settings.viaManagerLatencyAdvantageMs} disabled={!canWrite} placeholder="50" />
         </label>
         <label class="block">
-          <span class="label">Relay loss advantage (%)</span>
-          <input class="input" type="number" min="0" step="0.5" bind:value={settings.relayLossAdvantagePct} disabled={!canWrite} placeholder="5" />
+          <span class="label">Via-manager loss advantage (%)</span>
+          <input class="input" type="number" min="0" step="0.5" bind:value={settings.viaManagerLossAdvantagePct} disabled={!canWrite} placeholder="5" />
         </label>
         <label class="block">
           <span class="label">Probe interval (seconds)</span>
