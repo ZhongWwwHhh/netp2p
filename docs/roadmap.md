@@ -45,9 +45,10 @@
 
 - [x] direct 与 circuit relay 候选发现（libp2p hole punching + static relay）。
 - [x] B-score 链路评分：加权 RTT/loss/bandwidth/cost，归一化区间由 Web Settings 中的 relay advantage 阈值参数化。
-- [ ] RTT/loss/jitter/bandwidth/stability probe（`/netp2p/link/probe/1.0.0`）。
-- [x] EigenSpeed 式 manager mesh 链路观测网与 client 不可信隔离。
-- [ ] flow class 约束、路径切换迟滞与热备。
+- [x] RTT/loss/jitter/bandwidth probe（`/netp2p/link/probe/1.0.0`）：manager 主动测量 mesh 与 client access 链路，有界突发受 `ProbeBandwidthBudgetKB` 约束。
+- [x] EigenSpeed 式 manager mesh 链路观测网与 client 不可信隔离：trimmed median + 幂迭代主特征向量 + 离群降权，access 段独立于 mesh 矩阵。
+- [x] 评分收敛到 `internal/path.Score`（删除 `link.directScore`），未知带宽不再被硬排除；scheduler 对指标抖动做容差抑制。
+- [ ] flow class 用户可选、路径持久化热备。
 - [x] 取消 relay 身份，manager 成为 client/决策/转发/UI 超集。
 - [x] BFT certified RouteAssignment：manager committee 规划 primary/fallback path。
 - [x] via-manager forwarding data plane 与 client end-to-end admission（客户端严格按 certified primary→fallback 选路，manager 按上一跳身份转发并计数）。
