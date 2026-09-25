@@ -39,12 +39,13 @@ type Envelope struct {
 type Sender func(remote peer.ID, envelope Envelope) error
 
 type Table struct {
-	mu       sync.RWMutex
-	state    model.NetworkState
-	sender   Sender
-	localID  string
-	sequence atomic.Uint64
-	dropped  atomic.Uint64
+	mu        sync.RWMutex
+	state     model.NetworkState
+	sender    Sender
+	localID   string
+	sequence  atomic.Uint64
+	forwarded atomic.Uint64
+	dropped   atomic.Uint64
 }
 
 func NewTable(state model.NetworkState, localID string, sender Sender) *Table {
@@ -58,9 +59,14 @@ func (table *Table) Replace(state model.NetworkState) {
 	table.mu.Unlock()
 }
 
-// Accept validates an inbound manager-forwarded frame and sends it to the next
-// hop, or reports that this node is the destination.
-func (table *Table) Accept(envelope Envelope) (bool, error) {
+// Accept validates an inbound manager-forwarded frame from remote and sends it
+// to the next hop, or reports that this node is the destination.
+//
+// The remote peer must be the frame's rightful predecessor on the certified
+// path: the source client for the first hop, or the previous manager for a
+// multi-hop path. libp2p authenticates the transport peer, so this binds the
+// in-band header to a real identity instead of trusting it.
+func (table *Table) Accept(remote peer.ID, envelope Envelope) (bool, error) {
 	if envelope.Header.TTL == 0 {
 		table.dropped.Add(1)
 		return false, ErrTTLExceeded
@@ -79,26 +85,35 @@ func (table *Table) Accept(envelope Envelope) (bool, error) {
 		return false, ErrInvalidSource
 	}
 	if pathContains(assignment.Paths(), envelope.Header.PathID, table.localID) {
+		if !predecessorMatches(assignment, envelope.Header.PathID, table.localID, remote.String()) {
+			table.dropped.Add(1)
+			return false, ErrInvalidSource
+		}
 		next, ok := nextHop(assignment, envelope.Header.PathID, table.localID)
 		if !ok {
 			return true, nil
 		}
-		remote, err := peer.Decode(next)
+		nextPeer, err := peer.Decode(next)
 		if err != nil {
 			table.dropped.Add(1)
 			return false, err
 		}
 		forwarded := envelope
 		forwarded.Header.TTL--
-		if err := table.sender(remote, forwarded); err != nil {
+		if err := table.sender(nextPeer, forwarded); err != nil {
 			table.dropped.Add(1)
 			return false, err
 		}
+		table.forwarded.Add(1)
 		return false, nil
 	}
 	if table.localID != assignment.DestinationPeerID {
 		table.dropped.Add(1)
 		return false, ErrNoAssignment
+	}
+	if expected, ok := destinationPredecessor(assignment, envelope.Header.PathID); !ok || expected != remote.String() {
+		table.dropped.Add(1)
+		return false, ErrInvalidSource
 	}
 	return true, nil
 }
@@ -135,6 +150,12 @@ func (table *Table) Send(source, destination peer.ID, assignmentID, pathID strin
 }
 
 func (table *Table) Dropped() uint64 { return table.dropped.Load() }
+
+// Stats reports how many frames this table forwarded onward and how many it
+// dropped. It exists for tests and diagnostics.
+func (table *Table) Stats() (forwarded, dropped uint64) {
+	return table.forwarded.Load(), table.dropped.Load()
+}
 
 func findAssignment(state model.NetworkState, id string) (model.RouteAssignment, bool) {
 	for _, assignment := range state.Assignments {
@@ -176,14 +197,9 @@ func pathContains(paths []model.PathSpec, pathID, target string) bool {
 }
 
 func nextHop(assignment model.RouteAssignment, pathID, source string) (string, bool) {
-	path := assignment.Primary
-	if path.ID != pathID {
-		for _, candidate := range assignment.Fallbacks {
-			if candidate.ID == pathID {
-				path = candidate
-				break
-			}
-		}
+	path, ok := pathByID(assignment, pathID)
+	if !ok {
+		return "", false
 	}
 	for index, hop := range path.ManagerHops {
 		if hop == source {
@@ -197,4 +213,50 @@ func nextHop(assignment model.RouteAssignment, pathID, source string) (string, b
 		return path.ManagerHops[0], true
 	}
 	return "", false
+}
+
+func pathByID(assignment model.RouteAssignment, pathID string) (model.PathSpec, bool) {
+	if assignment.Primary.ID == pathID {
+		return assignment.Primary, true
+	}
+	for _, candidate := range assignment.Fallbacks {
+		if candidate.ID == pathID {
+			return candidate, true
+		}
+	}
+	return model.PathSpec{}, false
+}
+
+// predecessorMatches reports whether remote is the identity allowed to hand a
+// frame at this hop to localID. For the first hop that is the source client;
+// for later hops it is the preceding manager on the certified path.
+func predecessorMatches(assignment model.RouteAssignment, pathID, localID, remoteID string) bool {
+	path, ok := pathByID(assignment, pathID)
+	if !ok {
+		return false
+	}
+	for index, hop := range path.ManagerHops {
+		if hop != localID {
+			continue
+		}
+		if index == 0 {
+			return remoteID == assignment.SourcePeerID
+		}
+		return remoteID == path.ManagerHops[index-1]
+	}
+	return false
+}
+
+// destinationPredecessor returns the identity that may deliver a frame to the
+// assignment's destination: the last manager hop, or the source client when the
+// path is direct.
+func destinationPredecessor(assignment model.RouteAssignment, pathID string) (string, bool) {
+	path, ok := pathByID(assignment, pathID)
+	if !ok {
+		return "", false
+	}
+	if len(path.ManagerHops) == 0 {
+		return assignment.SourcePeerID, true
+	}
+	return path.ManagerHops[len(path.ManagerHops)-1], true
 }
