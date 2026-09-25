@@ -186,6 +186,18 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		writeJSON(writer, http.StatusOK, map[string]any{"users": server.manager.Users()})
 	case request.Method == http.MethodGet && path == "/api/v1/activity":
 		server.handleActivity(writer, request)
+	case request.Method == http.MethodGet && path == "/api/v1/events":
+		if !identity.Allows(auth.ModuleEvents, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		server.handleEvents(writer, request)
+	case request.Method == http.MethodGet && path == "/api/v1/diagnostics":
+		if !identity.Allows(auth.ModuleDiagnostics, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, server.diagnostics())
 	case request.Method == http.MethodGet && path == "/api/v1/committee/status":
 		writeJSON(writer, http.StatusOK, server.committeeStatus())
 	case request.Method == http.MethodGet && path == "/api/v1/link-view":
@@ -270,6 +282,102 @@ func (server *Server) handleActivity(writer http.ResponseWriter, request *http.R
 		before = parsed
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"entries": server.manager.Activity(limit, before)})
+}
+
+// AuditEvent is the authenticated decision-log entry exposed to the console.
+// Every field comes from a certified snapshot, so the log can be recomputed
+// from the quorum certificate rather than trusted from the manager.
+type AuditEvent struct {
+	Height         uint64 `json:"height"`
+	Type           string `json:"type"`
+	LeaderID       string `json:"leaderId"`
+	SignerBitmap   []byte `json:"signerBitmap,omitempty"`
+	StateHash      string `json:"stateHash"`
+	TransitionHash string `json:"transitionHash"`
+	CommitteeEpoch uint64 `json:"committeeEpoch"`
+	RecordedAt     string `json:"recordedAt,omitempty"`
+}
+
+func (server *Server) handleEvents(writer http.ResponseWriter, request *http.Request) {
+	limit := 200
+	if raw := request.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeError(writer, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		if parsed > 1000 {
+			parsed = 1000
+		}
+		limit = parsed
+	}
+	var before uint64
+	if raw := request.URL.Query().Get("before"); raw != "" {
+		parsed, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid before")
+			return
+		}
+		before = parsed
+	}
+	typeFilter := request.URL.Query().Get("type")
+	events := make([]AuditEvent, 0, limit)
+	for _, snapshot := range server.manager.Activity(limit, before) {
+		if typeFilter != "" && snapshot.Transition.Type != typeFilter {
+			continue
+		}
+		events = append(events, AuditEvent{
+			Height:         snapshot.Height,
+			Type:           snapshot.Transition.Type,
+			LeaderID:       snapshot.LeaderID,
+			SignerBitmap:   snapshot.QC.SignerBitmap,
+			StateHash:      fmt.Sprintf("%x", snapshot.StateHash),
+			TransitionHash: fmt.Sprintf("%x", snapshot.QC.TransitionHash),
+			CommitteeEpoch: snapshot.QC.CommitteeEpoch,
+		})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"events": events})
+}
+
+// diagnostics returns a human-readable health snapshot for operators.
+func (server *Server) diagnostics() map[string]any {
+	state := server.manager.Snapshot().State
+	linkView := server.manager.LinkView()
+	forwarded, dropped := server.manager.ForwardingStats()
+	problems := make([]string, 0)
+	if server.manager.Height() == 0 {
+		problems = append(problems, "no committed height yet")
+	}
+	if len(state.Peers) == 0 {
+		problems = append(problems, "no peers registered")
+	}
+	if dropped > 0 {
+		problems = append(problems, fmt.Sprintf("%d forwarded frames were dropped", dropped))
+	}
+	status := server.committeeStatus()
+	for memberID, connected := range status.Connected {
+		if !connected {
+			problems = append(problems, fmt.Sprintf("committee member %s is not connected", memberID))
+		}
+	}
+	return map[string]any{
+		"protocolVersion": version.ProtocolVersion,
+		"manager":         server.manager.LocalID(),
+		"networkId":       state.NetworkID,
+		"height":          server.manager.Height(),
+		"quorumSize":      bft.QuorumSize,
+		"committeeSize":   bft.CommitteeSize,
+		"peers":           len(state.Peers),
+		"groups":          len(state.Groups),
+		"policies":        len(state.Policies),
+		"budgets":         len(state.Budgets),
+		"assignments":     len(state.Assignments),
+		"linkSegments":    len(linkView.Segments) + len(linkView.AccessSegments),
+		"presence":        server.manager.Presence(),
+		"forwarding":      map[string]uint64{"forwarded": forwarded, "dropped": dropped},
+		"quotaUsage":      server.manager.QuotaUsage(),
+		"problems":        problems,
+	}
 }
 
 func (server *Server) committeeStatus() CommitteeStatus {

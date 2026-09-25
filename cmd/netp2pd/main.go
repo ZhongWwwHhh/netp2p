@@ -39,6 +39,7 @@ func main() {
 	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key, upsert-nameserver, remove-nameserver, upsert-zone, remove-zone, update-dns-settings, update-committee, rotate-committee-keys")
 	adminFile := flag.String("file", "", "JSON record file for upsert actions or target ID for remove actions")
 	adminTarget := flag.String("target", "", "target ID for remove actions")
+	metricsListen := flag.String("metrics-listen", "", "manager Prometheus /metrics address (empty disables metrics)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -49,7 +50,7 @@ func main() {
 		if *configPath == "" {
 			log.Fatal("--config is required for manager role")
 		}
-		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen, !*noForward); err != nil {
+		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen, *metricsListen, !*noForward); err != nil {
 			log.Fatal(err)
 		}
 		return

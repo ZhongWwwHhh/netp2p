@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"time"
 
@@ -12,13 +14,14 @@ import (
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/manager"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/web"
 )
 
-func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen string, forwarding bool) error {
+func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen, metricsListen string, forwarding bool) error {
 	seed, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -113,7 +116,14 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 		log.Printf("sso enabled with issuer %s", seed.OIDC.Issuer)
 	}
 	linkGossiper := link.NewGossiper(node, mesh.PeerIDs(), engine.LocalID(), 10*time.Second, 90*time.Second, 1000)
-	netManager := manager.New(node, engine, mesh, manager.Config{SSO: sso, Links: linkGossiper, Forwarding: forwarding})
+	var collector *metrics.Metrics
+	if metricsListen != "" {
+		collector = metrics.New()
+		if err := startMetricsServer(ctx, metricsListen, collector.Handler()); err != nil {
+			return err
+		}
+	}
+	netManager := manager.New(node, engine, mesh, manager.Config{SSO: sso, Links: linkGossiper, Forwarding: forwarding, Metrics: collector})
 	manager.RegisterAdminHandler(node, mesh, seed.AdminToken)
 	netManager.EnableForwarding(ctx)
 	go netManager.RunPresenceGossip(ctx)
@@ -121,6 +131,7 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 	go linkGossiper.Run(ctx)
 	go netManager.RunLinkProbe(ctx)
 	go netManager.RunScheduler(ctx)
+	go netManager.RunQuotaSettlement(ctx)
 
 	webServer, err := web.NewServer(node, netManager, web.Config{
 		AdminToken: seed.AdminToken, Authenticator: netManager, OIDC: bootstrapOIDC,
@@ -139,6 +150,29 @@ func runManager(ctx context.Context, dataDir, configPath, listenAddr, webListen 
 	defer webServer.Stop()
 
 	return runStatus(ctx, node)
+}
+
+// startMetricsServer exposes the Prometheus endpoint on a dedicated listener so
+// instrumentation never shares the authenticated bootstrap/API port.
+func startMetricsServer(ctx context.Context, address string, handler http.Handler) error {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("listen for metrics on %s: %w", address, err)
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownContext)
+	}()
+	go func() {
+		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Printf("metrics server stopped: %v", serveErr)
+		}
+	}()
+	log.Printf("metrics available on http://%s/metrics", address)
+	return nil
 }
 
 func submitGenesis(ctx context.Context, mesh *manager.CommitteeMesh) error {

@@ -16,6 +16,7 @@ import (
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/link"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
@@ -41,6 +42,9 @@ type Manager struct {
 	admissions     map[string]map[string]protocol.AdmissionReport
 	quotaPending   map[string]uint64
 	quotaSettledAt time.Time
+	metrics        *metrics.Metrics
+	lastForwarded  float64
+	lastDropped    float64
 	sso            *oidc.Verifier
 	mu             sync.RWMutex
 	snapshot       model.SignedSnapshot
@@ -53,12 +57,15 @@ type Config struct {
 	SSO        *oidc.Verifier
 	Links      *link.Gossiper
 	Forwarding bool
+	// Metrics, when set, receives operational counters and gauges.
+	Metrics *metrics.Metrics
 }
 
 func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config) *Manager {
 	table := presence.NewTable()
 	manager := &Manager{
 		node: node, engine: engine, mesh: mesh, presence: table, sso: config.SSO, links: config.Links,
+		metrics:    config.Metrics,
 		gossiper:   presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
 		admissions: make(map[string]map[string]protocol.AdmissionReport),
 		waiters:    make(map[chan model.SignedSnapshot]struct{}),
@@ -481,6 +488,40 @@ func (manager *Manager) onCommit(snapshot model.SignedSnapshot) {
 	if manager.forwarding != nil {
 		manager.forwarding.Replace(snapshot.State)
 	}
+	manager.publishMetrics(snapshot)
+}
+
+// publishMetrics refreshes the Prometheus gauges derived from certified state
+// and forwarding counters. It is a no-op unless metrics are enabled.
+func (manager *Manager) publishMetrics(snapshot model.SignedSnapshot) {
+	if manager.metrics == nil {
+		return
+	}
+	manager.metrics.BFTHeight.Set(float64(snapshot.Height))
+	manager.metrics.BFTCommits.Inc()
+	manager.metrics.CertifiedPeers.Set(float64(len(snapshot.State.Peers)))
+	if manager.forwarding != nil {
+		forwarded, dropped := manager.forwarding.Stats()
+		manager.metrics.Forwarded.Add(float64(forwarded) - manager.lastForwarded)
+		manager.metrics.ForwardDrops.Add(float64(dropped) - manager.lastDropped)
+		manager.lastForwarded = float64(forwarded)
+		manager.lastDropped = float64(dropped)
+	}
+	view := manager.LinkView()
+	manager.metrics.LinkSegments.Set(float64(len(view.Segments) + len(view.AccessSegments)))
+	if minimum := minimumConfidence(view); minimum >= 0 {
+		manager.metrics.LinkConfidence.Set(minimum)
+	}
+}
+
+func minimumConfidence(view link.LinkView) float64 {
+	minimum := -1.0
+	for _, segment := range append(append([]link.SegmentView{}, view.Segments...), view.AccessSegments...) {
+		if minimum < 0 || segment.Confidence < minimum {
+			minimum = segment.Confidence
+		}
+	}
+	return minimum
 }
 
 func (manager *Manager) Snapshot() model.SignedSnapshot {
