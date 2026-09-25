@@ -22,6 +22,7 @@ const emptyState = {
   zones: [],
   dnsSettings: { disabled: false, groups: [] },
   settings: {},
+  assignments: [],
   nextIpOffset: 1,
 };
 

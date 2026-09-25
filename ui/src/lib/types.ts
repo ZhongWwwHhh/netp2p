@@ -51,6 +51,34 @@ export interface NetworkSettings {
   relayLossAdvantagePct?: number;
   linkProbeIntervalSeconds?: number;
   linkProbeTimeoutMs?: number;
+  viaManagerEnabled?: boolean;
+  directPathEnabled?: boolean;
+  maxManagerHops?: number;
+  probeBandwidthBudgetKb?: number;
+}
+
+export type PathKind = 'direct' | 'via_manager' | 'multi_hop';
+
+export interface PathSpec {
+  id: string;
+  kind: PathKind;
+  managerHops?: string[];
+  rttMilliseconds: number;
+  lossPercent: number;
+  bandwidthMbps: number;
+  confidence: number;
+}
+
+export interface RouteAssignment {
+  id: string;
+  networkId: string;
+  sourcePeerId: string;
+  destinationPeerId: string;
+  epoch: number;
+  primary: PathSpec;
+  fallbacks: PathSpec[];
+  updatedAt: string;
+  requiresAdmission: boolean;
 }
 
 export interface Route {
@@ -111,6 +139,7 @@ export interface CommitteeMember {
   address: string;
   publicKey?: string;
   listenAddr?: string;
+  forwardingEnabled?: boolean;
 }
 
 export interface QC {
@@ -136,6 +165,7 @@ export interface State {
   zones: DNSZone[];
   dnsSettings: DNSSettings;
   settings: NetworkSettings;
+  assignments: RouteAssignment[];
   nextIpOffset: number;
 }
 
@@ -200,7 +230,9 @@ export type StateTransition =
   | { type: 'update_user_role'; user: User }
   | { type: 'set_user_blocked'; user: User }
   | { type: 'remove_user'; targetId: string }
-  | { type: 'update_network_settings'; settings: NetworkSettings };
+  | { type: 'update_network_settings'; settings: NetworkSettings }
+  | { type: 'update_route_assignment'; assignment: RouteAssignment }
+  | { type: 'remove_route_assignment'; targetId: string };
 
 export type Operation = 'create' | 'read' | 'update' | 'delete';
 
