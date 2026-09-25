@@ -1,0 +1,432 @@
+// NetP2P control-plane and certified-state schema.
+//
+// Design rules:
+//   - No map<> fields: every collection is repeated and ordered canonically by
+//     the producing code, so the deterministic marshal is stable.
+//   - Timestamps are RFC3339Nano strings, matching the JSON the console reads.
+//   - Byte fields carry raw values (hashes, signatures, keys), never base64.
+//   - The data plane (overlay IPv4 frames and the via-manager envelope) does
+//     not use protobuf; it keeps its compact binary framing.
+syntax = "proto3";
+
+package netp2p.v1;
+
+option go_package = "github.com/netp2p/netp2p/internal/wire/pb";
+
+// ---------------------------------------------------------------------------
+// Certified model
+// ---------------------------------------------------------------------------
+
+message CommitteeMember {
+  string id = 1;
+  string peer_id = 2;
+  string address = 3;
+  int64 key_seed = 4;
+  bytes public_key = 5;
+  string listen_addr = 6;
+  bool forwarding_enabled = 7;
+  // BLS public share used for threshold voting (Stage 2+).
+  bytes bls_public_key = 8;
+}
+
+// CommitteeConfig pins the threshold parameters that a snapshot's QC must
+// satisfy. It changes only through rotate_committee_keys.
+message CommitteeConfig {
+  uint32 threshold = 1;
+  uint32 size = 2;
+  bytes group_public_key = 3;
+  uint64 committee_epoch = 4;
+}
+
+message PeerRecord {
+  string peer_id = 1;
+  string overlay_ip = 2;
+  repeated string addresses = 3;
+  repeated string groups = 4;
+  string hostname = 5;
+  string os = 6;
+  string client_version = 7;
+  string user_id = 8;
+  string dns_label = 9;
+  string last_login = 10;
+}
+
+message NetworkSettings {
+  string dns_domain = 1;
+  int32 login_expiration_days = 2;
+  bool jwt_groups_enabled = 3;
+  string jwt_groups_claim_name = 4;
+  repeated string jwt_allow_groups = 5;
+  double link_min_bandwidth_mbps = 6;
+  double via_manager_latency_advantage_ms = 7;
+  double via_manager_loss_advantage_pct = 8;
+  int32 link_probe_interval_seconds = 9;
+  int32 link_probe_timeout_ms = 10;
+  bool via_manager_enabled = 11;
+  bool direct_path_enabled = 12;
+  int32 max_manager_hops = 13;
+  int32 probe_bandwidth_budget_kb = 14;
+  bool quota_enforcement_enabled = 15;
+  int32 quota_report_interval_seconds = 16;
+  string default_flow_class = 17;
+}
+
+message PathSpec {
+  string id = 1;
+  string kind = 2;
+  repeated string manager_hops = 3;
+  double rtt_milliseconds = 4;
+  double loss_percent = 5;
+  double bandwidth_mbps = 6;
+  double confidence = 7;
+  uint64 cost = 8;
+}
+
+message RouteAssignment {
+  string id = 1;
+  string network_id = 2;
+  string source_peer_id = 3;
+  string destination_peer_id = 4;
+  uint64 epoch = 5;
+  PathSpec primary = 6;
+  repeated PathSpec fallbacks = 7;
+  string updated_at = 8;
+  bool requires_admission = 9;
+  int32 max_hops = 10;
+}
+
+message User {
+  string id = 1;
+  string email = 2;
+  string name = 3;
+  string role = 4;
+  repeated string auto_groups = 5;
+  bool blocked = 6;
+  string issued = 7;
+  string last_login = 8;
+}
+
+message SetupKey {
+  string id = 1;
+  string name = 2;
+  string token = 3;
+  string token_prefix = 4;
+  bytes token_hash = 5;
+  string type = 6;
+  repeated string groups = 7;
+  string expires_at = 8;
+  int32 usage_limit = 9;
+  int32 used_count = 10;
+  bool revoked = 11;
+  string created_at = 12;
+  string last_used_at = 13;
+}
+
+message Nameserver {
+  string id = 1;
+  string name = 2;
+  repeated string groups = 3;
+  repeated string match_domains = 4;
+  repeated string servers = 5;
+  bool primary = 6;
+  bool enabled = 7;
+}
+
+message DNSRecord {
+  string name = 1;
+  string type = 2;
+  string value = 3;
+  int32 ttl = 4;
+}
+
+message DNSZone {
+  string id = 1;
+  string domain = 2;
+  repeated DNSRecord records = 3;
+  repeated string groups = 4;
+  bool enabled = 5;
+}
+
+message DNSSettings {
+  bool disabled = 1;
+  repeated string groups = 2;
+}
+
+message Group {
+  string id = 1;
+  string name = 2;
+  repeated string user_ids = 3;
+  repeated string peer_ids = 4;
+  bool managed = 5;
+  string sso_claim = 6;
+  string issued = 7;
+}
+
+message Service {
+  string protocol = 1;
+  uint32 start_port = 2;
+  uint32 end_port = 3;
+}
+
+message Policy {
+  string id = 1;
+  repeated string source_groups = 2;
+  repeated string destination_groups = 3;
+  repeated Service services = 4;
+  string effect = 5;
+  string direction = 6;
+  repeated string posture = 7;
+  repeated string link_constraints = 8;
+  int32 priority = 9;
+  string flow_class = 10;
+}
+
+message Route {
+  string id = 1;
+  string destination = 2;
+  string routing_group = 3;
+  repeated string distribution_groups = 4;
+  int32 metric = 5;
+  repeated string allowed_path_types = 6;
+  int32 max_hops = 7;
+  repeated string budget_ids = 8;
+  string flow_class = 9;
+}
+
+message TrafficBudget {
+  string id = 1;
+  string subject_type = 2;
+  string subject_id = 3;
+  uint64 daily_bytes = 4;
+  uint64 monthly_bytes = 5;
+  uint64 peak_bps = 6;
+  uint64 forwarding_cost_limit = 7;
+  string on_exhausted = 8;
+  uint64 used_daily_bytes = 9;
+  uint64 used_monthly_bytes = 10;
+  string updated_at = 11;
+  uint64 peak_burst_bytes = 12;
+}
+
+message NetworkState {
+  string network_id = 1;
+  string overlay_cidr = 2;
+  repeated PeerRecord peers = 3;
+  repeated User users = 4;
+  repeated Group groups = 5;
+  repeated Policy policies = 6;
+  repeated Route routes = 7;
+  repeated TrafficBudget budgets = 8;
+  repeated SetupKey setup_keys = 9;
+  repeated Nameserver nameservers = 10;
+  repeated DNSZone zones = 11;
+  DNSSettings dns_settings = 12;
+  NetworkSettings settings = 13;
+  repeated RouteAssignment assignments = 14;
+  uint32 next_ip_offset = 15;
+  CommitteeConfig committee_config = 16;
+}
+
+// ---------------------------------------------------------------------------
+// BFT
+// ---------------------------------------------------------------------------
+
+message StateTransition {
+  string type = 1;
+  PeerRecord peer = 2;
+  string setup_key = 3;
+  string request_id = 4;
+  Group group = 5;
+  Policy policy = 6;
+  Route route = 7;
+  TrafficBudget budget = 8;
+  SetupKey setup_key_record = 9;
+  Nameserver nameserver = 10;
+  DNSZone zone = 11;
+  DNSSettings dns_settings = 12;
+  User user = 13;
+  NetworkSettings settings = 14;
+  RouteAssignment assignment = 15;
+  string target_id = 16;
+  CommitteeConfig committee_config = 17;
+  repeated CommitteeMember committee = 18;
+  BudgetUsage budget_usage = 19;
+}
+
+message BudgetUsage {
+  string budget_id = 1;
+  uint64 daily_bytes = 2;
+  uint64 monthly_bytes = 3;
+  string period_day = 4;
+  string period_month = 5;
+}
+
+message QuorumCertificate {
+  uint64 height = 1;
+  uint64 round = 2;
+  bytes state_hash = 3;
+  bytes transition_hash = 4;
+  bytes aggregate_signature = 5;
+  bytes signer_bitmap = 6;
+  uint64 committee_epoch = 7;
+}
+
+message SignedSnapshot {
+  uint64 epoch = 1;
+  uint64 height = 2;
+  bytes state_hash = 3;
+  NetworkState state = 4;
+  repeated CommitteeMember committee = 5;
+  QuorumCertificate qc = 6;
+  StateTransition transition = 7;
+  string leader_id = 8;
+  CommitteeConfig committee_config = 9;
+}
+
+message Proposal {
+  uint64 height = 1;
+  uint64 round = 2;
+  string network_id = 3;
+  NetworkState state = 4;
+  string leader_id = 5;
+  StateTransition transition = 6;
+}
+
+message Vote {
+  uint64 height = 1;
+  uint64 round = 2;
+  string network_id = 3;
+  bytes state_hash = 4;
+  bytes transition_hash = 5;
+  string voter_id = 6;
+  bytes signature = 7;
+  uint64 committee_epoch = 8;
+}
+
+// committeeEnvelope multiplexed over /netp2p/control/state-update/2.0.0.
+message CommitteeEnvelope {
+  string type = 1;
+  Proposal proposal = 2;
+  Vote vote = 3;
+  SignedSnapshot snapshot = 4;
+  StateTransition transition = 5;
+  uint64 height = 6;
+  uint64 round = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Control plane
+// ---------------------------------------------------------------------------
+
+message LoginRequest {
+  string network_id = 1;
+  string setup_key = 2;
+  string jwt_token = 3;
+  string peer_id = 4;
+  repeated string addresses = 5;
+  string hostname = 6;
+  string os = 7;
+  string client_version = 8;
+  string protocol_version = 9;
+  repeated string capabilities = 10;
+}
+
+message LoginResponse {
+  SignedSnapshot snapshot = 1;
+  PeerRecord peer = 2;
+  string error = 3;
+  string code = 4;
+  string protocol_version = 5;
+  repeated string capabilities = 6;
+}
+
+message SyncRequest {
+  string network_id = 1;
+  string peer_id = 2;
+  uint64 height = 3;
+  uint64 assignments_height = 4;
+  repeated AdmissionReport admissions = 5;
+  string protocol_version = 6;
+}
+
+message AdmissionReport {
+  string assignment_id = 1;
+  string path_id = 2;
+  bool ok = 3;
+  double rtt_ms = 4;
+  double loss_pct = 5;
+  string observed_at = 6;
+}
+
+message AdminRequest {
+  string token = 1;
+  StateTransition transition = 2;
+}
+
+message AdminResponse {
+  SignedSnapshot snapshot = 1;
+  string error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Non-certified observations
+// ---------------------------------------------------------------------------
+
+message PresenceObservation {
+  string peer_id = 1;
+  bool online = 2;
+  string last_seen = 3;
+  string remote_addr = 4;
+  string observer = 5;
+  string updated_at = 6;
+}
+
+message PresenceGossip {
+  string observed_at = 1;
+  repeated PresenceObservation observations = 2;
+}
+
+message LinkObservation {
+  string observer_id = 1;
+  string subject_id = 2;
+  string scope = 3;
+  string direction = 4;
+  double rtt_milliseconds = 5;
+  double loss_percent = 6;
+  double jitter_milliseconds = 7;
+  double bandwidth_mbps = 8;
+  int32 samples = 9;
+  string measured_at = 10;
+  uint64 sequence = 11;
+  bytes signature = 12;
+}
+
+message LinkGossip {
+  string observed_at = 1;
+  repeated LinkObservation observations = 2;
+}
+
+message ProbeRequest {
+  string kind = 1;
+  uint64 nonce = 2;
+  int32 bytes = 3;
+}
+
+message ProbeReply {
+  uint64 nonce = 1;
+  int32 received_bytes = 2;
+}
+
+// Quota usage increments reported by clients to the manager. Increments are
+// aggregated before being settled into certified state.
+message QuotaReport {
+  string peer_id = 1;
+  repeated BudgetIncrement increments = 2;
+  string reported_at = 3;
+  string protocol_version = 4;
+}
+
+message BudgetIncrement {
+  string budget_id = 1;
+  uint64 bytes = 2;
+}

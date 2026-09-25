@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/netp2p/netp2p/internal/crypto/bls"
 	"github.com/netp2p/netp2p/internal/model"
 )
 
@@ -216,8 +217,27 @@ func TestRejectInsufficientQuorum(t *testing.T) {
 	snapshot := advance(t, privateKeys, engines, model.StateTransition{
 		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
 	})
-	snapshot.QC.Signers = snapshot.QC.Signers[:2]
-	snapshot.QC.Signatures = snapshot.QC.Signatures[:2]
+	// Rebuild the certificate with only two partial signatures: below the 3-of-4
+	// threshold, so it must not verify against the group public key.
+	message := voteMessage(Vote{
+		Height: snapshot.QC.Height, Round: snapshot.QC.Round, NetworkID: snapshot.State.NetworkID,
+		StateHash: snapshot.QC.StateHash, TransitionHash: snapshot.QC.TransitionHash,
+		CommitteeEpoch: snapshot.QC.CommitteeEpoch,
+	})
+	partials := map[int][]byte{}
+	for _, index := range []int{0, 1} {
+		signature, err := engines[0].blsKeys.SignShare(index, message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		partials[index] = signature
+	}
+	aggregate, err := bls.Aggregate(partials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.QC.AggregateSignature = aggregate
+	snapshot.QC.SignerBitmap = []byte{0b00000011}
 	if err := ValidateSnapshot(snapshot); err == nil {
 		t.Fatal("insufficient quorum accepted")
 	}

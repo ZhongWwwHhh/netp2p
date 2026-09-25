@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -15,7 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/netp2p/netp2p/internal/crypto/bls"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/wire"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -58,38 +61,30 @@ var (
 	ErrInvalidQC     = errors.New("invalid quorum certificate")
 )
 
-type Proposal struct {
-	Height     uint64                `json:"height"`
-	Round      uint64                `json:"round"`
-	NetworkID  string                `json:"networkId"`
-	State      model.NetworkState    `json:"state"`
-	LeaderID   string                `json:"leaderId"`
-	Transition model.StateTransition `json:"transition"`
-}
-
-type Vote struct {
-	Height         uint64 `json:"height"`
-	Round          uint64 `json:"round"`
-	NetworkID      string `json:"networkId"`
-	StateHash      []byte `json:"stateHash"`
-	TransitionHash []byte `json:"transitionHash"`
-	VoterID        string `json:"voterId"`
-	Signature      []byte `json:"signature"`
-}
+// Proposal, Vote and CommitteeEnvelope live in the model package so the wire
+// conversion layer can reference them without importing bft. The aliases keep
+// the historical bft.Proposal / bft.Vote spellings working.
+type (
+	Proposal          = model.Proposal
+	Vote              = model.Vote
+	CommitteeEnvelope = model.CommitteeEnvelope
+)
 
 type Engine struct {
-	mu         sync.RWMutex
-	committee  []model.CommitteeMember
-	byID       map[string]model.CommitteeMember
-	publicKeys map[string]ed25519.PublicKey
-	privateKey ed25519.PrivateKey
-	localID    string
-	height     uint64
-	current    model.NetworkState
-	proposals  map[uint64]Proposal
-	votes      map[uint64][]Vote
-	committed  map[uint64]model.SignedSnapshot
-	listeners  []func(model.SignedSnapshot)
+	mu              sync.RWMutex
+	committee       []model.CommitteeMember
+	byID            map[string]model.CommitteeMember
+	blsKeys         *bls.KeySet
+	blsIndex        map[string]int
+	committeeConfig model.CommitteeConfig
+	privateKey      ed25519.PrivateKey
+	localID         string
+	height          uint64
+	current         model.NetworkState
+	proposals       map[uint64]Proposal
+	votes           map[uint64][]Vote
+	committed       map[uint64]model.SignedSnapshot
+	listeners       []func(model.SignedSnapshot)
 }
 
 func findPeerRecord(state model.NetworkState, peerID string) *model.PeerRecord {
@@ -127,7 +122,6 @@ func NewEngine(seedState model.NetworkState, committee []model.CommitteeMember, 
 	engine := &Engine{
 		committee:  append([]model.CommitteeMember(nil), committee...),
 		byID:       make(map[string]model.CommitteeMember, len(committee)),
-		publicKeys: make(map[string]ed25519.PublicKey, len(committee)),
 		privateKey: append(ed25519.PrivateKey(nil), privateKey...),
 		localID:    localID,
 		current:    NormalizeState(seedState),
@@ -149,12 +143,60 @@ func NewEngine(seedState model.NetworkState, committee []model.CommitteeMember, 
 			engine.committee[index] = member
 		}
 		engine.byID[member.ID] = member
-		engine.publicKeys[member.ID] = ed25519.PublicKey(member.PublicKey)
 	}
 	if _, ok := engine.byID[localID]; !ok {
 		return nil, fmt.Errorf("local manager %q is not in committee", localID)
 	}
+	config, keys, index, err := deriveCommitteeKeys(engine.committee)
+	if err != nil {
+		return nil, err
+	}
+	engine.committeeConfig = config
+	engine.blsKeys = keys
+	engine.blsIndex = index
+	for position := range engine.committee {
+		engine.committee[position].BLSPublicKey = keys.PublicKeyShare(index[engine.committee[position].ID])
+		engine.byID[engine.committee[position].ID] = engine.committee[position]
+	}
+	engine.current.CommitteeConfig = engine.committeeConfig
 	return engine, nil
+}
+
+// deriveCommitteeKeys builds the deterministic (t-of-n) BLS sharing for a
+// committee sorted by member ID. Share index i maps to x = i+1.
+func deriveCommitteeKeys(committee []model.CommitteeMember) (model.CommitteeConfig, *bls.KeySet, map[string]int, error) {
+	sorted := append([]model.CommitteeMember(nil), committee...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	keys, err := bls.DeriveKeySet(committeeSeed(sorted), QuorumSize, len(sorted))
+	if err != nil {
+		return model.CommitteeConfig{}, nil, nil, err
+	}
+	index := make(map[string]int, len(sorted))
+	for position, member := range sorted {
+		index[member.ID] = position
+	}
+	config := model.CommitteeConfig{
+		Threshold:      uint32(QuorumSize),
+		Size:           uint32(len(sorted)),
+		GroupPublicKey: append([]byte(nil), keys.GroupPublicKey...),
+	}
+	return config, keys, index, nil
+}
+
+// committeeSeed derives the BLS master seed from the committee membership so
+// every manager and client can rebuild the same group key. v0 keeps this
+// deterministic; a later stage replaces it with a DKG ceremony.
+func committeeSeed(committee []model.CommitteeMember) []byte {
+	digest := sha256.New()
+	digest.Write([]byte("netp2p-bls-committee-v1"))
+	for _, member := range committee {
+		var seedBytes [8]byte
+		binary.BigEndian.PutUint64(seedBytes[:], uint64(member.KeySeed))
+		digest.Write([]byte(member.ID))
+		digest.Write([]byte{0})
+		digest.Write(seedBytes[:])
+	}
+	return digest.Sum(nil)
 }
 
 func NormalizeState(state model.NetworkState) model.NetworkState {
@@ -223,13 +265,9 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	return normalized
 }
 
-func canonicalValue(value any) []byte {
-	encoded, _ := json.Marshal(value)
-	return encoded
-}
-
 func StateHash(state model.NetworkState) []byte {
-	hash := sha256.Sum256(canonicalValue(NormalizeState(state)))
+	message := wire.NetworkStateToProto(NormalizeState(state))
+	hash := sha256.Sum256(mustDeterministicMarshal(message))
 	return hash[:]
 }
 
@@ -237,8 +275,35 @@ func StateHash(state model.NetworkState) []byte {
 // covered by each committee member's signature, the certified snapshot's
 // transition cannot be altered by a single manager without breaking the QC.
 func TransitionHash(transition model.StateTransition) []byte {
-	hash := sha256.Sum256(canonicalValue(transition))
+	message := wire.StateTransitionToProto(transition)
+	hash := sha256.Sum256(mustDeterministicMarshal(message))
 	return hash[:]
+}
+
+// mustDeterministicMarshal encodes a protobuf message with field ordering
+// fixed so that identical logical values always hash identically. The wire
+// schema avoids map fields precisely so this stays deterministic.
+func mustDeterministicMarshal(message proto.Message) []byte {
+	encoded, err := proto.MarshalOptions{Deterministic: true}.Marshal(message)
+	if err != nil {
+		panic(fmt.Sprintf("bft: deterministic marshal failed: %v", err))
+	}
+	return encoded
+}
+
+// voteMessage is the common payload every committee member signs. It excludes
+// VoterID so that threshold partial signatures can be aggregated into a single
+// group signature.
+func voteMessage(vote Vote) []byte {
+	message := &pb.Vote{
+		Height:         vote.Height,
+		Round:          vote.Round,
+		NetworkId:      vote.NetworkID,
+		StateHash:      vote.StateHash,
+		TransitionHash: vote.TransitionHash,
+		CommitteeEpoch: vote.CommitteeEpoch,
+	}
+	return mustDeterministicMarshal(message)
 }
 
 func (engine *Engine) Leader(height, round uint64) model.CommitteeMember {
@@ -365,26 +430,20 @@ func cloneProposal(proposal Proposal) Proposal {
 	return proposal
 }
 
-func signVote(privateKey ed25519.PrivateKey, vote *Vote) error {
-	hash := sha256.Sum256(canonicalValue(map[string]any{
-		"height": vote.Height, "round": vote.Round, "networkId": vote.NetworkID,
-		"stateHash": vote.StateHash, "transitionHash": vote.TransitionHash,
-		"voterId": vote.VoterID,
-	}))
-	vote.Signature = ed25519.Sign(privateKey, hash[:])
-	return nil
-}
-
-func verifyVote(publicKey ed25519.PublicKey, vote Vote) bool {
-	if len(vote.Signature) != ed25519.SignatureSize {
-		return false
+// signVoteShare produces this manager's BLS partial signature over the common
+// vote message. The signature is not individually verifiable as a group
+// signature; QuorumSize partials are aggregated into the QC's group signature.
+func (engine *Engine) signVoteShare(vote *Vote) error {
+	index, ok := engine.blsIndex[engine.localID]
+	if !ok {
+		return fmt.Errorf("local manager is not in the BLS committee")
 	}
-	hash := sha256.Sum256(canonicalValue(map[string]any{
-		"height": vote.Height, "round": vote.Round, "networkId": vote.NetworkID,
-		"stateHash": vote.StateHash, "transitionHash": vote.TransitionHash,
-		"voterId": vote.VoterID,
-	}))
-	return ed25519.Verify(publicKey, hash[:], vote.Signature)
+	signature, err := engine.blsKeys.SignShare(index, voteMessage(*vote))
+	if err != nil {
+		return err
+	}
+	vote.Signature = signature
+	return nil
 }
 
 func (engine *Engine) Propose(transition model.StateTransition, round uint64) (Proposal, Vote, error) {
@@ -413,8 +472,9 @@ func (engine *Engine) localVote(proposal Proposal) Vote {
 	vote := Vote{
 		Height: proposal.Height, Round: proposal.Round, NetworkID: proposal.NetworkID,
 		StateHash: hash, TransitionHash: TransitionHash(proposal.Transition), VoterID: engine.localID,
+		CommitteeEpoch: engine.committeeConfig.CommitteeEpoch,
 	}
-	if err := signVote(engine.privateKey, &vote); err != nil {
+	if err := engine.signVoteShare(&vote); err != nil {
 		return vote
 	}
 	return vote
@@ -464,9 +524,12 @@ func (engine *Engine) addVoteLocked(vote Vote) {
 func (engine *Engine) ProcessVote(vote Vote) (model.QuorumCertificate, bool, error) {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	publicKey, ok := engine.publicKeys[vote.VoterID]
-	if !ok || !verifyVote(publicKey, vote) {
+	shareIndex, ok := engine.blsIndex[vote.VoterID]
+	if !ok || !bls.Verify(engine.blsKeys.PublicKeyShare(shareIndex), voteMessage(vote), vote.Signature) {
 		return model.QuorumCertificate{}, false, fmt.Errorf("invalid vote signature")
+	}
+	if vote.CommitteeEpoch != engine.committeeConfig.CommitteeEpoch {
+		return model.QuorumCertificate{}, false, fmt.Errorf("vote committee epoch mismatch")
 	}
 	if vote.Height <= engine.height {
 		return model.QuorumCertificate{}, false, ErrStaleHeight
@@ -482,23 +545,28 @@ func (engine *Engine) ProcessVote(vote Vote) (model.QuorumCertificate, bool, err
 	if len(engine.votes[vote.Height]) < QuorumSize {
 		return model.QuorumCertificate{}, false, nil
 	}
+	partials := make(map[int][]byte, len(engine.votes[vote.Height]))
+	bitmap := make([]byte, (len(engine.committee)+7)/8)
+	for _, item := range engine.votes[vote.Height] {
+		index, ok := engine.blsIndex[item.VoterID]
+		if !ok {
+			continue
+		}
+		partials[index] = item.Signature
+		bitmap[index/8] |= 1 << uint(index%8)
+	}
+	if len(partials) < QuorumSize {
+		return model.QuorumCertificate{}, false, nil
+	}
+	aggregate, err := bls.Aggregate(partials)
+	if err != nil {
+		return model.QuorumCertificate{}, false, err
+	}
 	qc := model.QuorumCertificate{
 		Height: vote.Height, Round: vote.Round,
 		StateHash: vote.StateHash, TransitionHash: vote.TransitionHash,
-	}
-	count := 0
-	for _, member := range engine.committee {
-		for _, item := range engine.votes[vote.Height] {
-			if item.VoterID == member.ID {
-				qc.Signers = append(qc.Signers, member.ID)
-				qc.Signatures = append(qc.Signatures, item.Signature)
-				count++
-				break
-			}
-		}
-		if count == QuorumSize {
-			break
-		}
+		AggregateSignature: aggregate, SignerBitmap: bitmap,
+		CommitteeEpoch: engine.committeeConfig.CommitteeEpoch,
 	}
 	return qc, true, nil
 }
@@ -524,11 +592,12 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 		return model.SignedSnapshot{}, err
 	}
 	engine.current = NormalizeState(proposal.State)
+	engine.current.CommitteeConfig = engine.committeeConfig
 	engine.height = proposal.Height
 	snapshot := model.SignedSnapshot{
 		Epoch: proposal.Height, Height: proposal.Height, StateHash: append([]byte(nil), qc.StateHash...),
 		State: cloneState(engine.current), Committee: append([]model.CommitteeMember(nil), engine.committee...), QC: qc,
-		Transition: proposal.Transition, LeaderID: proposal.LeaderID,
+		Transition: proposal.Transition, LeaderID: proposal.LeaderID, CommitteeConfig: engine.committeeConfig,
 	}
 	engine.committed[proposal.Height] = snapshot
 	delete(engine.proposals, proposal.Height)
@@ -543,29 +612,33 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 }
 
 func (engine *Engine) verifyQCLocked(qc model.QuorumCertificate) error {
-	if len(qc.Signers) < QuorumSize || len(qc.Signatures) != len(qc.Signers) {
+	if qc.CommitteeEpoch != engine.committeeConfig.CommitteeEpoch {
 		return ErrInvalidQC
 	}
-	seen := make(map[string]struct{})
-	for index, signerID := range qc.Signers {
-		publicKey, ok := engine.publicKeys[signerID]
-		if !ok {
-			return ErrInvalidQC
-		}
-		if _, duplicate := seen[signerID]; duplicate {
-			return ErrInvalidQC
-		}
-		seen[signerID] = struct{}{}
-		vote := Vote{
-			Height: qc.Height, Round: qc.Round, NetworkID: engine.current.NetworkID,
-			StateHash: qc.StateHash, TransitionHash: qc.TransitionHash, VoterID: signerID,
-			Signature: qc.Signatures[index],
-		}
-		if !verifyVote(publicKey, vote) {
-			return ErrInvalidQC
-		}
+	if countSigners(qc.SignerBitmap) < QuorumSize {
+		return ErrInvalidQC
+	}
+	vote := Vote{
+		Height: qc.Height, Round: qc.Round, NetworkID: engine.current.NetworkID,
+		StateHash: qc.StateHash, TransitionHash: qc.TransitionHash,
+		CommitteeEpoch: qc.CommitteeEpoch,
+	}
+	if !bls.Verify(engine.committeeConfig.GroupPublicKey, voteMessage(vote), qc.AggregateSignature) {
+		return ErrInvalidQC
 	}
 	return nil
+}
+
+func countSigners(bitmap []byte) int {
+	count := 0
+	for _, value := range bitmap {
+		for bit := 0; bit < 8; bit++ {
+			if value&(1<<uint(bit)) != 0 {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func (engine *Engine) OnCommit(listener func(model.SignedSnapshot)) {
@@ -1327,19 +1400,28 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 	if len(snapshot.Committee) < CommitteeSize {
 		return ErrInvalidQC
 	}
-	publicKeys := make(map[string]ed25519.PublicKey)
-	for _, member := range snapshot.Committee {
-		if len(member.PublicKey) == 0 {
-			publicKeys[member.ID] = SeededPublicKey(member.KeySeed)
-		} else {
-			publicKeys[member.ID] = ed25519.PublicKey(member.PublicKey)
-		}
-	}
 	if !bytes.Equal(snapshot.StateHash, StateHash(snapshot.State)) {
 		return fmt.Errorf("snapshot state hash mismatch")
 	}
 	qc := snapshot.QC
-	if len(qc.Signers) < QuorumSize || len(qc.Signatures) != len(qc.Signers) || qc.Height != snapshot.Height {
+	if qc.Height != snapshot.Height {
+		return ErrInvalidQC
+	}
+	config := snapshot.CommitteeConfig
+	if config.GroupPublicKey == nil {
+		derived, _, _, err := deriveCommitteeKeys(snapshot.Committee)
+		if err != nil {
+			return err
+		}
+		config = derived
+	}
+	if config.Threshold < uint32(QuorumSize) {
+		return ErrInvalidQC
+	}
+	if qc.CommitteeEpoch != config.CommitteeEpoch {
+		return fmt.Errorf("snapshot committee epoch mismatch")
+	}
+	if countSigners(qc.SignerBitmap) < int(config.Threshold) {
 		return ErrInvalidQC
 	}
 	// The transition committed in the snapshot must match the one the
@@ -1351,24 +1433,13 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 	if snapshot.LeaderID == "" || snapshot.LeaderID != leaderIDFor(snapshot.Committee, snapshot.Height, qc.Round) {
 		return fmt.Errorf("snapshot leader mismatch")
 	}
-	seen := make(map[string]struct{})
-	for index, signerID := range qc.Signers {
-		publicKey, ok := publicKeys[signerID]
-		if !ok {
-			return ErrInvalidQC
-		}
-		if _, duplicate := seen[signerID]; duplicate {
-			return ErrInvalidQC
-		}
-		seen[signerID] = struct{}{}
-		vote := Vote{
-			Height: qc.Height, Round: qc.Round, NetworkID: snapshot.State.NetworkID,
-			StateHash: qc.StateHash, TransitionHash: qc.TransitionHash, VoterID: signerID,
-			Signature: qc.Signatures[index],
-		}
-		if !verifyVote(publicKey, vote) {
-			return ErrInvalidQC
-		}
+	vote := Vote{
+		Height: qc.Height, Round: qc.Round, NetworkID: snapshot.State.NetworkID,
+		StateHash: qc.StateHash, TransitionHash: qc.TransitionHash,
+		CommitteeEpoch: qc.CommitteeEpoch,
+	}
+	if !bls.Verify(config.GroupPublicKey, voteMessage(vote), qc.AggregateSignature) {
+		return ErrInvalidQC
 	}
 	return nil
 }

@@ -516,8 +516,9 @@ func TestSnapshotVerificationRejectsTampering(t *testing.T) {
 	}
 
 	missingQuorum := snapshot
-	missingQuorum.QC.Signers = missingQuorum.QC.Signers[:len(missingQuorum.QC.Signers)-1]
-	missingQuorum.QC.Signatures = missingQuorum.QC.Signatures[:len(missingQuorum.QC.Signatures)-1]
+	// Clearing the signer bitmap simulates a certificate that does not carry a
+	// threshold of contributions.
+	missingQuorum.QC.SignerBitmap = []byte{0b00000001}
 	if err := bft.ValidateSnapshot(missingQuorum); err == nil {
 		t.Fatal("snapshot without quorum accepted")
 	}

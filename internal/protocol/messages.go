@@ -17,6 +17,10 @@ type LoginRequest struct {
 	Hostname      string   `json:"hostname,omitempty"`
 	OS            string   `json:"os,omitempty"`
 	ClientVersion string   `json:"clientVersion,omitempty"`
+	// ProtocolVersion and Capabilities implement the startup handshake. A
+	// mismatch is rejected with an explicit error instead of a decode failure.
+	ProtocolVersion string   `json:"protocolVersion,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
 }
 
 type LoginResponse struct {
@@ -24,7 +28,9 @@ type LoginResponse struct {
 	Peer     model.PeerRecord     `json:"peer"`
 	Error    string               `json:"error,omitempty"`
 	// Code classifies a failure so clients can branch without matching prose.
-	Code string `json:"code,omitempty"`
+	Code            string   `json:"code,omitempty"`
+	ProtocolVersion string   `json:"protocolVersion,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
 }
 
 // Login error codes shared by the manager and client.
@@ -41,6 +47,7 @@ type SyncRequest struct {
 	Height            uint64            `json:"height"`
 	AssignmentsHeight uint64            `json:"assignmentsHeight,omitempty"`
 	Admissions        []AdmissionReport `json:"admissions,omitempty"`
+	ProtocolVersion   string            `json:"protocolVersion,omitempty"`
 }
 
 type AdmissionReport struct {
@@ -51,3 +58,23 @@ type AdmissionReport struct {
 	LossPct      float64   `json:"lossPct"`
 	ObservedAt   time.Time `json:"observedAt"`
 }
+
+// QuotaReport carries client-observed byte increments to the manager. The
+// manager aggregates them and settles the total into certified state, which is
+// why the client never submits absolute usage.
+type QuotaReport struct {
+	PeerID          string            `json:"peerId"`
+	Increments      []BudgetIncrement `json:"increments"`
+	ReportedAt      time.Time         `json:"reportedAt"`
+	ProtocolVersion string            `json:"protocolVersion,omitempty"`
+}
+
+type BudgetIncrement struct {
+	BudgetID string `json:"budgetId"`
+	Bytes    uint64 `json:"bytes"`
+}
+
+// Login rejection codes added by the quota/committee stages.
+const (
+	CodeProtocolMismatch = "protocol_mismatch"
+)

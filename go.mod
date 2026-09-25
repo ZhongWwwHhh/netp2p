@@ -3,12 +3,14 @@ module github.com/netp2p/netp2p
 go 1.25.7
 
 require (
+	github.com/consensys/gnark-crypto v0.19.2
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/libp2p/go-libp2p v0.49.0
 	github.com/miekg/dns v1.1.73
 	github.com/multiformats/go-multiaddr v0.16.1
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.47.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -16,6 +18,7 @@ require (
 	filippo.io/keygen v1.0.0 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
@@ -95,6 +98,5 @@ require (
 	golang.org/x/text v0.40.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )

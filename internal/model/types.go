@@ -13,6 +13,30 @@ type CommitteeMember struct {
 	PublicKey         []byte `json:"publicKey,omitempty"`
 	ListenAddr        string `json:"listenAddr,omitempty"`
 	ForwardingEnabled bool   `json:"forwardingEnabled"`
+	// BLSPublicKey is the member's threshold-signature share public key. It is
+	// derived deterministically from KeySeed in v1; DKG is a later stage.
+	BLSPublicKey []byte `json:"blsPublicKey,omitempty"`
+}
+
+// CommitteeConfig pins the threshold parameters a snapshot's QC must satisfy.
+// Only rotate_committee_keys changes it, and every change bumps CommitteeEpoch.
+type CommitteeConfig struct {
+	Threshold      uint32 `json:"threshold"`
+	Size           uint32 `json:"size"`
+	GroupPublicKey []byte `json:"groupPublicKey,omitempty"`
+	CommitteeEpoch uint64 `json:"committeeEpoch"`
+}
+
+// BudgetUsage is a certified aggregate of client-reported traffic against one
+// budget. Periods make the daily/monthly reset deterministic across managers.
+type BudgetUsage struct {
+	BudgetID     string `json:"budgetId"`
+	DailyBytes   uint64 `json:"dailyBytes"`
+	MonthlyBytes uint64 `json:"monthlyBytes"`
+	// PeriodDay is the UTC day the daily counter belongs to (YYYY-MM-DD).
+	PeriodDay string `json:"periodDay,omitempty"`
+	// PeriodMonth is the UTC month the monthly counter belongs to (YYYY-MM).
+	PeriodMonth string `json:"periodMonth,omitempty"`
 }
 
 type PeerRecord struct {
@@ -58,6 +82,16 @@ type NetworkSettings struct {
 	DirectPathEnabled            bool    `json:"directPathEnabled,omitempty"`
 	MaxManagerHops               int     `json:"maxManagerHops,omitempty"`
 	ProbeBandwidthBudgetKB       int     `json:"probeBandwidthBudgetKb,omitempty"`
+	// QuotaEnforcementEnabled turns TrafficBudget enforcement on. With it
+	// disabled budgets are still accounted and shown in the console.
+	QuotaEnforcementEnabled bool `json:"quotaEnforcementEnabled,omitempty"`
+	// QuotaReportIntervalSeconds is how often clients flush usage to the
+	// manager. Aggregated settlement into certified state is rate limited
+	// separately so reporting cannot churn consensus.
+	QuotaReportIntervalSeconds int `json:"quotaReportIntervalSeconds,omitempty"`
+	// DefaultFlowClass is the planner's default scoring class when no route or
+	// policy overrides it.
+	DefaultFlowClass string `json:"defaultFlowClass,omitempty"`
 }
 
 type PathKind string
@@ -76,6 +110,9 @@ type PathSpec struct {
 	LossPercent     float64  `json:"lossPercent"`
 	BandwidthMbps   float64  `json:"bandwidthMbps"`
 	Confidence      float64  `json:"confidence"`
+	// Cost is the estimated forwarding cost of this path: the sum of per-hop
+	// forwarding cost. It breaks score ties and drives cost-class routing.
+	Cost uint64 `json:"cost,omitempty"`
 }
 
 func (path PathSpec) Normalized() PathSpec {
@@ -118,6 +155,8 @@ type RouteAssignment struct {
 	Fallbacks         []PathSpec `json:"fallbacks"`
 	UpdatedAt         time.Time  `json:"updatedAt"`
 	RequiresAdmission bool       `json:"requiresAdmission"`
+	// MaxHops is the certified ceiling on manager hops for this assignment.
+	MaxHops int `json:"maxHops,omitempty"`
 }
 
 // Paths returns the primary followed by fallbacks in certified order.
@@ -240,26 +279,44 @@ type StateTransition struct {
 	Settings    *NetworkSettings `json:"settings,omitempty"`
 	Assignment  *RouteAssignment `json:"assignment,omitempty"`
 	TargetID    string           `json:"targetId,omitempty"`
+	// Committee carries the full replacement committee for update_committee.
+	Committee []CommitteeMember `json:"committee,omitempty"`
+	// CommitteeConfig carries the new threshold parameters for
+	// rotate_committee_keys.
+	CommitteeConfig *CommitteeConfig `json:"committeeConfig,omitempty"`
+	// BudgetUsage settles aggregated client-reported usage into certified state.
+	BudgetUsage *BudgetUsage `json:"budgetUsage,omitempty"`
 }
 
 type QuorumCertificate struct {
-	Height         uint64   `json:"height"`
-	Round          uint64   `json:"round"`
-	StateHash      []byte   `json:"stateHash"`
-	TransitionHash []byte   `json:"transitionHash"`
-	Signers        []string `json:"signers"`
-	Signatures     [][]byte `json:"signatures"`
+	Height         uint64 `json:"height"`
+	Round          uint64 `json:"round"`
+	StateHash      []byte `json:"stateHash"`
+	TransitionHash []byte `json:"transitionHash"`
+	// AggregateSignature is one BLS signature over the canonical vote message,
+	// produced by interpolating the collected share signatures at threshold.
+	AggregateSignature []byte `json:"aggregateSignature,omitempty"`
+	// SignerBitmap marks which committee members contributed, for diagnostics
+	// and duplicate detection. Cryptographic authority comes from the
+	// aggregate signature, not the bitmap.
+	SignerBitmap []byte `json:"signerBitmap,omitempty"`
+	// CommitteeEpoch binds the QC to the committee configuration that produced
+	// it, so signatures from before a key rotation are rejected.
+	CommitteeEpoch uint64 `json:"committeeEpoch,omitempty"`
 }
 
 type SignedSnapshot struct {
-	Epoch      uint64            `json:"epoch"`
-	Height     uint64            `json:"height"`
-	StateHash  []byte            `json:"stateHash"`
-	State      NetworkState      `json:"state"`
-	Committee  []CommitteeMember `json:"committee"`
-	QC         QuorumCertificate `json:"qc"`
-	Transition StateTransition   `json:"transition"`
-	LeaderID   string            `json:"leaderId"`
+	Epoch     uint64            `json:"epoch"`
+	Height    uint64            `json:"height"`
+	StateHash []byte            `json:"stateHash"`
+	State     NetworkState      `json:"state"`
+	Committee []CommitteeMember `json:"committee"`
+	QC        QuorumCertificate `json:"qc"`
+	// CommitteeConfig is the threshold configuration this snapshot was
+	// certified under.
+	CommitteeConfig CommitteeConfig `json:"committeeConfig"`
+	Transition      StateTransition `json:"transition"`
+	LeaderID        string          `json:"leaderId"`
 }
 
 type NetworkState struct {
@@ -278,6 +335,9 @@ type NetworkState struct {
 	Settings     NetworkSettings   `json:"settings"`
 	Assignments  []RouteAssignment `json:"assignments"`
 	NextIPOffset uint32            `json:"nextIpOffset"`
+	// CommitteeConfig is mirrored into certified state so a client can verify a
+	// snapshot using only the snapshot itself.
+	CommitteeConfig CommitteeConfig `json:"committeeConfig"`
 
 	// EngineCommittee is runtime-only context supplied by BFT. It is never
 	// marshalled into certified state because the authoritative committee list
@@ -355,6 +415,9 @@ type Policy struct {
 	Posture           []string  `json:"postureRequirements,omitempty"`
 	LinkConstraints   []string  `json:"linkConstraints,omitempty"`
 	Priority          int       `json:"priority"`
+	// FlowClass selects the planner's scoring weights for traffic this policy
+	// authorizes. Empty falls back to the network default.
+	FlowClass string `json:"flowClass,omitempty"`
 }
 
 type Route struct {
@@ -366,6 +429,8 @@ type Route struct {
 	AllowedPathTypes  []string `json:"allowedPathTypes,omitempty"`
 	MaxHops           int      `json:"maxHops,omitempty"`
 	BudgetIDs         []string `json:"budgetIds,omitempty"`
+	// FlowClass overrides the network default scoring class for this route.
+	FlowClass string `json:"flowClass,omitempty"`
 }
 
 type TrafficBudget struct {
@@ -375,6 +440,7 @@ type TrafficBudget struct {
 	DailyBytes          uint64    `json:"dailyBytes"`
 	MonthlyBytes        uint64    `json:"monthlyBytes"`
 	PeakBPS             uint64    `json:"peakBps"`
+	PeakBurstBytes      uint64    `json:"peakBurstBytes,omitempty"`
 	ForwardingCostLimit uint64    `json:"forwardingCostLimit"`
 	OnExhausted         string    `json:"onExhausted"`
 	UsedDailyBytes      uint64    `json:"usedDailyBytes"`

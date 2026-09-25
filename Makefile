@@ -1,4 +1,13 @@
-.PHONY: ui build test e2e
+.PHONY: ui build test e2e proto
+
+GOBIN := $(shell go env GOPATH)/bin
+PROTOC_GEN_GO_VERSION := v1.36.11
+
+proto:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	PATH="$(PATH):$(GOBIN)" protoc --proto_path=proto \
+		--go_out=. --go_opt=module=github.com/netp2p/netp2p \
+		proto/netp2p/v1/netp2p.proto
 
 ui:
 	cd ui && npm install --no-audit --no-fund
@@ -11,6 +20,10 @@ build: ui
 test: ui
 	cd ui && npm test
 	go test ./...
+	go vet ./...
+
+race:
+	go test -race ./internal/...
 
 e2e:
 	scripts/e2e.sh
