@@ -46,7 +46,9 @@
 - [x] direct 与 circuit relay 候选发现（libp2p hole punching + static relay）。
 - [x] B-score 链路评分：加权 RTT/loss/bandwidth/cost，归一化区间由 Web Settings 中的 relay advantage 阈值参数化。
 - [ ] RTT/loss/jitter/bandwidth/stability probe（`/netp2p/link/probe/1.0.0`）。
+- [ ] EigenSpeed 式 manager/relay 链路观测网与 client 不可信隔离。
 - [ ] flow class 约束、路径切换迟滞与热备。
+- [ ] multi-hop candidate generation + client end-to-end admission。
 
 ## Phase 4：去中心化 Manager
 
