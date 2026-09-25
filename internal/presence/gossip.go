@@ -2,20 +2,17 @@ package presence
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 const gossipInterval = 5 * time.Second
-
-type gossipMessage struct {
-	Observations []Observation `json:"observations"`
-}
 
 // Gossiper observes libp2p connection activity into a Table and periodically
 // exchanges that table with the other committee members.
@@ -67,7 +64,10 @@ func (gossiper *Gossiper) refreshLocal() {
 }
 
 func (gossiper *Gossiper) exchange(ctx context.Context) {
-	message := gossipMessage{Observations: gossiper.table.Snapshot()}
+	message := &pb.PresenceGossip{ObservedAt: formatTime(time.Now().UTC())}
+	for _, observation := range gossiper.table.Snapshot() {
+		message.Observations = append(message.Observations, observationToProto(observation))
+	}
 	for _, peerID := range gossiper.peers {
 		if err := gossiper.node.Send(ctx, peerID, p2p.PresenceProtocol, message); err != nil {
 			// A down committee member is expected; its observations simply go
@@ -83,11 +83,15 @@ func (gossiper *Gossiper) handle(stream network.Stream) {
 	if err != nil {
 		return
 	}
-	var message gossipMessage
-	if err := json.Unmarshal(envelope.Payload, &message); err != nil {
+	var message pb.PresenceGossip
+	if err := proto.Unmarshal(envelope.Payload, &message); err != nil {
 		return
 	}
-	gossiper.table.Merge(message.Observations)
+	observations := make([]Observation, 0, len(message.GetObservations()))
+	for _, item := range message.GetObservations() {
+		observations = append(observations, observationFromProto(item))
+	}
+	gossiper.table.Merge(observations)
 }
 
 // connectionNotifiee turns libp2p connection lifecycle events into presence

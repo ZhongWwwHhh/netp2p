@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -21,21 +20,26 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
+	"github.com/netp2p/netp2p/internal/version"
+	"google.golang.org/protobuf/proto"
 )
+
+// Version is the protocol revision embedded in every libp2p protocol id.
+const Version = version.ProtocolVersion
 
 const ProtocolPrefix = "/netp2p"
 
 var (
-	LoginProtocol       = protocol.ID(ProtocolPrefix + "/control/login/1.0.0")
-	SyncProtocol        = protocol.ID(ProtocolPrefix + "/control/sync/1.0.0")
-	StateUpdateProtocol = protocol.ID(ProtocolPrefix + "/control/state-update/1.0.0")
-	ProbeProtocol       = protocol.ID(ProtocolPrefix + "/link/probe/1.0.0")
-	FrameProtocol       = protocol.ID(ProtocolPrefix + "/data/frame/1.0.0")
-	QuotaProtocol       = protocol.ID(ProtocolPrefix + "/data/quota/1.0.0")
-	AdminProtocol       = protocol.ID(ProtocolPrefix + "/control/admin/1.0.0")
-	WebAPIProtocol      = protocol.ID(ProtocolPrefix + "/web-api/1.0.0")
-	PresenceProtocol    = protocol.ID(ProtocolPrefix + "/presence/1.0.0")
-	LinkGossipProtocol  = protocol.ID(ProtocolPrefix + "/link/gossip/1.0.0")
+	LoginProtocol       = protocol.ID(ProtocolPrefix + "/control/login/" + Version)
+	SyncProtocol        = protocol.ID(ProtocolPrefix + "/control/sync/" + Version)
+	StateUpdateProtocol = protocol.ID(ProtocolPrefix + "/control/state-update/" + Version)
+	ProbeProtocol       = protocol.ID(ProtocolPrefix + "/link/probe/" + Version)
+	FrameProtocol       = protocol.ID(ProtocolPrefix + "/data/frame/" + Version)
+	QuotaProtocol       = protocol.ID(ProtocolPrefix + "/data/quota/" + Version)
+	AdminProtocol       = protocol.ID(ProtocolPrefix + "/control/admin/" + Version)
+	WebAPIProtocol      = protocol.ID(ProtocolPrefix + "/web-api/" + Version)
+	PresenceProtocol    = protocol.ID(ProtocolPrefix + "/presence/" + Version)
+	LinkGossipProtocol  = protocol.ID(ProtocolPrefix + "/link/gossip/" + Version)
 )
 
 type Config struct {
@@ -201,22 +205,48 @@ func (node *Node) Handle(id protocol.ID, handler func(network.Stream)) {
 }
 
 type Envelope struct {
-	Protocol protocol.ID     `json:"protocol"`
-	Payload  json.RawMessage `json:"payload"`
+	Protocol protocol.ID
+	Payload  []byte
 }
 
-func (node *Node) Send(ctx context.Context, peerID peer.ID, id protocol.ID, payload any) error {
+// EncodeEnvelope writes a length-prefixed protocol id and payload. Both lengths
+// are explicit so a reader never has to wait for EOF, which keeps
+// request/response exchanges on a single stream working. Control-plane payloads
+// are protobuf messages; data-plane framing lives in internal/transport.
+func EncodeEnvelope(writer io.Writer, id protocol.ID, payload []byte) error {
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(id)))
+	if _, err := writer.Write(header); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(writer, string(id)); err != nil {
+		return err
+	}
+	binary.BigEndian.PutUint32(header, uint32(len(payload)))
+	if _, err := writer.Write(header); err != nil {
+		return err
+	}
+	_, err := writer.Write(payload)
+	return err
+}
+
+// WriteMessage marshals a protobuf message and frames it as an envelope. It is
+// used to write responses on a stream opened for a request/response exchange.
+func WriteMessage(writer io.Writer, id protocol.ID, message proto.Message) error {
+	payload, err := proto.Marshal(message)
+	if err != nil {
+		return err
+	}
+	return EncodeEnvelope(writer, id, payload)
+}
+
+func (node *Node) Send(ctx context.Context, peerID peer.ID, id protocol.ID, message proto.Message) error {
 	stream, err := node.Host.NewStream(ctx, peerID, id)
 	if err != nil {
 		return fmt.Errorf("open %s stream: %w", id, err)
 	}
 	defer stream.Close()
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	envelope := Envelope{Protocol: id, Payload: encoded}
-	if err := json.NewEncoder(stream).Encode(envelope); err != nil {
+	if err := WriteMessage(stream, id, message); err != nil {
 		return err
 	}
 	// CloseWrite tells the remote handler the request body is complete while
@@ -228,9 +258,27 @@ func (node *Node) Send(ctx context.Context, peerID peer.ID, id protocol.ID, payl
 }
 
 func DecodeEnvelope(stream network.Stream) (Envelope, error) {
-	var envelope Envelope
-	err := json.NewDecoder(io.LimitReader(stream, 8<<20)).Decode(&envelope)
-	return envelope, err
+	reader := io.LimitReader(stream, 8<<20)
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return Envelope{}, err
+	}
+	length := binary.BigEndian.Uint32(header)
+	if length > 256 {
+		return Envelope{}, fmt.Errorf("protocol id too long: %d", length)
+	}
+	identifier := make([]byte, length)
+	if _, err := io.ReadFull(reader, identifier); err != nil {
+		return Envelope{}, err
+	}
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return Envelope{}, err
+	}
+	payload := make([]byte, binary.BigEndian.Uint32(header))
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		return Envelope{}, err
+	}
+	return Envelope{Protocol: protocol.ID(identifier), Payload: payload}, nil
 }
 
 func (node *Node) Close() error {

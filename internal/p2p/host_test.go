@@ -7,6 +7,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/wire/pb"
 )
 
 func TestTwoNodesOpenSecureStream(t *testing.T) {
@@ -46,7 +47,7 @@ func TestTwoNodesOpenSecureStream(t *testing.T) {
 	if err := nodeB.Host.Connect(ctx, target); err != nil {
 		t.Fatal(err)
 	}
-	if err := nodeB.Send(ctx, nodeA.Host.ID(), FrameProtocol, map[string]string{"hello": "netp2p"}); err != nil {
+	if err := nodeB.Send(ctx, nodeA.Host.ID(), FrameProtocol, &pb.ProbeRequest{Kind: "hello", Nonce: 1}); err != nil {
 		t.Fatal(err)
 	}
 	select {

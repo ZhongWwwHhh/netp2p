@@ -2,7 +2,6 @@ package link
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"sync"
 	"time"
@@ -10,16 +9,13 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 // maxObservations bounds the gossip cache so a chatty peer cannot grow it
 // without limit. The newest observations are kept.
 const maxObservations = 4096
-
-type gossipMessage struct {
-	ObservedAt   time.Time     `json:"observedAt"`
-	Observations []Observation `json:"observations"`
-}
 
 type Gossiper struct {
 	node     *p2p.Node
@@ -92,7 +88,10 @@ func (gossiper *Gossiper) Run(ctx context.Context) {
 
 func (gossiper *Gossiper) exchange(ctx context.Context) {
 	gossiper.mu.RLock()
-	message := gossipMessage{ObservedAt: time.Now().UTC(), Observations: append([]Observation{}, gossiper.observations...)}
+	message := &pb.LinkGossip{ObservedAt: formatTime(time.Now().UTC())}
+	for _, observation := range gossiper.observations {
+		message.Observations = append(message.Observations, observationToProto(observation))
+	}
 	gossiper.mu.RUnlock()
 	for _, peerID := range gossiper.peers {
 		sendContext, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -109,21 +108,24 @@ func (gossiper *Gossiper) Handle(stream network.Stream) {
 	if err != nil {
 		return
 	}
-	var message gossipMessage
-	if err := json.Unmarshal(envelope.Payload, &message); err != nil {
+	var message pb.LinkGossip
+	if err := proto.Unmarshal(envelope.Payload, &message); err != nil {
 		return
 	}
 	remote := stream.Conn().RemotePeer().String()
-	for _, observation := range message.Observations {
+	observations := make([]Observation, 0, len(message.GetObservations()))
+	for _, item := range message.GetObservations() {
+		observation := observationFromProto(item)
 		// A manager may only speak for itself: reject anything attributed to a
 		// different observer so nobody can forge another manager's measurement.
 		if observation.ObserverID != remote {
 			return
 		}
+		observations = append(observations, observation)
 	}
 	gossiper.mu.Lock()
 	defer gossiper.mu.Unlock()
-	gossiper.rebuildLocked(append(gossiper.observations, message.Observations...))
+	gossiper.rebuildLocked(append(gossiper.observations, observations...))
 }
 
 // rebuildLocked prunes, deduplicates and re-aggregates the observation cache.

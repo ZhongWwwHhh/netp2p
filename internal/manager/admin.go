@@ -3,7 +3,6 @@ package manager
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -11,16 +10,14 @@ import (
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/wire"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
-type AdminRequest struct {
-	Token      string                `json:"token"`
-	Transition model.StateTransition `json:"transition"`
-}
-
 type AdminResponse struct {
-	Snapshot *model.SignedSnapshot `json:"snapshot,omitempty"`
-	Error    string                `json:"error,omitempty"`
+	Snapshot *model.SignedSnapshot
+	Error    string
 }
 
 // RegisterAdminHandler installs the admin stream handler. The manager verifies
@@ -33,20 +30,21 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 			respondAdmin(stream, AdminResponse{Error: "invalid envelope"})
 			return
 		}
-		var request AdminRequest
-		if err := json.Unmarshal(envelope.Payload, &request); err != nil {
+		var message pb.AdminRequest
+		if err := proto.Unmarshal(envelope.Payload, &message); err != nil {
 			respondAdmin(stream, AdminResponse{Error: "invalid request"})
 			return
 		}
-		if adminToken == "" || request.Token != adminToken {
+		token, transition := wire.AdminRequestFromProto(&message)
+		if adminToken == "" || token != adminToken {
 			respondAdmin(stream, AdminResponse{Error: "forbidden"})
 			return
 		}
-		if err := auth.AuthorizeTransition(auth.BreakGlass(), request.Transition.Type); err != nil {
+		if err := auth.AuthorizeTransition(auth.BreakGlass(), transition.Type); err != nil {
 			respondAdmin(stream, AdminResponse{Error: err.Error()})
 			return
 		}
-		snapshot, err := mesh.Submit(request.Transition)
+		snapshot, err := mesh.Submit(transition)
 		if err != nil {
 			respondAdmin(stream, AdminResponse{Error: err.Error()})
 			return
@@ -63,32 +61,31 @@ func SubmitAdmin(ctx context.Context, node *p2p.Node, managerID peer.ID, adminTo
 		return model.SignedSnapshot{}, err
 	}
 	defer stream.Close()
-	encoded, err := json.Marshal(AdminRequest{Token: adminToken, Transition: transition})
-	if err != nil {
-		return model.SignedSnapshot{}, err
-	}
-	if err := json.NewEncoder(stream).Encode(p2p.Envelope{Protocol: p2p.AdminProtocol, Payload: encoded}); err != nil {
+	if err := p2p.WriteMessage(stream, p2p.AdminProtocol, wire.AdminRequestToProto(adminToken, transition)); err != nil {
 		return model.SignedSnapshot{}, err
 	}
 	if closer, ok := stream.(interface{ CloseWrite() error }); ok {
 		_ = closer.CloseWrite()
 	}
-	// The manager responds with a bare AdminResponse object (the same framing
-	// used by login and sync), not an Envelope, so decode it directly.
-	var response AdminResponse
-	if err := json.NewDecoder(stream).Decode(&response); err != nil {
+	envelope, err := p2p.DecodeEnvelope(stream)
+	if err != nil {
 		return model.SignedSnapshot{}, err
 	}
-	if response.Error != "" {
-		return model.SignedSnapshot{}, &AdminError{Message: response.Error}
+	var message pb.AdminResponse
+	if err := proto.Unmarshal(envelope.Payload, &message); err != nil {
+		return model.SignedSnapshot{}, err
 	}
-	if response.Snapshot == nil {
+	snapshot, errMessage := wire.AdminResponseFromProto(&message)
+	if errMessage != "" {
+		return model.SignedSnapshot{}, &AdminError{Message: errMessage}
+	}
+	if snapshot == nil {
 		return model.SignedSnapshot{}, &AdminError{Message: "no snapshot in response"}
 	}
-	if err := bft.ValidateSnapshot(*response.Snapshot); err != nil {
+	if err := bft.ValidateSnapshot(*snapshot); err != nil {
 		return model.SignedSnapshot{}, err
 	}
-	return *response.Snapshot, nil
+	return *snapshot, nil
 }
 
 type AdminError struct {
@@ -98,7 +95,7 @@ type AdminError struct {
 func (err *AdminError) Error() string { return err.Message }
 
 func respondAdmin(stream network.Stream, response AdminResponse) {
-	if err := json.NewEncoder(stream).Encode(response); err != nil {
+	if err := p2p.WriteMessage(stream, p2p.AdminProtocol, wire.AdminResponseToProto(response.Snapshot, response.Error)); err != nil {
 		stream.Reset()
 	}
 }

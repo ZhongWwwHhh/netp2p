@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/web"
 )
 
@@ -114,7 +115,7 @@ func TestWebAPITransitionAndSnapshot(t *testing.T) {
 		t.Fatalf("bootstrap does not advertise WebRTC: %q", info.WebRTCAddresses[0])
 	}
 	client, err := otherServer.HTTPHost().NamespacedClient(
-		"/netp2p/web-api/1.0.0",
+		p2p.WebAPIProtocol,
 		peer.AddrInfo{ID: group.nodes[0].Host.ID(), Addrs: group.nodes[0].Host.Addrs()},
 	)
 	if err != nil {
@@ -217,7 +218,7 @@ func TestWebSPAFallbackAndActivity(t *testing.T) {
 	otherServer, _ := newWebServer(t, group, 1)
 	go func() { _ = otherServer.HTTPHost().Serve() }()
 	client, err := otherServer.HTTPHost().NamespacedClient(
-		"/netp2p/web-api/1.0.0",
+		p2p.WebAPIProtocol,
 		peer.AddrInfo{ID: group.nodes[0].Host.ID(), Addrs: group.nodes[0].Host.Addrs()},
 	)
 	if err != nil {

@@ -2,7 +2,6 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -26,6 +25,9 @@ import (
 	netproto "github.com/netp2p/netp2p/internal/protocol"
 	"github.com/netp2p/netp2p/internal/transport"
 	"github.com/netp2p/netp2p/internal/version"
+	"github.com/netp2p/netp2p/internal/wire"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 type Client struct {
@@ -98,14 +100,16 @@ func (client *Client) Login(ctx context.Context, networkID, setupKey, jwtToken s
 	request := netproto.LoginRequest{
 		NetworkID: networkID, SetupKey: setupKey, JWTToken: jwtToken,
 		PeerID: client.node.Host.ID().String(), Addresses: client.node.Addresses(),
+		ProtocolVersion: version.ProtocolVersion, Capabilities: version.Capabilities(),
 	}
 	request.Hostname, _ = os.Hostname()
 	request.OS = runtime.GOOS
 	request.ClientVersion = version.Version
-	var response netproto.LoginResponse
-	if err := client.request(ctx, p2p.LoginProtocol, request, &response); err != nil {
+	var loginReply pb.LoginResponse
+	if err := client.request(ctx, p2p.LoginProtocol, wire.LoginRequestToProto(request), &loginReply); err != nil {
 		return err
 	}
+	response := wire.LoginResponseFromProto(&loginReply)
 	if response.Error != "" {
 		if response.Code != "" {
 			return &LoginError{Code: response.Code, Message: response.Error}
@@ -132,11 +136,17 @@ func (client *Client) Sync(ctx context.Context) error {
 	if err := client.connect(ctx); err != nil {
 		return fmt.Errorf("connect manager: %w", err)
 	}
-	var snapshot model.SignedSnapshot
-	if err := client.request(ctx, p2p.SyncProtocol, netproto.SyncRequest{NetworkID: networkID, PeerID: client.node.Host.ID().String(), Height: height, AssignmentsHeight: assignmentHeight, Admissions: admissions}, &snapshot); err != nil {
+	syncRequest := netproto.SyncRequest{
+		NetworkID: networkID, PeerID: client.node.Host.ID().String(), Height: height,
+		AssignmentsHeight: assignmentHeight, Admissions: admissions,
+		ProtocolVersion: version.ProtocolVersion,
+	}
+	var syncReply pb.SignedSnapshot
+	if err := client.request(ctx, p2p.SyncProtocol, wire.SyncRequestToProto(syncRequest), &syncReply); err != nil {
 		client.queueAdmissions(admissions)
 		return err
 	}
+	snapshot := wire.SignedSnapshotFromProto(&syncReply)
 	if err := bft.ValidateSnapshot(snapshot); err != nil {
 		return err
 	}
@@ -310,23 +320,23 @@ func findPeer(snapshot model.SignedSnapshot, peerID string) (model.PeerRecord, b
 	return model.PeerRecord{}, false
 }
 
-func (client *Client) request(ctx context.Context, protocolID protocol.ID, request any, response any) error {
+func (client *Client) request(ctx context.Context, protocolID protocol.ID, request proto.Message, response proto.Message) error {
 	stream, err := client.node.Host.NewStream(ctx, client.manager.ID, protocolID)
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
-	encoded, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
-	if err := json.NewEncoder(stream).Encode(p2p.Envelope{Protocol: protocolID, Payload: encoded}); err != nil {
+	if err := p2p.WriteMessage(stream, protocolID, request); err != nil {
 		return err
 	}
 	if closer, ok := stream.(interface{ CloseWrite() error }); ok {
 		_ = closer.CloseWrite()
 	}
-	return json.NewDecoder(stream).Decode(response)
+	envelope, err := p2p.DecodeEnvelope(stream)
+	if err != nil {
+		return err
+	}
+	return proto.Unmarshal(envelope.Payload, response)
 }
 
 func (client *Client) Self() model.PeerRecord {

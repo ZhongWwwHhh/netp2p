@@ -3,7 +3,6 @@ package link
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -13,6 +12,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -59,13 +60,13 @@ func (responder *ProbeResponder) Handle(stream network.Stream) {
 	if err != nil {
 		return
 	}
-	var request ProbeRequest
-	if err := json.Unmarshal(payload, &request); err != nil {
+	var request pb.ProbeRequest
+	if err := proto.Unmarshal(payload, &request); err != nil {
 		return
 	}
-	reply := ProbeReply{Nonce: request.Nonce}
-	if request.Kind == ProbeKindBandwidth && request.Bytes > 0 {
-		expected := request.Bytes
+	reply := &pb.ProbeReply{Nonce: request.GetNonce()}
+	if request.GetKind() == ProbeKindBandwidth && request.GetBytes() > 0 {
+		expected := int(request.GetBytes())
 		if expected > maxProbeBurst {
 			expected = maxProbeBurst
 		}
@@ -73,9 +74,9 @@ func (responder *ProbeResponder) Handle(stream network.Stream) {
 		if err != nil {
 			return
 		}
-		reply.ReceivedBytes = int(read)
+		reply.ReceivedBytes = int32(read)
 	}
-	encoded, err := json.Marshal(reply)
+	encoded, err := proto.Marshal(reply)
 	if err != nil {
 		return
 	}
@@ -292,7 +293,7 @@ func (prober *Prober) openProbeStream(ctx context.Context, target peer.ID, timeo
 }
 
 func writeProbeRequest(stream network.Stream, request ProbeRequest, burst []byte) error {
-	encoded, err := json.Marshal(request)
+	encoded, err := proto.Marshal(&pb.ProbeRequest{Kind: request.Kind, Nonce: request.Nonce, Bytes: int32(request.Bytes)})
 	if err != nil {
 		return err
 	}
@@ -311,11 +312,11 @@ func readProbeReply(stream network.Stream) (ProbeReply, error) {
 	if err != nil {
 		return ProbeReply{}, err
 	}
-	var reply ProbeReply
-	if err := json.Unmarshal(payload, &reply); err != nil {
+	var message pb.ProbeReply
+	if err := proto.Unmarshal(payload, &message); err != nil {
 		return ProbeReply{}, err
 	}
-	return reply, nil
+	return ProbeReply{Nonce: message.GetNonce(), ReceivedBytes: int(message.GetReceivedBytes())}, nil
 }
 
 func nextNonce() uint64 {

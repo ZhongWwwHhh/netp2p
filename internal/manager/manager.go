@@ -3,7 +3,6 @@ package manager
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -12,6 +11,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	libprotocol "github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/forward"
@@ -22,6 +22,10 @@ import (
 	"github.com/netp2p/netp2p/internal/presence"
 	"github.com/netp2p/netp2p/internal/protocol"
 	"github.com/netp2p/netp2p/internal/transport"
+	"github.com/netp2p/netp2p/internal/version"
+	"github.com/netp2p/netp2p/internal/wire"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 type Manager struct {
@@ -223,16 +227,25 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 	defer stream.Close()
 	envelope, err := p2p.DecodeEnvelope(stream)
 	if err != nil {
-		manager.respond(stream, protocol.LoginResponse{Error: "invalid envelope"})
+		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Error: "invalid envelope"})
 		return
 	}
-	var request protocol.LoginRequest
-	if err := json.Unmarshal(envelope.Payload, &request); err != nil {
-		manager.respond(stream, protocol.LoginResponse{Error: "invalid request"})
+	var loginMessage pb.LoginRequest
+	if err := proto.Unmarshal(envelope.Payload, &loginMessage); err != nil {
+		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Error: "invalid request"})
+		return
+	}
+	request := wire.LoginRequestFromProto(&loginMessage)
+	if request.ProtocolVersion != version.ProtocolVersion {
+		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{
+			Error:           fmt.Sprintf("protocol version mismatch: manager %s, client %s", version.ProtocolVersion, request.ProtocolVersion),
+			Code:            protocol.CodeProtocolMismatch,
+			ProtocolVersion: version.ProtocolVersion,
+		})
 		return
 	}
 	if request.PeerID != stream.Conn().RemotePeer().String() {
-		manager.respond(stream, protocol.LoginResponse{Error: "peer id mismatch"})
+		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Error: "peer id mismatch"})
 		return
 	}
 	// Remember how to reach the client so the link prober can dial it back and
@@ -241,15 +254,15 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 	manager.presence.Observe(request.PeerID, stream.Conn().RemoteMultiaddr().String(), manager.engine.LocalID())
 	registration, code, message := manager.authenticate(request)
 	if message != "" {
-		manager.respond(stream, protocol.LoginResponse{Error: message, Code: code})
+		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Error: message, Code: code, ProtocolVersion: version.ProtocolVersion})
 		return
 	}
 	snapshot, peerRecord, err := manager.Register(registration)
 	if err != nil {
-		manager.respond(stream, protocol.LoginResponse{Error: err.Error(), Code: protocol.CodeRegistrationRequired})
+		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Error: err.Error(), Code: protocol.CodeRegistrationRequired, ProtocolVersion: version.ProtocolVersion})
 		return
 	}
-	manager.respond(stream, protocol.LoginResponse{Snapshot: snapshot, Peer: peerRecord})
+	manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Snapshot: snapshot, Peer: peerRecord, ProtocolVersion: version.ProtocolVersion, Capabilities: version.Capabilities()})
 }
 
 func (manager *Manager) rememberAddrs(peerID string, addresses []string) {
@@ -288,8 +301,12 @@ func (manager *Manager) handleSync(stream network.Stream) {
 	if err != nil {
 		return
 	}
-	var request protocol.SyncRequest
-	if err := json.Unmarshal(envelope.Payload, &request); err != nil {
+	var syncMessage pb.SyncRequest
+	if err := proto.Unmarshal(envelope.Payload, &syncMessage); err != nil {
+		return
+	}
+	request := wire.SyncRequestFromProto(&syncMessage)
+	if request.ProtocolVersion != version.ProtocolVersion {
 		return
 	}
 	if request.PeerID != stream.Conn().RemotePeer().String() {
@@ -299,7 +316,7 @@ func (manager *Manager) handleSync(stream network.Stream) {
 	manager.observeAdmissions(request.PeerID, request.Admissions)
 	snapshot := manager.Snapshot()
 	if snapshot.Height > request.Height {
-		writeJSON(stream, snapshot)
+		writeSnapshot(stream, snapshot)
 		return
 	}
 	waiter := make(chan model.SignedSnapshot, 1)
@@ -315,7 +332,7 @@ func (manager *Manager) handleSync(stream network.Stream) {
 	defer cancel()
 	select {
 	case snapshot := <-waiter:
-		writeJSON(stream, snapshot)
+		writeSnapshot(stream, snapshot)
 	case <-waitContext.Done():
 	}
 }
@@ -469,12 +486,14 @@ func (manager *Manager) Snapshot() model.SignedSnapshot {
 	return manager.snapshot
 }
 
-func (manager *Manager) respond(stream network.Stream, response protocol.LoginResponse) {
-	writeJSON(stream, response)
+func (manager *Manager) respond(stream network.Stream, id libprotocol.ID, response protocol.LoginResponse) {
+	if err := p2p.WriteMessage(stream, id, wire.LoginResponseToProto(response)); err != nil {
+		stream.Reset()
+	}
 }
 
-func writeJSON(stream network.Stream, value any) {
-	if err := json.NewEncoder(stream).Encode(value); err != nil {
+func writeSnapshot(stream network.Stream, snapshot model.SignedSnapshot) {
+	if err := p2p.WriteMessage(stream, p2p.SyncProtocol, wire.SignedSnapshotToProto(snapshot)); err != nil {
 		stream.Reset()
 	}
 }

@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -14,6 +13,9 @@ import (
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/wire"
+	"github.com/netp2p/netp2p/internal/wire/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 type CommitteeMesh struct {
@@ -24,16 +26,6 @@ type CommitteeMesh struct {
 	mu          sync.Mutex
 	submitMu    sync.Mutex
 	subscribers map[chan model.SignedSnapshot]struct{}
-}
-
-type committeeEnvelope struct {
-	Type       string                 `json:"type"`
-	Proposal   *bft.Proposal          `json:"proposal,omitempty"`
-	Vote       *bft.Vote              `json:"vote,omitempty"`
-	Snapshot   *model.SignedSnapshot  `json:"snapshot,omitempty"`
-	Transition *model.StateTransition `json:"transition,omitempty"`
-	Height     *uint64                `json:"height,omitempty"`
-	Round      *uint64                `json:"round,omitempty"`
 }
 
 func NewCommitteeMesh(node *p2p.Node, engine *bft.Engine, members []model.CommitteeMember) (*CommitteeMesh, error) {
@@ -120,10 +112,11 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 	if err != nil {
 		return
 	}
-	var message committeeEnvelope
-	if err := json.Unmarshal(envelope.Payload, &message); err != nil {
+	var wireMessage pb.CommitteeEnvelope
+	if err := proto.Unmarshal(envelope.Payload, &wireMessage); err != nil {
 		return
 	}
+	message := wire.CommitteeEnvelopeFromProto(&wireMessage)
 	switch message.Type {
 	case "proposal":
 		if message.Proposal == nil {
@@ -131,7 +124,7 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		}
 		vote, err := mesh.engine.ProcessProposal(*message.Proposal)
 		if err == nil {
-			_ = mesh.send(stream.Conn().RemotePeer(), committeeEnvelope{Type: "vote", Vote: &vote})
+			_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "vote", Vote: &vote})
 		}
 	case "vote":
 		if message.Vote == nil {
@@ -149,7 +142,7 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if err != nil {
 			return
 		}
-		mesh.broadcast(committeeEnvelope{Type: "snapshot", Snapshot: &snapshot})
+		mesh.broadcast(model.CommitteeEnvelope{Type: "snapshot", Snapshot: &snapshot})
 	case "snapshot", "sync_response":
 		if message.Snapshot == nil {
 			return
@@ -159,21 +152,14 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if message.Transition == nil {
 			return
 		}
-		round := uint64(0)
-		if message.Round != nil {
-			round = *message.Round
-		}
-		mesh.proposeLocal(*message.Transition, round)
+		mesh.proposeLocal(*message.Transition, message.Round)
 	case "sync_request":
-		if message.Height == nil {
-			return
-		}
-		snapshot, ok := mesh.engine.Snapshot(*message.Height)
+		snapshot, ok := mesh.engine.Snapshot(message.Height)
 		if !ok {
 			snapshot, ok = mesh.engine.LatestSnapshot()
 		}
 		if ok {
-			_ = mesh.send(stream.Conn().RemotePeer(), committeeEnvelope{Type: "sync_response", Snapshot: &snapshot})
+			_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "sync_response", Snapshot: &snapshot})
 		}
 	}
 }
@@ -247,7 +233,7 @@ func (mesh *CommitteeMesh) proposeLocal(transition model.StateTransition, round 
 		log.Printf("committee propose failed: %v", err)
 		return
 	}
-	mesh.broadcast(committeeEnvelope{Type: "proposal", Proposal: &proposal})
+	mesh.broadcast(model.CommitteeEnvelope{Type: "proposal", Proposal: &proposal})
 }
 
 // CatchUp asks every committee peer for a snapshot starting from the local
@@ -259,8 +245,7 @@ func (mesh *CommitteeMesh) CatchUp(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		height := localHeight
-		message := committeeEnvelope{Type: "sync_request", Height: &height}
+		message := model.CommitteeEnvelope{Type: "sync_request", Height: localHeight}
 		if err := mesh.send(peerID, message); err != nil {
 			continue
 		}
@@ -322,7 +307,7 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 				continue
 			}
 			round := round
-			if err := mesh.send(leaderPeer, committeeEnvelope{Type: "forward", Transition: &transition, Round: &round}); err != nil {
+			if err := mesh.send(leaderPeer, model.CommitteeEnvelope{Type: "forward", Transition: &transition, Round: round}); err != nil {
 				continue
 			}
 		}
@@ -359,7 +344,7 @@ func (mesh *CommitteeMesh) publish(snapshot model.SignedSnapshot) {
 	}
 }
 
-func (mesh *CommitteeMesh) broadcast(message committeeEnvelope) {
+func (mesh *CommitteeMesh) broadcast(message model.CommitteeEnvelope) {
 	var waitGroup sync.WaitGroup
 	for _, peerID := range mesh.peers {
 		waitGroup.Add(1)
@@ -373,8 +358,8 @@ func (mesh *CommitteeMesh) broadcast(message committeeEnvelope) {
 	waitGroup.Wait()
 }
 
-func (mesh *CommitteeMesh) send(peerID peer.ID, message committeeEnvelope) error {
+func (mesh *CommitteeMesh) send(peerID peer.ID, message model.CommitteeEnvelope) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, message)
+	return mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, wire.CommitteeEnvelopeToProto(message))
 }
