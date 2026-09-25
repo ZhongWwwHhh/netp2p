@@ -212,13 +212,14 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		}
 		mesh.proposeLocal(*message.Transition, message.Round)
 	case "sync_request":
+		// The requester asks for one specific height at a time, which keeps the
+		// engine's single-step CatchUp valid. A gap is bridged by repeating the
+		// request, not by returning a snapshot the engine cannot adopt.
 		snapshot, ok := mesh.engine.Snapshot(message.Height)
 		if !ok {
-			snapshot, ok = mesh.engine.LatestSnapshot()
+			return
 		}
-		if ok {
-			_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "sync_response", Snapshot: &snapshot})
-		}
+		_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "sync_response", Snapshot: &snapshot})
 	}
 }
 
@@ -295,33 +296,47 @@ func (mesh *CommitteeMesh) proposeLocal(transition model.StateTransition, round 
 	mesh.broadcast(model.CommitteeEnvelope{Type: "proposal", Proposal: &proposal})
 }
 
-// CatchUp asks every committee peer for a snapshot starting from the local
-// height, and adopts the first valid response. A restarting manager calls this
-// after Connect+WaitReady to reach the certified height before serving.
+// CatchUp advances a lagging or restarting manager to the certified height by
+// requesting one height at a time from every committee peer. The engine only
+// adopts snapshots that close a single-height gap, so the loop stops as soon as
+// a round produces no progress — that is the top of the chain.
 func (mesh *CommitteeMesh) CatchUp(ctx context.Context) error {
-	localHeight := mesh.engine.Height()
-	for _, peerID := range mesh.peerSnapshot() {
+	start := mesh.engine.Height()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		message := model.CommitteeEnvelope{Type: "sync_request", Height: localHeight}
-		if err := mesh.send(peerID, message); err != nil {
-			continue
+		next := mesh.engine.Height() + 1
+		for _, peerID := range mesh.peerSnapshot() {
+			if err := mesh.send(peerID, model.CommitteeEnvelope{Type: "sync_request", Height: next}); err != nil {
+				continue
+			}
+		}
+		// Give the responses time to arrive and be adopted before deciding
+		// whether to request the next height. handleStateUpdate persists until
+		// it finishes the exchange, so a stalled height means we are caught up.
+		progress := false
+		waitUntil := time.Now().Add(time.Second)
+		for time.Now().Before(waitUntil) {
+			if mesh.engine.Height() >= next {
+				progress = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+		if !progress {
+			break
 		}
 	}
-	if mesh.engine.Height() > localHeight {
+	if mesh.engine.Height() > start {
 		return nil
 	}
-	// Direct sync_request via streams: the handleStateUpdate loop above sends
-	// a response back through a new stream. Wait briefly for it to arrive.
-	deadline := time.Now().Add(3 * time.Second)
-	for mesh.engine.Height() <= localHeight && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-	}
-	if mesh.engine.Height() > localHeight {
-		return nil
-	}
-	return fmt.Errorf("catch-up did not advance from height %d", localHeight)
+	return fmt.Errorf("catch-up did not advance from height %d", start)
 }
 
 // Submit certifies a transition even when the receiving manager is not the

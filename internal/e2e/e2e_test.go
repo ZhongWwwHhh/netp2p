@@ -98,6 +98,12 @@ func probeDrivenState() model.NetworkState {
 }
 
 func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager.Config) *cluster {
+	return newClusterWithHook(t, state, config, nil)
+}
+
+// newClusterWithHook builds the standard four-manager committee but installs a
+// send hook on every node, which is how chaos tests inject faults.
+func newClusterWithHook(t *testing.T, state model.NetworkState, config manager.Config, hookFor func(peer.ID) p2p.SendHook) *cluster {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	group := &cluster{ctx: ctx, cancel: cancel}
@@ -126,6 +132,9 @@ func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager
 		node, err := p2p.New(ctx, p2p.Config{IdentitySeed: group.members[index].KeySeed, WebRTCListen: []string{"/ip4/127.0.0.1/udp/0/webrtc-direct"}})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if hookFor != nil {
+			node.SetSendHook(hookFor(node.Host.ID()))
 		}
 		group.nodes = append(group.nodes, node)
 		addresses := node.Addresses()

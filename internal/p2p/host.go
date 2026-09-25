@@ -54,6 +54,24 @@ type Config struct {
 
 type Node struct {
 	Host host.Host
+	// sendHook, when set, wraps every outbound control-plane send. Tests use it
+	// to inject drops, delays and duplication; production nodes leave it nil so
+	// there is no overhead on the hot path.
+	sendHook SendHook
+}
+
+// SendFunc delivers one already-marshalled control-plane message.
+type SendFunc func(ctx context.Context, peerID peer.ID, id protocol.ID, message proto.Message) error
+
+// SendHook intercepts an outbound control-plane send. Implementations must call
+// next to deliver the message (possibly zero or many times) and are responsible
+// for honouring ctx.
+type SendHook func(ctx context.Context, peerID peer.ID, id protocol.ID, message proto.Message, next SendFunc) error
+
+// SetSendHook installs an outbound interceptor. It must be called before the
+// node starts exchanging control messages.
+func (node *Node) SetSendHook(hook SendHook) {
+	node.sendHook = hook
 }
 
 // New creates a libp2p host. QUIC is enabled where available; TCP remains a
@@ -241,6 +259,13 @@ func WriteMessage(writer io.Writer, id protocol.ID, message proto.Message) error
 }
 
 func (node *Node) Send(ctx context.Context, peerID peer.ID, id protocol.ID, message proto.Message) error {
+	if node.sendHook != nil {
+		return node.sendHook(ctx, peerID, id, message, node.sendDirect)
+	}
+	return node.sendDirect(ctx, peerID, id, message)
+}
+
+func (node *Node) sendDirect(ctx context.Context, peerID peer.ID, id protocol.ID, message proto.Message) error {
 	stream, err := node.Host.NewStream(ctx, peerID, id)
 	if err != nil {
 		return fmt.Errorf("open %s stream: %w", id, err)
