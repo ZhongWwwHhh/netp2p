@@ -47,13 +47,14 @@ type Client struct {
 	quota           *quota.Enforcer
 	admissionQueue  []netproto.AdmissionReport
 	admissionWaiter *admissionWaiter
+	pathStore       *pathStore
 	synthesizeICMP  bool
 	routesReady     bool
 	dnsUpdater      DNSUpdater
 	dnsUpstreams    []string
 }
 
-func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, error) {
+func New(node *p2p.Node, managerAddr string, sink packet.PacketSink, options ...Option) (*Client, error) {
 	info, err := peer.AddrInfoFromString(managerAddr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid manager address: %w", err)
@@ -72,7 +73,10 @@ func New(node *p2p.Node, managerAddr string, sink packet.PacketSink) (*Client, e
 		}
 		return frames.Send(remote, wire)
 	})
-	client.paths = newPathSelector(client.forwarding)
+	for _, option := range options {
+		option(client)
+	}
+	client.paths = newPathSelector(client.forwarding, client.pathStore)
 	if marker, ok := sink.(packet.UserspaceICMP); ok {
 		client.synthesizeICMP = marker.SynthesizeICMP()
 	}

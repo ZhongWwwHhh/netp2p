@@ -34,7 +34,7 @@ func init() {
 
 func TestSelectorPrefersDirectAndFallsBack(t *testing.T) {
 	sender := func(peer.ID, forward.Envelope) error { return nil }
-	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", sender))
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", sender), nil)
 	source, _ := peer.Decode(peerSource)
 	destination, _ := peer.Decode(peerDestination)
 	assignmentRecord := assignment()
@@ -64,7 +64,7 @@ func TestSelectorPrefersDirectAndFallsBack(t *testing.T) {
 // certified assignment: a via-manager primary wins even when a direct fallback
 // exists, and the direct fallback is only used once the primary is unusable.
 func TestSelectorHonorsCertifiedPrimaryOrder(t *testing.T) {
-	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }))
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
 	source, _ := peer.Decode(peerSource)
 	destination, _ := peer.Decode(peerDestination)
 	assignmentRecord := assignment()
@@ -91,7 +91,7 @@ func TestSelectorHonorsCertifiedPrimaryOrder(t *testing.T) {
 // TestSelectorDoesNotFabricateAdmission confirms selection alone never marks a
 // path healthy: only real admission results change local usability.
 func TestSelectorDoesNotFabricateAdmission(t *testing.T) {
-	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }))
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
 	source, _ := peer.Decode(peerSource)
 	destination, _ := peer.Decode(peerDestination)
 	selector.replaceAssignments([]model.RouteAssignment{assignment()})
@@ -107,7 +107,7 @@ func TestSelectorDoesNotFabricateAdmission(t *testing.T) {
 }
 
 func TestSelectorRejectsUnknownAssignment(t *testing.T) {
-	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }))
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
 	source, _ := peer.Decode(peerSource)
 	destination, _ := peer.Decode(peerDestination)
 	if _, _, ok := selector.selectFor(source, destination); ok {

@@ -72,10 +72,12 @@ func runClient(ctx context.Context, options clientOptions) error {
 	if restoreDNS != nil {
 		defer restoreDNS()
 	}
-	netClient, err := client.New(node, options.managerAddr, sink)
+	netClient, err := client.New(node, options.managerAddr, sink,
+		client.WithStateDir(filepath.Join(dataDir, "client")))
 	if err != nil {
 		return err
 	}
+	defer netClient.Close()
 	if resolver != nil {
 		netClient.SetDNSResolver(resolver)
 		netClient.SetDNSUpstreams(upstreams)
