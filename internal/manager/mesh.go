@@ -46,12 +46,67 @@ func NewCommitteeMesh(node *p2p.Node, engine *bft.Engine, members []model.Commit
 		subscribers: make(map[chan model.SignedSnapshot]struct{}),
 	}
 	node.Handle(p2p.StateUpdateProtocol, mesh.handleStateUpdate)
-	engine.OnCommit(mesh.publish)
+	engine.OnCommit(mesh.onCommit)
 	return mesh, nil
+}
+
+// onCommit fans a committed snapshot out to subscribers and, when the
+// transition changed the committee, reconciles the mesh membership so new
+// members are dialled and removed members stop receiving traffic.
+func (mesh *CommitteeMesh) onCommit(snapshot model.SignedSnapshot) {
+	mesh.publish(snapshot)
+	mesh.syncMembers()
+}
+
+// peerSnapshot returns a stable copy of the current member peer map.
+func (mesh *CommitteeMesh) peerSnapshot() map[string]peer.ID {
+	mesh.mu.Lock()
+	defer mesh.mu.Unlock()
+	result := make(map[string]peer.ID, len(mesh.peers))
+	for memberID, peerID := range mesh.peers {
+		result[memberID] = peerID
+	}
+	return result
+}
+
+// syncMembers rebuilds the member list from the engine's current committee and
+// dials any member that was not part of the previous committee.
+func (mesh *CommitteeMesh) syncMembers() {
+	members := mesh.engine.CommitteeMembers()
+	localID := mesh.node.Host.ID().String()
+	peers := make(map[string]peer.ID)
+	for _, member := range members {
+		if member.PeerID == "" || member.PeerID == localID {
+			continue
+		}
+		peerID, err := peer.Decode(member.PeerID)
+		if err != nil {
+			continue
+		}
+		peers[member.ID] = peerID
+	}
+	mesh.mu.Lock()
+	previous := mesh.peers
+	mesh.members = members
+	mesh.peers = peers
+	mesh.mu.Unlock()
+	for memberID, peerID := range peers {
+		if _, known := previous[memberID]; known {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		info := mesh.connectInfo(memberID, peerID)
+		if err := mesh.node.Host.Connect(ctx, info); err != nil {
+			log.Printf("committee member %s did not accept a connection: %v", memberID, err)
+		}
+		cancel()
+	}
 }
 
 // PeerIDs returns the libp2p identities of the other committee members.
 func (mesh *CommitteeMesh) PeerIDs() []peer.ID {
+	mesh.mu.Lock()
+	defer mesh.mu.Unlock()
 	result := make([]peer.ID, 0, len(mesh.peers))
 	for _, peerID := range mesh.peers {
 		result = append(result, peerID)
@@ -60,6 +115,8 @@ func (mesh *CommitteeMesh) PeerIDs() []peer.ID {
 }
 
 func (mesh *CommitteeMesh) connectInfo(memberID string, peerID peer.ID) peer.AddrInfo {
+	mesh.mu.Lock()
+	defer mesh.mu.Unlock()
 	for _, member := range mesh.members {
 		if member.ID != memberID {
 			continue
@@ -76,9 +133,10 @@ func (mesh *CommitteeMesh) connectInfo(memberID string, peerID peer.ID) peer.Add
 // Connect dials every committee peer, retrying until ctx expires. Retrying is
 // required for cold start because managers come up in unspecified order.
 func (mesh *CommitteeMesh) Connect(ctx context.Context) error {
+	peers := mesh.peerSnapshot()
 	var waitGroup sync.WaitGroup
-	errors := make(chan error, len(mesh.peers))
-	for memberID, peerID := range mesh.peers {
+	errors := make(chan error, len(peers))
+	for memberID, peerID := range peers {
 		waitGroup.Add(1)
 		go func(memberID string, peerID peer.ID) {
 			defer waitGroup.Done()
@@ -169,9 +227,10 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 // engine and stream handler are installed, which genesis requires before it can
 // collect a quorum.
 func (mesh *CommitteeMesh) WaitReady(ctx context.Context) error {
+	peers := mesh.peerSnapshot()
 	var waitGroup sync.WaitGroup
-	errors := make(chan error, len(mesh.peers))
-	for memberID, peerID := range mesh.peers {
+	errors := make(chan error, len(peers))
+	for memberID, peerID := range peers {
 		waitGroup.Add(1)
 		go func(memberID string, peerID peer.ID) {
 			defer waitGroup.Done()
@@ -241,7 +300,7 @@ func (mesh *CommitteeMesh) proposeLocal(transition model.StateTransition, round 
 // after Connect+WaitReady to reach the certified height before serving.
 func (mesh *CommitteeMesh) CatchUp(ctx context.Context) error {
 	localHeight := mesh.engine.Height()
-	for _, peerID := range mesh.peers {
+	for _, peerID := range mesh.peerSnapshot() {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -302,7 +361,7 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 		if leader.ID == mesh.engine.LocalID() {
 			mesh.proposeLocal(transition, round)
 		} else {
-			leaderPeer, ok := mesh.peers[leader.ID]
+			leaderPeer, ok := mesh.peerSnapshot()[leader.ID]
 			if !ok {
 				continue
 			}
@@ -345,8 +404,9 @@ func (mesh *CommitteeMesh) publish(snapshot model.SignedSnapshot) {
 }
 
 func (mesh *CommitteeMesh) broadcast(message model.CommitteeEnvelope) {
+	peers := mesh.peerSnapshot()
 	var waitGroup sync.WaitGroup
-	for _, peerID := range mesh.peers {
+	for _, peerID := range peers {
 		waitGroup.Add(1)
 		go func(peerID peer.ID) {
 			defer waitGroup.Done()

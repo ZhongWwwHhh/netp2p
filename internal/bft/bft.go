@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 	"github.com/netp2p/netp2p/internal/crypto/bls"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/wire"
@@ -52,6 +53,9 @@ const (
 	TransitionUpdateSettings   = "update_network_settings"
 	TransitionUpdateAssignment = "update_route_assignment"
 	TransitionRemoveAssignment = "remove_route_assignment"
+	TransitionUpdateCommittee  = "update_committee"
+	TransitionRotateCommittee  = "rotate_committee_keys"
+	TransitionUpdateBudgetUse  = "update_budget_usage"
 )
 
 var (
@@ -147,7 +151,7 @@ func NewEngine(seedState model.NetworkState, committee []model.CommitteeMember, 
 	if _, ok := engine.byID[localID]; !ok {
 		return nil, fmt.Errorf("local manager %q is not in committee", localID)
 	}
-	config, keys, index, err := deriveCommitteeKeys(engine.committee)
+	config, keys, index, err := deriveCommitteeKeys(engine.committee, seedState.NetworkID, seedState.CommitteeConfig.CommitteeEpoch)
 	if err != nil {
 		return nil, err
 	}
@@ -163,11 +167,17 @@ func NewEngine(seedState model.NetworkState, committee []model.CommitteeMember, 
 }
 
 // deriveCommitteeKeys builds the deterministic (t-of-n) BLS sharing for a
-// committee sorted by member ID. Share index i maps to x = i+1.
-func deriveCommitteeKeys(committee []model.CommitteeMember) (model.CommitteeConfig, *bls.KeySet, map[string]int, error) {
+// committee sorted by member ID. Each member's share is evaluated at a stable
+// point derived from its ID, so replacing a member does not invalidate the
+// others' shares or change the group public key.
+func deriveCommitteeKeys(committee []model.CommitteeMember, networkID string, epoch uint64) (model.CommitteeConfig, *bls.KeySet, map[string]int, error) {
 	sorted := append([]model.CommitteeMember(nil), committee...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
-	keys, err := bls.DeriveKeySet(committeeSeed(sorted), QuorumSize, len(sorted))
+	points := make([]fr.Element, len(sorted))
+	for position, member := range sorted {
+		points[position] = bls.PointForIdentity(member.ID)
+	}
+	keys, err := bls.DeriveKeySet(committeeSeed(networkID, epoch), QuorumSize, points)
 	if err != nil {
 		return model.CommitteeConfig{}, nil, nil, err
 	}
@@ -179,23 +189,22 @@ func deriveCommitteeKeys(committee []model.CommitteeMember) (model.CommitteeConf
 		Threshold:      uint32(QuorumSize),
 		Size:           uint32(len(sorted)),
 		GroupPublicKey: append([]byte(nil), keys.GroupPublicKey...),
+		CommitteeEpoch: epoch,
 	}
 	return config, keys, index, nil
 }
 
-// committeeSeed derives the BLS master seed from the committee membership so
-// every manager and client can rebuild the same group key. v0 keeps this
-// deterministic; a later stage replaces it with a DKG ceremony.
-func committeeSeed(committee []model.CommitteeMember) []byte {
+// committeeSeed derives the BLS master seed from the network identity and the
+// committee epoch. v0 keeps this deterministic so any node can rebuild the
+// group key without a DKG; a later stage replaces it with a real ceremony.
+func committeeSeed(networkID string, epoch uint64) []byte {
 	digest := sha256.New()
 	digest.Write([]byte("netp2p-bls-committee-v1"))
-	for _, member := range committee {
-		var seedBytes [8]byte
-		binary.BigEndian.PutUint64(seedBytes[:], uint64(member.KeySeed))
-		digest.Write([]byte(member.ID))
-		digest.Write([]byte{0})
-		digest.Write(seedBytes[:])
-	}
+	var epochBytes [8]byte
+	binary.BigEndian.PutUint64(epochBytes[:], epoch)
+	digest.Write([]byte(networkID))
+	digest.Write([]byte{0})
+	digest.Write(epochBytes[:])
 	return digest.Sum(nil)
 }
 
@@ -558,7 +567,7 @@ func (engine *Engine) ProcessVote(vote Vote) (model.QuorumCertificate, bool, err
 	if len(partials) < QuorumSize {
 		return model.QuorumCertificate{}, false, nil
 	}
-	aggregate, err := bls.Aggregate(partials)
+	aggregate, err := engine.blsKeys.Aggregate(partials)
 	if err != nil {
 		return model.QuorumCertificate{}, false, err
 	}
@@ -592,12 +601,20 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 		return model.SignedSnapshot{}, err
 	}
 	engine.current = NormalizeState(proposal.State)
-	engine.current.CommitteeConfig = engine.committeeConfig
 	engine.height = proposal.Height
+	// The certificate was produced under the committee and key configuration
+	// that were active before this transition applies, so record those on the
+	// snapshot and only then adopt the new configuration for later heights.
+	signedCommittee := append([]model.CommitteeMember(nil), engine.committee...)
+	signedConfig := engine.committeeConfig
 	snapshot := model.SignedSnapshot{
 		Epoch: proposal.Height, Height: proposal.Height, StateHash: append([]byte(nil), qc.StateHash...),
-		State: cloneState(engine.current), Committee: append([]model.CommitteeMember(nil), engine.committee...), QC: qc,
-		Transition: proposal.Transition, LeaderID: proposal.LeaderID, CommitteeConfig: engine.committeeConfig,
+		State: cloneState(engine.current), Committee: signedCommittee, QC: qc,
+		Transition: proposal.Transition, LeaderID: proposal.LeaderID, CommitteeConfig: signedConfig,
+	}
+	if err := engine.adoptCommitteeLocked(proposal.Transition); err != nil {
+		engine.mu.Unlock()
+		return model.SignedSnapshot{}, err
 	}
 	engine.committed[proposal.Height] = snapshot
 	delete(engine.proposals, proposal.Height)
@@ -609,6 +626,38 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 		listener(snapshot)
 	}
 	return snapshot, nil
+}
+
+// adoptCommitteeLocked applies a membership or key-rotation transition to the
+// engine so subsequent heights use the new committee and epoch.
+func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) error {
+	committee := append([]model.CommitteeMember(nil), engine.committee...)
+	epoch := engine.committeeConfig.CommitteeEpoch
+	switch transition.Type {
+	case TransitionUpdateCommittee:
+		if len(transition.Committee) > 0 {
+			committee = append([]model.CommitteeMember(nil), transition.Committee...)
+		}
+	case TransitionRotateCommittee:
+		epoch++
+	}
+	sort.Slice(committee, func(i, j int) bool { return committee[i].ID < committee[j].ID })
+	config, keys, index, err := deriveCommitteeKeys(committee, engine.current.NetworkID, epoch)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]model.CommitteeMember, len(committee))
+	for position := range committee {
+		committee[position].BLSPublicKey = keys.PublicKeyShare(index[committee[position].ID])
+		byID[committee[position].ID] = committee[position]
+	}
+	engine.committee = committee
+	engine.byID = byID
+	engine.blsKeys = keys
+	engine.blsIndex = index
+	engine.committeeConfig = config
+	engine.current.CommitteeConfig = config
+	return nil
 }
 
 func (engine *Engine) verifyQCLocked(qc model.QuorumCertificate) error {
@@ -1098,9 +1147,82 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			}
 		}
 		return fmt.Errorf("assignment %q not found", transition.TargetID)
+	case TransitionUpdateCommittee:
+		return applyUpdateCommittee(state, transition)
+	case TransitionRotateCommittee:
+		return applyRotateCommitteeKeys(state)
 	default:
 		return fmt.Errorf("unknown transition type %q", transition.Type)
 	}
+}
+
+// applyUpdateCommittee validates and stages a committee member change. The
+// effective committee is carried on the runtime-only EngineCommittee field and
+// adopted by the engine at commit time.
+func applyUpdateCommittee(state *model.NetworkState, transition model.StateTransition) error {
+	next := transition.Committee
+	if len(next) != CommitteeSize {
+		return fmt.Errorf("committee size must remain %d", CommitteeSize)
+	}
+	if len(state.EngineCommittee) != CommitteeSize {
+		return fmt.Errorf("committee context is required to replace members")
+	}
+	seen := make(map[string]struct{}, len(next))
+	for _, member := range next {
+		if member.ID == "" {
+			return fmt.Errorf("committee member id is required")
+		}
+		if member.PeerID == "" {
+			return fmt.Errorf("committee member %q is missing a peer id", member.ID)
+		}
+		if member.Address == "" {
+			return fmt.Errorf("committee member %q is missing an address", member.ID)
+		}
+		if _, duplicate := seen[member.ID]; duplicate {
+			return fmt.Errorf("duplicate committee member %q", member.ID)
+		}
+		seen[member.ID] = struct{}{}
+	}
+	forwarding := 0
+	for _, member := range next {
+		if member.ForwardingEnabled {
+			forwarding++
+		}
+	}
+	if forwarding == 0 {
+		return fmt.Errorf("committee must keep at least one forwarding member")
+	}
+	// v0 fixes n=4, f=1, so at most FaultLimit members may change at once.
+	replaced := 0
+	current := make(map[string]struct{}, len(state.EngineCommittee))
+	for _, member := range state.EngineCommittee {
+		current[member.ID] = struct{}{}
+	}
+	for _, member := range next {
+		if _, known := current[member.ID]; !known {
+			replaced++
+		}
+	}
+	if replaced > FaultLimit {
+		return fmt.Errorf("at most %d committee members may be replaced at once", FaultLimit)
+	}
+	state.EngineCommittee = append([]model.CommitteeMember(nil), next...)
+	return nil
+}
+
+// applyRotateCommitteeKeys bumps the committee epoch, which deterministically
+// regenerates every share and the group public key.
+func applyRotateCommitteeKeys(state *model.NetworkState) error {
+	if len(state.EngineCommittee) != CommitteeSize {
+		return fmt.Errorf("committee context is required to rotate keys")
+	}
+	epoch := state.CommitteeConfig.CommitteeEpoch + 1
+	config, _, _, err := deriveCommitteeKeys(state.EngineCommittee, state.NetworkID, epoch)
+	if err != nil {
+		return err
+	}
+	state.CommitteeConfig = config
+	return nil
 }
 
 func requireGroups(state *model.NetworkState, groups []string) error {
@@ -1409,7 +1531,7 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 	}
 	config := snapshot.CommitteeConfig
 	if config.GroupPublicKey == nil {
-		derived, _, _, err := deriveCommitteeKeys(snapshot.Committee)
+		derived, _, _, err := deriveCommitteeKeys(snapshot.Committee, snapshot.State.NetworkID, config.CommitteeEpoch)
 		if err != nil {
 			return err
 		}

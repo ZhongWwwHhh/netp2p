@@ -128,10 +128,19 @@ func buildTransition(action, file, target string) (model.StateTransition, error)
 			return transition, err
 		}
 		transition.DNSSettings = &settings
+	case "update-committee":
+		transition.Type = bft.TransitionUpdateCommittee
+		var committee []model.CommitteeMember
+		if err := loadRecord(file, &committee); err != nil {
+			return transition, err
+		}
+		transition.Committee = committee
+	case "rotate-committee-keys":
+		transition.Type = bft.TransitionRotateCommittee
 	default:
 		return transition, fmt.Errorf("unknown action %q", action)
 	}
-	if transition.TargetID == "" && file == "" {
+	if action != "rotate-committee-keys" && transition.TargetID == "" && file == "" {
 		return transition, fmt.Errorf("--file or --target is required for action %q", action)
 	}
 	return transition, nil

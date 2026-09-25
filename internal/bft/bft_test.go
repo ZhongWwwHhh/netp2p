@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/netp2p/netp2p/internal/crypto/bls"
 	"github.com/netp2p/netp2p/internal/model"
 )
 
@@ -232,7 +231,7 @@ func TestRejectInsufficientQuorum(t *testing.T) {
 		}
 		partials[index] = signature
 	}
-	aggregate, err := bls.Aggregate(partials)
+	aggregate, err := engines[0].blsKeys.Aggregate(partials)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -803,5 +802,174 @@ func TestApplyTransitionValidatesManagerHopsAgainstPeerIDs(t *testing.T) {
 	empty.Primary = model.PathSpec{ID: "via", Kind: model.PathKindViaManager}
 	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpdateAssignment, Assignment: &empty}); err == nil {
 		t.Fatal("empty manager hop list accepted")
+	}
+}
+
+// TestUpdateCommitteeValidation covers the size and churn limits on member
+// replacement.
+func TestUpdateCommitteeValidation(t *testing.T) {
+	committee, _ := testCommittee()
+	for index := range committee {
+		committee[index].PeerID = "peer-" + committee[index].ID
+		committee[index].Address = "/ip4/10.0.0.1/udp/1/quic-v1"
+		committee[index].ForwardingEnabled = true
+	}
+	base := testState()
+	base.EngineCommittee = append([]model.CommitteeMember(nil), committee...)
+
+	if err := ApplyTransition(&base, model.StateTransition{
+		Type: TransitionUpdateCommittee, Committee: committee,
+	}); err != nil {
+		t.Fatalf("identity replacement rejected: %v", err)
+	}
+
+	// Too many members replaced at once (f=1).
+	churned := model.StateTransition{Type: TransitionUpdateCommittee}
+	for index, member := range committee {
+		if index < 2 {
+			member.ID = member.ID + "-new"
+			member.PeerID = member.PeerID + "-new"
+			member.Address = "/ip4/10.0.0.1/udp/1/quic-v1"
+		}
+		churned.Committee = append(churned.Committee, member)
+	}
+	if err := ApplyTransition(&base, churned); err == nil {
+		t.Fatal("replacing more than f members accepted")
+	}
+
+	// Size change is rejected.
+	if err := ApplyTransition(&base, model.StateTransition{
+		Type: TransitionUpdateCommittee, Committee: committee[:3],
+	}); err == nil {
+		t.Fatal("committee size change accepted")
+	}
+
+	// A replacement missing its transport identity is rejected.
+	broken := model.StateTransition{Type: TransitionUpdateCommittee, Committee: append([]model.CommitteeMember(nil), committee...)}
+	broken.Committee[3] = model.CommitteeMember{ID: "E", PeerID: "", Address: ""}
+	if err := ApplyTransition(&base, broken); err == nil {
+		t.Fatal("committee member without peer id accepted")
+	}
+
+	// Removing the last forwarding member is rejected.
+	noForwarding := model.StateTransition{Type: TransitionUpdateCommittee, Committee: append([]model.CommitteeMember(nil), committee...)}
+	for index := range noForwarding.Committee {
+		noForwarding.Committee[index].ForwardingEnabled = false
+	}
+	if err := ApplyTransition(&base, noForwarding); err == nil {
+		t.Fatal("committee without forwarding members accepted")
+	}
+}
+
+// TestRotateCommitteeKeysBumpsEpoch verifies that key rotation advances the
+// epoch and changes the group public key.
+func TestRotateCommitteeKeysBumpsEpoch(t *testing.T) {
+	committee, _ := testCommittee()
+	state := testState()
+	state.EngineCommittee = append([]model.CommitteeMember(nil), committee...)
+	state.CommitteeConfig = model.CommitteeConfig{Threshold: QuorumSize, Size: CommitteeSize}
+	before, _, _, err := deriveCommitteeKeys(committee, state.NetworkID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.CommitteeConfig = before
+
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRotateCommittee}); err != nil {
+		t.Fatal(err)
+	}
+	if state.CommitteeConfig.CommitteeEpoch != 1 {
+		t.Fatalf("expected epoch 1, got %d", state.CommitteeConfig.CommitteeEpoch)
+	}
+	if bytes.Equal(state.CommitteeConfig.GroupPublicKey, before.GroupPublicKey) {
+		t.Fatal("group public key did not rotate")
+	}
+}
+
+// TestCommitteeReplacementKeepsQuorum replaces one member online and verifies
+// the committee keeps certifying with the new membership.
+func TestCommitteeReplacementKeepsQuorum(t *testing.T) {
+	committee, keys := testCommittee()
+	for index := range committee {
+		committee[index].PeerID = "peer-" + committee[index].ID
+		committee[index].Address = "/ip4/10.0.0.1/udp/1/quic-v1"
+		committee[index].ForwardingEnabled = true
+	}
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range keys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+
+	replacement := model.CommitteeMember{
+		ID: "E", KeySeed: 99, PeerID: "peer-E", Address: "/ip4/10.0.0.2/udp/1/quic-v1",
+		ForwardingEnabled: true,
+	}
+	newCommittee := []model.CommitteeMember{committee[0], committee[1], committee[2], replacement}
+	snapshot := advance(t, keys, engines, model.StateTransition{
+		Type: TransitionUpdateCommittee, Committee: newCommittee,
+	})
+	members := map[string]bool{}
+	for _, member := range snapshot.Committee {
+		members[member.ID] = true
+	}
+	if !members["D"] || members["E"] {
+		t.Fatalf("snapshot should carry the pre-transition committee: %v", members)
+	}
+	for index := 0; index < CommitteeSize-1; index++ {
+		adopted := engines[index].CommitteeMembers()
+		if len(adopted) != CommitteeSize || adopted[CommitteeSize-1].ID != "E" {
+			t.Fatalf("engine %d did not adopt the new committee: %+v", index, adopted)
+		}
+	}
+
+	// Bring the replacement online and keep certifying.
+	engineE, err := NewEngine(snapshot.State, newCommittee, "E", SeededPrivateKey(99))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineE.height = snapshot.Height
+	engines[3] = engineE
+	keys[3] = SeededPrivateKey(99)
+	next := advance(t, keys, engines, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+	})
+	if next.Height != snapshot.Height+1 {
+		t.Fatalf("expected height %d, got %d", snapshot.Height+1, next.Height)
+	}
+}
+
+// TestStaleEpochVoteRejected ensures votes signed under an old committee epoch
+// cannot contribute after a rotation.
+func TestStaleEpochVoteRejected(t *testing.T) {
+	committee, keys := testCommittee()
+	state := testState()
+	engines := make([]*Engine, CommitteeSize)
+	for index, key := range keys {
+		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	advance(t, keys, engines, model.StateTransition{Type: TransitionRotateCommittee})
+	if engines[0].committeeConfig.CommitteeEpoch != 1 {
+		t.Fatalf("expected epoch 1, got %d", engines[0].committeeConfig.CommitteeEpoch)
+	}
+
+	height := engines[0].Height() + 1
+	stale := Vote{
+		Height: height, Round: 0, NetworkID: state.NetworkID,
+		StateHash: make([]byte, 32), TransitionHash: make([]byte, 32),
+		VoterID: committee[0].ID, CommitteeEpoch: 0,
+	}
+	if err := engines[0].signVoteShare(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engines[0].ProcessVote(stale); err == nil {
+		t.Fatal("stale-epoch vote accepted")
 	}
 }

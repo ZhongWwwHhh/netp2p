@@ -29,6 +29,7 @@ const (
 	ModuleEvents      Module = "events"
 	ModulePresence    Module = "presence"
 	ModulePaths       Module = "paths"
+	ModuleDiagnostics Module = "diagnostics"
 )
 
 // Operation is what an identity wants to do to a module.
@@ -56,6 +57,7 @@ var AllModules = []Module{
 	ModuleEvents,
 	ModulePresence,
 	ModulePaths,
+	ModuleDiagnostics,
 }
 
 // AllOperations lists every operation in a stable order.
@@ -110,14 +112,14 @@ var matrix = map[string]grant{
 	),
 	model.RoleAdmin: merge(
 		full(configModules...),
-		readOnly(ModuleSettings, ModuleEvents, ModulePresence),
+		readOnly(ModuleSettings, ModuleEvents, ModulePresence, ModuleDiagnostics),
 		grant{
 			ModuleUsers: {OpRead: true, OpCreate: true, OpUpdate: true},
 		},
 	),
 	model.RoleNetworkAdmin: merge(
 		full(configModules...),
-		readOnly(ModuleSettings, ModuleUsers, ModuleEvents, ModulePresence),
+		readOnly(ModuleSettings, ModuleUsers, ModuleEvents, ModulePresence, ModuleDiagnostics),
 	),
 	model.RoleAuditor: merge(
 		readOnly(AllModules...),
@@ -268,6 +270,10 @@ func TransitionPermission(transitionType string) (Module, Operation, bool) {
 		return ModulePaths, OpUpdate, true
 	case bft.TransitionRemoveAssignment:
 		return ModulePaths, OpDelete, true
+	case bft.TransitionUpdateCommittee, bft.TransitionRotateCommittee:
+		return ModuleSettings, OpUpdate, true
+	case bft.TransitionUpdateBudgetUse:
+		return ModuleBudgets, OpUpdate, true
 	}
 	return "", "", false
 }
