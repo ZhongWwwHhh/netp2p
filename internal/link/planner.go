@@ -54,6 +54,7 @@ func AssignmentFor(input AssignmentInput, sourcePeerID, destinationPeerID string
 		DestinationPeerID: destinationPeerID,
 		Epoch:             maxEpoch(input.State, sourcePeerID, destinationPeerID),
 		RequiresAdmission: true,
+		MaxHops:           effectiveMaxHops(settings),
 	}
 	assignment.UpdatedAt = input.View.GeneratedAt
 	assignment.Primary = candidates[0].Spec
@@ -98,23 +99,62 @@ func candidatePaths(source, destination string, managers []model.CommitteeMember
 	if !settings.ViaManagerEnabled {
 		return result
 	}
-	maxHops := settings.MaxManagerHops
-	if maxHops <= 0 {
-		maxHops = 2
-	}
-	for _, first := range managers {
-		appendViaManagerPath(&result, source, destination, []string{first.PeerID}, view, constraints)
-		if maxHops < 2 {
-			continue
-		}
-		for _, second := range managers {
-			if first.PeerID == second.PeerID {
-				continue
-			}
-			appendViaManagerPath(&result, source, destination, []string{first.PeerID, second.PeerID}, view, constraints)
-		}
+	for _, hops := range enumerateManagerPaths(managers, effectiveMaxHops(settings)) {
+		appendViaManagerPath(&result, source, destination, hops, view, constraints)
 	}
 	return result
+}
+
+// maxCandidatePaths bounds path enumeration so a large committee cannot blow up
+// the planner.
+const maxCandidatePaths = 128
+
+// enumerateManagerPaths lists every simple manager path (no repeated hop) with
+// length 1..maxHops. Hops are PeerIDs so the output matches certified state.
+func enumerateManagerPaths(managers []model.CommitteeMember, maxHops int) [][]string {
+	if maxHops < 1 {
+		maxHops = 1
+	}
+	var paths [][]string
+	var walk func(current []string, remaining int)
+	walk = func(current []string, remaining int) {
+		if len(paths) >= maxCandidatePaths {
+			return
+		}
+		if len(current) > 0 {
+			paths = append(paths, append([]string(nil), current...))
+		}
+		if remaining == 0 {
+			return
+		}
+		for _, manager := range managers {
+			if containsHop(current, manager.PeerID) {
+				continue
+			}
+			walk(append(current, manager.PeerID), remaining-1)
+			if len(paths) >= maxCandidatePaths {
+				return
+			}
+		}
+	}
+	walk(nil, maxHops)
+	return paths
+}
+
+func containsHop(hops []string, hop string) bool {
+	for _, existing := range hops {
+		if existing == hop {
+			return true
+		}
+	}
+	return false
+}
+
+func effectiveMaxHops(settings model.NetworkSettings) int {
+	if settings.MaxManagerHops > 0 {
+		return settings.MaxManagerHops
+	}
+	return 2
 }
 
 func appendViaManagerPath(result *[]scoredPath, source, destination string, hops []string, view LinkView, constraints path.Constraints) {
@@ -131,6 +171,9 @@ func appendViaManagerPath(result *[]scoredPath, source, destination string, hops
 	spec.LossPercent = metrics.loss
 	spec.BandwidthMbps = metrics.bandwidth
 	spec.Confidence = metrics.confidence
+	// Cost is the number of forwarding hops; with equal measurements a shorter
+	// path always breaks the tie.
+	spec.Cost = uint64(len(hops))
 	profile := path.LinkProfile{
 		PathID:             spec.ID,
 		Type:               path.PathViaManager,
@@ -139,6 +182,7 @@ func appendViaManagerPath(result *[]scoredPath, source, destination string, hops
 		JitterMilliseconds: metrics.jitter,
 		BandwidthMbps:      metrics.bandwidth,
 		Stability:          metrics.stability,
+		ForwardingCost:     float64(len(hops)),
 	}
 	*result = append(*result, scoredPath{
 		Spec: spec, Score: path.Score(profile, constraints), Centrality: hopCentrality(view, hops),
@@ -146,8 +190,12 @@ func appendViaManagerPath(result *[]scoredPath, source, destination string, hops
 }
 
 func scoringConstraints(settings model.NetworkSettings) path.Constraints {
+	flowClass := path.FlowClass(settings.DefaultFlowClass)
+	if flowClass == "" {
+		flowClass = path.FlowLatency
+	}
 	return path.Constraints{
-		FlowClass:                    path.FlowLatency,
+		FlowClass:                    flowClass,
 		MinBandwidthMbps:             settings.LinkMinBandwidthMbps,
 		ViaManagerLatencyAdvantageMs: settings.ViaManagerLatencyAdvantageMs,
 		ViaManagerLossAdvantagePct:   settings.ViaManagerLossAdvantagePct,

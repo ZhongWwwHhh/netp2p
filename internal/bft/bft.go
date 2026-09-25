@@ -1107,6 +1107,12 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		assignment.Primary = assignment.Primary.Normalized()
 		assignment.Fallbacks = append([]model.PathSpec{}, assignment.Fallbacks...)
+		if assignment.MaxHops <= 0 {
+			assignment.MaxHops = len(assignment.Primary.ManagerHops)
+		}
+		if len(assignment.Primary.ManagerHops) > assignment.MaxHops {
+			return fmt.Errorf("primary path exceeds the assignment hop limit")
+		}
 		if assignment.Primary.Kind == model.PathKindViaManager || assignment.Primary.Kind == model.PathKindMultiHop {
 			if err := validateManagerPath(engineCommittee, assignment.Primary); err != nil {
 				return err
@@ -1114,6 +1120,9 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		for index := range assignment.Fallbacks {
 			assignment.Fallbacks[index] = assignment.Fallbacks[index].Normalized()
+			if len(assignment.Fallbacks[index].ManagerHops) > assignment.MaxHops {
+				return fmt.Errorf("fallback path exceeds the assignment hop limit")
+			}
 			switch assignment.Fallbacks[index].Kind {
 			case model.PathKindViaManager, model.PathKindMultiHop:
 				if err := validateManagerPath(engineCommittee, assignment.Fallbacks[index]); err != nil {
@@ -1271,7 +1280,12 @@ func validateManagerPath(committee []model.CommitteeMember, path model.PathSpec)
 	if len(path.ManagerHops) == 0 {
 		return fmt.Errorf("via-manager path requires at least one manager hop")
 	}
+	seen := make(map[string]struct{}, len(path.ManagerHops))
 	for _, hop := range path.ManagerHops {
+		if _, duplicate := seen[hop]; duplicate {
+			return fmt.Errorf("manager hop %q repeats", hop)
+		}
+		seen[hop] = struct{}{}
 		forwarding := false
 		for _, member := range committee {
 			// Hops are libp2p PeerIDs. Certified state carries the committee
