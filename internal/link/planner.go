@@ -4,7 +4,13 @@ import (
 	"sort"
 
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/path"
 )
+
+// accessConfidenceFactor discounts manager-observed client links relative to
+// the manager mesh: they are useful for estimating the first and last hop of a
+// via-manager path, but they are a single-observer estimate.
+const accessConfidenceFactor = 0.6
 
 // AssignmentInput is the certified state needed by the planner.
 type AssignmentInput struct {
@@ -14,10 +20,11 @@ type AssignmentInput struct {
 	Allowed   map[string]map[string][]model.Service
 }
 
-// AssignmentFor returns a certified-style assignment for a policy-allowed
-// peer pair. It prefers direct, then single-hop managers, then multi-hop paths
-// up to the certified maximum. Existing assignments are retained if their
-// primary score is within switchThreshold of the best new score.
+// AssignmentFor returns a certified-style assignment for a policy-allowed peer
+// pair. Candidates are scored with the shared path.Score function, so the
+// scoring rules (FlowClass weights, hard constraints, via-manager advantage
+// window, switch penalty) live in exactly one place. Existing assignments are
+// kept as long as the new primary is within switchThreshold of the best score.
 func AssignmentFor(input AssignmentInput, sourcePeerID, destinationPeerID string, switchThreshold float64) (model.RouteAssignment, bool) {
 	source := findPeer(input.State, sourcePeerID)
 	destination := findPeer(input.State, destinationPeerID)
@@ -25,16 +32,20 @@ func AssignmentFor(input AssignmentInput, sourcePeerID, destinationPeerID string
 		return model.RouteAssignment{}, false
 	}
 	settings := input.State.Settings
-	maxHops := settings.MaxManagerHops
-	if maxHops <= 0 {
-		maxHops = 2
-	}
 	forwarding := forwardingManagers(input.Committee)
 	candidates := candidatePaths(source.PeerID, destination.PeerID, forwarding, input.View, settings)
 	if len(candidates) == 0 {
 		return model.RouteAssignment{}, false
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score != candidates[j].Score {
+			return candidates[i].Score > candidates[j].Score
+		}
+		if candidates[i].Centrality != candidates[j].Centrality {
+			return candidates[i].Centrality > candidates[j].Centrality
+		}
+		return candidates[i].Spec.ID < candidates[j].Spec.ID
+	})
 
 	assignment := model.RouteAssignment{
 		ID:                AssignmentID(sourcePeerID, destinationPeerID),
@@ -64,16 +75,25 @@ func AssignmentFor(input AssignmentInput, sourcePeerID, destinationPeerID string
 }
 
 type scoredPath struct {
-	Spec  model.PathSpec
-	Score float64
+	Spec       model.PathSpec
+	Score      float64
+	Centrality float64
 }
 
 func candidatePaths(source, destination string, managers []model.CommitteeMember, view LinkView, settings model.NetworkSettings) []scoredPath {
+	constraints := scoringConstraints(settings)
 	result := make([]scoredPath, 0)
 	if settings.DirectPathEnabled {
-		direct := model.PathSpec{Kind: model.PathKindDirect, Confidence: 0.5}
-		direct.ID = AssignmentID(source, destination) + "-direct"
-		result = append(result, scoredPath{direct, directScore(direct, settings)})
+		spec := model.PathSpec{Kind: model.PathKindDirect, Confidence: 0.5}
+		spec.ID = AssignmentID(source, destination) + "-direct"
+		// The manager mesh cannot measure the peer-to-peer direct link, so the
+		// direct candidate is scored with unknown metrics: bandwidth stays
+		// unknown (not zero, which would trip the minimum-bandwidth constraint)
+		// and stability is assumed healthy. Direct therefore wins by default,
+		// and only loses when it is disabled or when a via-manager path's
+		// measured advantage clears the scoring window and switch penalty.
+		profile := path.LinkProfile{PathID: spec.ID, Type: path.PathDirect, Stability: 1}
+		result = append(result, scoredPath{Spec: spec, Score: path.Score(profile, constraints)})
 	}
 	if !settings.ViaManagerEnabled {
 		return result
@@ -83,7 +103,7 @@ func candidatePaths(source, destination string, managers []model.CommitteeMember
 		maxHops = 2
 	}
 	for _, first := range managers {
-		appendViaManagerPath(&result, source, destination, []string{first.PeerID}, view, settings)
+		appendViaManagerPath(&result, source, destination, []string{first.PeerID}, view, constraints)
 		if maxHops < 2 {
 			continue
 		}
@@ -91,62 +111,144 @@ func candidatePaths(source, destination string, managers []model.CommitteeMember
 			if first.PeerID == second.PeerID {
 				continue
 			}
-			appendViaManagerPath(&result, source, destination, []string{first.PeerID, second.PeerID}, view, settings)
+			appendViaManagerPath(&result, source, destination, []string{first.PeerID, second.PeerID}, view, constraints)
 		}
 	}
 	return result
 }
 
-func appendViaManagerPath(result *[]scoredPath, source, destination string, hops []string, view LinkView, settings model.NetworkSettings) {
+func appendViaManagerPath(result *[]scoredPath, source, destination string, hops []string, view LinkView, constraints path.Constraints) {
 	spec := model.PathSpec{Kind: model.PathKindViaManager, ManagerHops: hops, Confidence: 0.6}
 	spec.ID = AssignmentID(source, destination) + "-via-" + hops[0]
 	for _, hop := range hops {
 		spec.ID += "-" + hop
 	}
-	rtt, loss, bandwidth, confidence := composeHops(hops, view, source, destination)
-	if rtt < 0 {
+	metrics, ok := composeHops(hops, view, source, destination)
+	if !ok {
 		return
 	}
-	spec.RTTMilliseconds = rtt
-	spec.LossPercent = loss
-	spec.BandwidthMbps = bandwidth
-	spec.Confidence = confidence
-	*result = append(*result, scoredPath{spec, directScore(spec, settings)})
+	spec.RTTMilliseconds = metrics.rtt
+	spec.LossPercent = metrics.loss
+	spec.BandwidthMbps = metrics.bandwidth
+	spec.Confidence = metrics.confidence
+	profile := path.LinkProfile{
+		PathID:             spec.ID,
+		Type:               path.PathViaManager,
+		RTTMilliseconds:    metrics.rtt,
+		LossPercent:        metrics.loss,
+		JitterMilliseconds: metrics.jitter,
+		BandwidthMbps:      metrics.bandwidth,
+		Stability:          metrics.stability,
+	}
+	*result = append(*result, scoredPath{
+		Spec: spec, Score: path.Score(profile, constraints), Centrality: hopCentrality(view, hops),
+	})
 }
 
-func composeHops(hops []string, view LinkView, source, destination string) (float64, float64, float64, float64) {
+func scoringConstraints(settings model.NetworkSettings) path.Constraints {
+	return path.Constraints{
+		FlowClass:                    path.FlowLatency,
+		MinBandwidthMbps:             settings.LinkMinBandwidthMbps,
+		ViaManagerLatencyAdvantageMs: settings.ViaManagerLatencyAdvantageMs,
+		ViaManagerLossAdvantagePct:   settings.ViaManagerLossAdvantagePct,
+	}
+}
+
+// hopCentrality sums the EigenSpeed score of a path's managers. It is only used
+// to break ties between otherwise equally scored candidates.
+func hopCentrality(view LinkView, hops []string) float64 {
+	if len(view.Centrality) == 0 {
+		return 0
+	}
+	scores := make(map[string]float64, len(view.Centrality))
+	for _, entry := range view.Centrality {
+		scores[entry.PeerID] = entry.Score
+	}
+	total := 0.0
+	for _, hop := range hops {
+		total += scores[hop]
+	}
+	return total
+}
+
+type pathMetrics struct {
+	rtt        float64
+	loss       float64
+	jitter     float64
+	bandwidth  float64
+	stability  float64
+	confidence float64
+}
+
+// composeHops combines the per-segment estimates along a via-manager path.
+// Every segment, including the final manager-to-destination access link, must
+// have been measured; otherwise the path is not yet usable and the planner
+// simply omits it.
+func composeHops(hops []string, view LinkView, source, destination string) (pathMetrics, bool) {
 	previous := source
-	rtt := 0.0
-	loss := 0.0
-	bandwidth := 0.0
-	confidence := 1.0
+	metrics := pathMetrics{stability: 1, confidence: 1}
 	for _, hop := range hops {
 		segment, ok := segmentFor(view, previous, hop)
 		if !ok {
-			return -1, 0, 0, 0
+			return pathMetrics{}, false
 		}
-		rtt += segment.RTTMilliseconds
-		loss = worstLoss(loss, segment.LossPercent)
-		if bandwidth == 0 || segment.BandwidthMbps < bandwidth {
-			bandwidth = segment.BandwidthMbps
-		}
-		confidence *= segment.Confidence
+		metrics.accumulate(segment)
 		previous = hop
 	}
-	if finalSegment, ok := segmentFor(view, hops[len(hops)-1], destination); ok {
-		rtt += finalSegment.RTTMilliseconds
-		loss = worstLoss(loss, finalSegment.LossPercent)
-		if bandwidth == 0 || finalSegment.BandwidthMbps < bandwidth {
-			bandwidth = finalSegment.BandwidthMbps
-		}
-		confidence *= finalSegment.Confidence
+	finalSegment, ok := segmentFor(view, hops[len(hops)-1], destination)
+	if !ok {
+		return pathMetrics{}, false
 	}
-	return rtt, loss, bandwidth, confidence
+	metrics.accumulate(finalSegment)
+	return metrics, true
+}
+
+func (metrics *pathMetrics) accumulate(segment SegmentView) {
+	metrics.rtt += segment.RTTMilliseconds
+	metrics.loss = worstLoss(metrics.loss, segment.LossPercent)
+	metrics.jitter = worstJitter(metrics.jitter, segment.JitterMilliseconds)
+	if segment.BandwidthMbps > 0 && (metrics.bandwidth == 0 || segment.BandwidthMbps < metrics.bandwidth) {
+		metrics.bandwidth = segment.BandwidthMbps
+	}
+	if segment.Stability < metrics.stability {
+		metrics.stability = segment.Stability
+	}
+	metrics.confidence *= segment.Confidence
 }
 
 func segmentFor(view LinkView, from, to string) (SegmentView, bool) {
-	for _, segment := range view.Segments {
+	if segment, ok := findSegment(view.Segments, from, to); ok {
+		return segment, true
+	}
+	if segment, ok := findSegmentReverse(view.Segments, from, to); ok {
+		return segment, true
+	}
+	if segment, ok := findSegment(view.AccessSegments, from, to); ok {
+		segment.Confidence *= accessConfidenceFactor
+		return segment, true
+	}
+	if segment, ok := findSegmentReverse(view.AccessSegments, from, to); ok {
+		segment.Confidence *= accessConfidenceFactor
+		return segment, true
+	}
+	return SegmentView{}, false
+}
+
+func findSegment(segments []SegmentView, from, to string) (SegmentView, bool) {
+	for _, segment := range segments {
 		if segment.From == from && segment.To == to {
+			return segment, true
+		}
+	}
+	return SegmentView{}, false
+}
+
+// findSegmentReverse accepts a segment that was measured in the opposite
+// direction and reorients it so the caller sees traffic flowing from -> to.
+func findSegmentReverse(segments []SegmentView, from, to string) (SegmentView, bool) {
+	for _, segment := range segments {
+		if segment.From == to && segment.To == from {
+			segment.From, segment.To = from, to
 			return segment, true
 		}
 	}
@@ -160,22 +262,11 @@ func worstLoss(current, next float64) float64 {
 	return current
 }
 
-func directScore(spec model.PathSpec, settings model.NetworkSettings) float64 {
-	minimum := settings.LinkMinBandwidthMbps
-	if minimum <= 0 {
-		minimum = 10
+func worstJitter(current, next float64) float64 {
+	if next > current {
+		return next
 	}
-	if spec.BandwidthMbps > 0 && spec.BandwidthMbps < minimum {
-		return 0
-	}
-	score := 100 - spec.RTTMilliseconds*0.2 - spec.LossPercent*5 + spec.Confidence*10
-	if spec.Kind == model.PathKindDirect {
-		score += 10
-	}
-	if score < 0 {
-		return 0
-	}
-	return score
+	return current
 }
 
 func forwardingManagers(committee []model.CommitteeMember) []model.CommitteeMember {

@@ -78,3 +78,52 @@ func TestSchedulerCreatesAndUpdatesAssignments(t *testing.T) {
 		t.Fatalf("via-manager fallback missing: %+v", assignment)
 	}
 }
+
+// Probe jitter must not turn into a consensus write on every reconcile tick.
+func TestSchedulerIgnoresMetricNoise(t *testing.T) {
+	state := model.NetworkState{
+		NetworkID: "net",
+		Settings: model.NetworkSettings{
+			ViaManagerEnabled: true, DirectPathEnabled: true, MaxManagerHops: 2,
+		},
+		Peers: []model.PeerRecord{{PeerID: "client-a"}, {PeerID: "client-b"}},
+	}
+	committee := []model.CommitteeMember{{
+		ID: "manager-a", PeerID: testCommitteePeerID(t, 302), ForwardingEnabled: true,
+	}}
+	hop := committee[0].PeerID
+	now := time.Now().UTC()
+	observations := func(rtt float64, bandwidth float64) []Observation {
+		return []Observation{
+			{ObserverID: hop, SubjectID: "client-a", Scope: ScopeAccess, RTTMilliseconds: rtt, LossPercent: 0, BandwidthMbps: bandwidth, Samples: 5, MeasuredAt: now},
+			{ObserverID: hop, SubjectID: "client-b", Scope: ScopeAccess, RTTMilliseconds: rtt, LossPercent: 0, BandwidthMbps: bandwidth, Samples: 5, MeasuredAt: now},
+		}
+	}
+	manager := &stubSchedulerManager{}
+	scheduler := NewScheduler(manager, committee, func() LinkView {
+		return Aggregate(observations(10, 100), now, time.Minute, 100)
+	})
+	scheduler.allowed = func(source, destination string) ([]model.Service, bool) {
+		if source == "client-a" && destination == "client-b" {
+			return []model.Service{{Protocol: "icmp"}}, true
+		}
+		return nil, false
+	}
+	if err := scheduler.Reconcile(state); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.transitions) != 1 || manager.transitions[0].Assignment == nil {
+		t.Fatalf("expected one assignment transition, got %+v", manager.transitions)
+	}
+	state.Assignments = []model.RouteAssignment{*manager.transitions[0].Assignment}
+	scheduler.view = func() LinkView {
+		return Aggregate(observations(11, 104), now, time.Minute, 100)
+	}
+	scheduler.lastReplan = time.Now().Add(-time.Minute)
+	if err := scheduler.Reconcile(state); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.transitions) != 1 {
+		t.Fatalf("scheduler churned on metric noise: %d transitions", len(manager.transitions))
+	}
+}

@@ -73,3 +73,59 @@ func TestPlannerRejectsUnknownHopsAndDisabledViaManager(t *testing.T) {
 		t.Fatalf("unexpected assignment %+v ok=%v", assignment, ok)
 	}
 }
+
+// A via-manager path needs every hop measured, including the access links on
+// both ends. Until then the planner must not invent it.
+func TestPlannerOmitsViaManagerWhenSegmentsMissing(t *testing.T) {
+	state := model.NetworkState{
+		NetworkID: "net",
+		Peers:     []model.PeerRecord{{PeerID: "client-a"}, {PeerID: "client-b"}},
+		Settings:  model.NetworkSettings{DirectPathEnabled: true, ViaManagerEnabled: true, MaxManagerHops: 2},
+	}
+	committee := []model.CommitteeMember{{ID: "manager-a", PeerID: testCommitteePeerID(t, 411), ForwardingEnabled: true}}
+	now := time.Now().UTC()
+	view := Aggregate([]Observation{
+		{ObserverID: committee[0].PeerID, SubjectID: "client-a", Scope: ScopeAccess, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+	}, now, time.Minute, 100)
+	assignment, ok := AssignmentFor(AssignmentInput{State: state, Committee: committee, View: view}, "client-a", "client-b", 5)
+	if !ok {
+		t.Fatal("assignment not generated")
+	}
+	for _, fallback := range assignment.Fallbacks {
+		if fallback.Kind == model.PathKindViaManager {
+			t.Fatalf("via-manager path planned without a measured access segment: %+v", fallback)
+		}
+	}
+}
+
+// Unknown bandwidth must not disqualify a via-manager path.
+func TestPlannerAcceptsViaManagerWithUnknownBandwidth(t *testing.T) {
+	state := model.NetworkState{
+		NetworkID: "net",
+		Peers:     []model.PeerRecord{{PeerID: "client-a"}, {PeerID: "client-b"}},
+		Settings:  model.NetworkSettings{DirectPathEnabled: true, ViaManagerEnabled: true, MaxManagerHops: 2, LinkMinBandwidthMbps: 10},
+	}
+	committee := []model.CommitteeMember{{ID: "manager-a", PeerID: testCommitteePeerID(t, 412), ForwardingEnabled: true}}
+	hop := committee[0].PeerID
+	now := time.Now().UTC()
+	view := Aggregate([]Observation{
+		{ObserverID: hop, SubjectID: "client-a", Scope: ScopeAccess, RTTMilliseconds: 10, LossPercent: 0, Samples: 5, MeasuredAt: now},
+		{ObserverID: hop, SubjectID: "client-b", Scope: ScopeAccess, RTTMilliseconds: 12, LossPercent: 0, Samples: 5, MeasuredAt: now},
+	}, now, time.Minute, 100)
+	assignment, ok := AssignmentFor(AssignmentInput{State: state, Committee: committee, View: view}, "client-a", "client-b", 5)
+	if !ok {
+		t.Fatal("assignment not generated")
+	}
+	found := false
+	for _, fallback := range assignment.Fallbacks {
+		if fallback.Kind == model.PathKindViaManager {
+			found = true
+			if fallback.BandwidthMbps != 0 {
+				t.Fatalf("bandwidth = %f, want 0 (unmeasured)", fallback.BandwidthMbps)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("via-manager fallback missing for unknown-bandwidth view: %+v", assignment)
+	}
+}

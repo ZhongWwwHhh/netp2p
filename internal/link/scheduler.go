@@ -2,7 +2,7 @@ package link
 
 import (
 	"context"
-	"reflect"
+	"math"
 	"time"
 
 	"github.com/netp2p/netp2p/internal/bft"
@@ -30,6 +30,7 @@ type Scheduler struct {
 	allowed   AllowedFn
 	interval  time.Duration
 	threshold float64
+	cooldown  time.Duration
 
 	lastReplan time.Time
 }
@@ -37,8 +38,14 @@ type Scheduler struct {
 func NewScheduler(manager Submitter, committee []model.CommitteeMember, view func() LinkView) *Scheduler {
 	return &Scheduler{
 		manager: manager, committee: committee, view: view,
-		interval: 15 * time.Second, threshold: 10,
+		interval: 15 * time.Second, threshold: 10, cooldown: replanCooldown,
 	}
+}
+
+// SetCooldown adjusts the minimum time between two submitted assignments. A
+// zero cooldown lets deterministic callers reconcile back to back.
+func (scheduler *Scheduler) SetCooldown(cooldown time.Duration) {
+	scheduler.cooldown = cooldown
 }
 
 func (scheduler *Scheduler) Run(ctx context.Context, state func() model.NetworkState) {
@@ -55,7 +62,7 @@ func (scheduler *Scheduler) Run(ctx context.Context, state func() model.NetworkS
 }
 
 func (scheduler *Scheduler) Reconcile(state model.NetworkState) error {
-	if time.Since(scheduler.lastReplan) < replanCooldown {
+	if scheduler.cooldown > 0 && time.Since(scheduler.lastReplan) < scheduler.cooldown {
 		return nil
 	}
 	view := scheduler.view()
@@ -104,16 +111,45 @@ func findAssignment(state model.NetworkState, source, destination string) (model
 }
 
 func sameAssignment(current, next model.RouteAssignment) bool {
-	if !reflect.DeepEqual(current.Primary, next.Primary) {
+	if !samePath(current.Primary, next.Primary) {
 		return false
 	}
 	if len(current.Fallbacks) != len(next.Fallbacks) {
 		return false
 	}
 	for index := range current.Fallbacks {
-		if !reflect.DeepEqual(current.Fallbacks[index], next.Fallbacks[index]) {
+		if !samePath(current.Fallbacks[index], next.Fallbacks[index]) {
 			return false
 		}
 	}
 	return true
+}
+
+// samePath compares the stable identity of a path (kind and manager hops) and
+// treats small metric fluctuations as unchanged. Without this, ordinary probe
+// jitter would submit a new BFT transition on every reconcile tick.
+func samePath(current, next model.PathSpec) bool {
+	if current.Kind != next.Kind || len(current.ManagerHops) != len(next.ManagerHops) {
+		return false
+	}
+	for index := range current.ManagerHops {
+		if current.ManagerHops[index] != next.ManagerHops[index] {
+			return false
+		}
+	}
+	return within(current.RTTMilliseconds, next.RTTMilliseconds, 5, 0.2) &&
+		math.Abs(current.LossPercent-next.LossPercent) <= 2 &&
+		within(current.BandwidthMbps, next.BandwidthMbps, 5, 0.2) &&
+		math.Abs(current.Confidence-next.Confidence) <= 0.15
+}
+
+// within reports whether two metrics are close enough to be considered equal:
+// either within an absolute margin or a relative fraction of the larger value.
+func within(current, next, absolute, relative float64) bool {
+	delta := math.Abs(current - next)
+	if delta <= absolute {
+		return true
+	}
+	largest := math.Max(math.Abs(current), math.Abs(next))
+	return largest > 0 && delta <= largest*relative
 }
