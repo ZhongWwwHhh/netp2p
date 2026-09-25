@@ -224,13 +224,17 @@ Flow 表（`internal/conntrack`）使「请求方向被 allow、回复方向被 
 
 **多跳规划**：`internal/link/planner.go` 枚举简单 manager 路径（不重复 hop，候选上限 128），`internal/path.Score` 按当前的 flow class 加权 RTT/loss/带宽/成本，`RouteAssignment` 记录 primary 与有序 fallback、`MaxHops`，每个 `PathSpec` 记录 `ManagerHops`（PeerID 列表，首末段为 access 段）与累加 `Cost`。BFT 校验 hop 必须是有 forwarding 能力的 committee 成员、无重复 hop、hop 数不超过 `MaxHops`。客户端严格按 certified primary → fallback 顺序发包，manager 按上一跳身份校验后逐跳转发，目标客户端校验来源与 policy。探测指标是非认证观测；只有 planner 输出经 BFT 认证。
 
+**路径热备（客户端本地）**：客户端把 last-known-good path 与 path admission 状态持久化到 `<dataDir>/paths.json`（明文 JSON，`temp+rename` 原子写，TTL 24h），重启后仍只在 certified assignment 的 primary+fallback 集合内调整顺序：持久化的 LKG（未过期、仍在集合内、未被判定失败）优先，否则回落 certified 顺序，准入失败的路径永不被选中。选择成功与准入结论变化时去抖（≤1s）落盘。文件损坏或缺失视为无缓存，不影响认证状态。
+
 **配额**：`internal/quota` 的 `TokenBucket` 做真实限速（rate + burst），`Enforcer` 按 route → group → peer 优先级解析预算（同优先级取最具体匹配，`block` 优先于其它动作），动作语义为 `block` / `throttle`（有界延迟，上限 250ms）/ `degrade` / `switch_path`。客户端在出方向准入，manager 在转发方向按源 peer/assignment 准入并做 per-peer 有界队列与 backpressure。用量以增量经 `/netp2p/data/quota/2.0.0` 上报（默认 30s 或累计 64KB 触发），manager 聚合后经 `update_budget_usage` 写入 certified `TrafficBudget.UsedDailyBytes/UsedMonthlyBytes`，提交频率硬上限 60s 一次，避免共识 churn。日/月重置由 certified 时间戳驱动，跨 manager 确定性一致。
 
 ## 可观测性
 
 - `internal/metrics`（Prometheus）暴露 BFT height/commits/rejected、转发 forwarded/dropped、同步请求、配额 block、certified peers、link segments 与最低置信度；`--metrics-listen` 在独立端口提供 `/metrics`，默认关闭。
-- Web API 提供 `/api/v1/events`（认证决策日志，含 signer bitmap 与 epoch）、`/api/v1/diagnostics`（人类可读健康快照）、`/api/v1/assignments`（certified assignment + 本地 admission 观测）、`/api/v1/quota`。
-- 审计事件由每次 commit 的 transition + leader + signer bitmap 派生，Web Activity/Diagnostics 页展示。
+- Web API 提供 `/api/v1/events`（认证决策日志，含 signer bitmap 与 epoch，支持 `actor=` 按操作者过滤）、`/api/v1/diagnostics`（人类可读健康快照，内联 `alerts`）、`/api/v1/assignments`（certified assignment + 本地 admission 观测）、`/api/v1/quota`、`/api/v1/alerts`。
+- 审计事件由每次 commit 的 transition + leader + signer bitmap 派生，Web Activity/Diagnostics 页展示。每个 `StateTransition` 携带服务端写入的 `Actor{ID,Name,Role,Static}`：Web 写接口记鉴权身份、admin 协议记 break-glass 身份、peer 注册记 `peer:<peerID>`、SSO 记 claims subject 与生效角色。actor 进入 `TransitionHash`，因此被 QC 覆盖、不可篡改；客户端传入的 actor 一律被覆盖，且 actor 只用于审计展示，不参与授权判断。
+
+**告警（manager 本地）**：`internal/alerts` 周期（默认 15s）评估四条规则——`quorum_degraded`（有 committee 成员未连接）、`forward_drops`（窗口内丢弃增量或丢弃率超阈值）、`quota_exceeded`（任一预算触顶）、`probe_failed`（有 peer 但无置信链路测量）。告警是进程内本地状态，不进 BFT、不跨 manager 去重；只在状态跳变时投递（`firing`/`resolved`），可经带有限重试的 webhook 导出（无 webhook 时只写结构化日志）。阈值由 config-file `alert:` 段或 `--alert-*` flags 覆盖，控制台 Diagnostics 页与 Topbar 徽标展示活跃告警。
 
 ## State transition 图
 

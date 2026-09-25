@@ -49,7 +49,7 @@
 - [x] EigenSpeed 式 manager mesh 链路观测网与 client 不可信隔离：trimmed median + 幂迭代主特征向量 + 离群降权，access 段独立于 mesh 矩阵。
 - [x] 评分收敛到 `internal/path.Score`（删除 `link.directScore`），未知带宽不再被硬排除；scheduler 对指标抖动做容差抑制。
 - [x] flow class 用户可选（`Route`/`Policy.FlowClass` + `NetworkSettings.DefaultFlowClass` 接入 `path.Score` 权重）。
-- [ ] 路径持久化 hot-standby（重启后恢复 last-known-good path）。
+- [x] 路径持久化 hot-standby（重启后恢复 last-known-good path 与准入状态，TTL 24h）。
 - [x] 取消 relay 身份，manager 成为 client/决策/转发/UI 超集。
 - [x] BFT certified RouteAssignment：manager committee 规划 primary/fallback path。
 - [x] via-manager forwarding data plane 与 client end-to-end admission（客户端严格按 certified primary→fallback 选路，manager 按上一跳身份转发并计数）。
@@ -75,7 +75,9 @@
 - [x] committee reconfiguration、key rotation、灾难恢复（`docs/upgrade.md`）。
 - [x] threshold signature（BLS12-381，替代 2f+1 独立 Ed25519 签名）。
 - [x] metrics、审计、混沌测试（`internal/metrics`、`/api/v1/events`、`internal/chaos`）。
-- [ ] tracing（OTLP 可选导出）与告警 webhook（本地规则已可读，导出未接线）。
+- [x] 审计 actor 归属：服务端写入 `StateTransition.Actor`，纳入 transition hash 与 QC。
+- [x] 告警本地规则与 webhook 导出（`internal/alerts`、`quorum_degraded`/`forward_drops`/`quota_exceeded`/`probe_failed`，状态跳变投递 + 有限重试）。
+- [ ] tracing（OTLP 可选导出）。
 - [ ] Docker compose `quota` / `multihop` / `chaos` / `path` profile（当前 chaos/path/quota 场景在进程内 `go test ./internal/...` 覆盖；compose 仅新增 `/metrics` 抓取断言）。
 - [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
 - [ ] Windows/macOS TUN 实现（当前仅接口抽象与 stub）与第三方安全审计。
