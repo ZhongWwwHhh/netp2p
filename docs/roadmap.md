@@ -53,6 +53,7 @@
 - [x] 取消 relay 身份，manager 成为 client/决策/转发/UI 超集。
 - [x] BFT certified RouteAssignment：manager committee 规划 primary/fallback path。
 - [x] via-manager forwarding data plane 与 client end-to-end admission（客户端严格按 certified primary→fallback 选路，manager 按上一跳身份转发并计数）。
+- [x] Docker E2E `--with-tun` 闭环：等待 TUN 健康/overlay DNS 后验证内核 ICMP、policy TCP 与外部 DNS 转发。
 
 ## Phase 4：去中心化 Manager
 
