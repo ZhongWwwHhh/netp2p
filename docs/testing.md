@@ -40,13 +40,20 @@ go test ./internal/e2e -run TestChaos -v
 
 ## Docker E2E
 
-前置：`sudo -n docker` 可用、`python3` 可用。**不需要 TUN，也不需要 `NET_ADMIN`。**
+前置：`sudo -n docker` 可用、`python3` 可用。默认（userspace）模式**不需要 TUN，也不需要 `NET_ADMIN`**；
+`--with-tun` 模式需要 `/dev/net/tun` 与 `NET_ADMIN`。
 
 ```bash
 scripts/e2e.sh
 ```
 
-脚本会：
+或加 `--with-tun` 验证真实内核流量经过 TUN 设备：
+
+```bash
+scripts/e2e.sh --with-tun
+```
+
+脚本会（默认断言 + TUN 断言）：
 
 1. `netp2pd --role seedgen` 生成确定性的 `deploy/state.json` 与 manager PeerID；
 2. 构建 `netp2p-test:latest` 镜像；
@@ -55,21 +62,36 @@ scripts/e2e.sh
 5. 停止 `manager-4` 后启动 `client-c`，验证 height ≥ 4 的新 certified state；
 6. 断言 `client-a` 的 status 文件包含 certified `assignments`（`kind` ∈ `direct`/`via_manager`）与递增 `height`；
 7. 从宿主抓取 `manager-1` 的 `http://127.0.0.1:9100/metrics`，断言存在 `netp2p_bft_height` 与 `netp2p_forward_*` 指标。
+8. `--with-tun` 时先等待 overlay DNS 解析 peer 名，再验证内核 ICMP `client-a-tun -> client-b-tun` 收到 reply、TCP 按 certified policy 通、外部域名继续由备份上游转发。
 
 `NETP2P_E2E_KEEP=1 scripts/e2e.sh` 保留容器便于排查；默认退出时 `down -v` 清理。
 
 ## Docker：TUN、SSO 与控制台
 
 ```bash
-# TUN 客户端（需要 --device /dev/net/tun 与 --cap-add NET_ADMIN）
+# 完整 TUN 验收（推荐直接跑上面带 --with-tun 的 e2e 脚本）；
+# 下面是手动操作步骤。需要 --device /dev/net/tun 与 --cap-add NET_ADMIN。
 sudo -n docker compose --env-file deploy/compose.env -f docker-compose.test.yml --profile tun up -d client-a-tun client-b-tun
-sudo -n docker exec netp2p-client-a-tun-1 ping -c 3 100.64.0.2   # overlay 地址按 deploy/run/*.json 为准
 
-# DNS：容器内 resolv.conf 被接管到 127.0.0.1，外部域名与 overlay 名都要能解析
-sudo -n docker exec netp2p-client-a-tun-1 cat /etc/resolv.conf        # nameserver 127.0.0.1
-sudo -n docker exec netp2p-client-a-tun-1 getent hosts example.com    # 转发到备份里的真实上游
-sudo -n docker exec netp2p-client-a-tun-1 getent hosts manager-1
-sudo -n docker exec netp2p-client-a-tun-1 getent hosts "$(sudo -n docker exec netp2p-client-b-tun-1 hostname).netp2p.internal"
+# 读 overlay IP（由 status file 持续刷新）
+A_TUN_IP="$(python3 -c 'import json; print(json.load(open("deploy/run/client-a-tun.json"))["overlayIP"])')"
+B_TUN_IP="$(python3 -c 'import json; print(json.load(open("deploy/run/client-b-tun.json"))["overlayIP"])')"
+B_TUN_PEER="$(python3 -c 'import json; print(json.load(open("deploy/run/client-b-tun.json"))["peerID"])')"
+
+# TUN 设备存在且分配了 overlay /32
+sudo -n docker exec netp2p-client-a-tun-1 ip addr show netp2p0 | grep "inet $A_TUN_IP"
+
+# ICMP：内核层 echo request -> overlay -> echo reply
+sudo -n docker exec netp2p-client-a-tun-1 ping -c 3 "$B_TUN_IP"
+
+# TCP：client-b-tun 上监听，client-a-tun 通过 kernel 路由连接
+sudo -n docker exec -d netp2p-client-b-tun-1 nc -l -s "$B_TUN_IP" -p 9999
+echo hello | sudo -n docker exec -i netp2p-client-a-tun-1 nc -w 3 "$B_TUN_IP" 9999
+
+# DNS：overlay peer 名 + 外部域名（resolv.conf 已接管到 127.0.0.1）
+sudo -n docker exec netp2p-client-a-tun-1 cat /etc/resolv.conf
+sudo -n docker exec netp2p-client-a-tun-1 getent hosts client-b-tun.netp2p.internal
+sudo -n docker exec netp2p-client-a-tun-1 getent hosts example.com
 # 重启后仍要能解析：上游从 /etc/resolv.conf.netp2p.bak 恢复，而不是转给自己
 sudo -n docker restart netp2p-client-a-tun-1 && sleep 15
 sudo -n docker exec netp2p-client-a-tun-1 getent hosts example.com

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end test for the BFT manager + userspace data plane.
+# End-to-end test for the BFT manager + data plane.
 #
-#   scripts/e2e.sh
+#   scripts/e2e.sh              userspace UDP data plane only
+#   scripts/e2e.sh --with-tun   also verify real kernel traffic through TUN
 #
-# Requires docker (with sudo) and python3. No TUN or NET_ADMIN is used. Set
+# Requires docker (with sudo) and python3. TUN mode additionally needs
+# /dev/net/tun on the host and runs TUN clients with NET_ADMIN. Set
 # NETP2P_E2E_KEEP=1 to keep the stack running after the script finishes.
 set -euo pipefail
 
@@ -14,6 +16,14 @@ DOCKER=(sudo -n docker)
 COMPOSE=("${DOCKER[@]}" compose -f docker-compose.test.yml --env-file deploy/compose.env)
 IMAGE=netp2p-test:latest
 RUN_DIR=deploy/run
+WITH_TUN=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --with-tun) WITH_TUN=1 ;;
+    *) printf 'unknown flag: %s\nusage: e2e.sh [--with-tun]\n' "$arg" >&2; exit 2 ;;
+  esac
+done
 
 log() { printf '\n=== %s ===\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -47,7 +57,10 @@ cleanup() {
     printf '\nkeeping stack; stop with: sudo docker compose -f docker-compose.test.yml down -v\n'
     return
   fi
-  "${COMPOSE[@]}" --profile quorum down -v --remove-orphans >/dev/null 2>&1 || true
+  profiles="--profile quorum"
+  [ "$WITH_TUN" = "1" ] && profiles="$profiles --profile tun"
+  # shellcheck disable=SC2086
+  "${COMPOSE[@]}" $profiles down -v --remove-orphans >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -69,10 +82,36 @@ log "build image"
 "${DOCKER[@]}" build -t "$IMAGE" .
 
 log "start managers and clients"
-"${COMPOSE[@]}" up -d --force-recreate
+start_profiles=""
+[ "$WITH_TUN" = "1" ] && start_profiles="--profile tun"
+# shellcheck disable=SC2086
+"${COMPOSE[@]}" $start_profiles up -d --force-recreate
 
 wait_status "$RUN_DIR/client-a.json" client-a
 wait_status "$RUN_DIR/client-b.json" client-b
+A_TUN_IP=""
+B_TUN_IP=""
+if [ "$WITH_TUN" = "1" ]; then
+  wait_status "$RUN_DIR/client-a-tun.json" client-a-tun
+  wait_status "$RUN_DIR/client-b-tun.json" client-b-tun
+  A_TUN_IP="$(status_field "$RUN_DIR/client-a-tun.json" overlayIP)"
+  B_TUN_IP="$(status_field "$RUN_DIR/client-b-tun.json" overlayIP)"
+  A_TUN_MODE="$(status_field "$RUN_DIR/client-a-tun.json" mode)"
+  [ "$A_TUN_MODE" = "tun" ] || fail "client-a-tun reported mode=$A_TUN_MODE, want tun"
+  for service in client-a-tun client-b-tun; do
+    healthy=0
+    for _ in $(seq 1 30); do
+      if [ "$("${COMPOSE[@]}" ps --format json "$service" 2>/dev/null | python3 -c 'import json,sys; value=sys.stdin.read().strip(); print(json.loads(value).get("Health","") if value else "")')" = healthy ]; then
+        healthy=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$healthy" = "1" ] || fail "$service never became healthy"
+  done
+  echo "client-a-tun overlayIP=$A_TUN_IP ($A_TUN_MODE)"
+  echo "client-b-tun overlayIP=$B_TUN_IP"
+fi
 A_IP="$(status_field "$RUN_DIR/client-a.json" overlayIP)"
 B_IP="$(status_field "$RUN_DIR/client-b.json" overlayIP)"
 echo "client-a overlayIP=$A_IP"
@@ -93,6 +132,53 @@ if probe client-b "$B_IP" "$A_IP" 3s >/dev/null 2>&1; then
   fail "B->A probe succeeded despite deny policy"
 fi
 echo "OK: B->A probe denied"
+
+if [ "$WITH_TUN" = "1" ]; then
+  log "TUN: overlay DNS must resolve before kernel traffic uses peer routes"
+  dns_ok=0
+  for _ in $(seq 1 30); do
+    resolved="$("${COMPOSE[@]}" exec -T client-a-tun getent hosts client-b-tun.netp2p.internal 2>/dev/null || true)"
+    if [ -n "$resolved" ]; then
+      dns_ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$dns_ok" = "1" ] || fail "client-a-tun never resolved client-b-tun.netp2p.internal"
+  echo "OK: overlay DNS resolved ($resolved)"
+
+  log "TUN: kernel ICMP must traverse the overlay"
+  tun_ok=0
+  for _ in $(seq 1 30); do
+    if "${DOCKER[@]}" exec netp2p-client-a-tun-1 ping -c 1 -W 3 "$B_TUN_IP" >/dev/null 2>&1; then
+      tun_ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$tun_ok" = "1" ] || fail "client-a-tun never pinged $B_TUN_IP via TUN"
+  echo "OK: client-a-tun -> client-b-tun ICMP echo reply received"
+
+  log "TUN: kernel TCP must follow the certified policy"
+  # client-b-tun listens on the overlay address so client-a-tun can reach it
+  # through the kernel's routing table (no userspace endpoint needed).
+  "${DOCKER[@]}" exec -d netp2p-client-b-tun-1 sh -c "nc -l -s $B_TUN_IP -p 9999 >/dev/null 2>&1"
+  tcp_ok=0
+  for _ in $(seq 1 15); do
+    if "${DOCKER[@]}" exec netp2p-client-a-tun-1 sh -c "echo netp2p-e2e | nc -w 3 $B_TUN_IP 9999" >/dev/null 2>&1; then
+      tcp_ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$tcp_ok" = "1" ] || fail "client-a-tun never connected TCP to $B_TUN_IP:9999"
+  echo "OK: client-a-tun -> client-b-tun TCP connection established"
+
+  log "TUN: DNS must still forward names outside the overlay"
+  external="$("${COMPOSE[@]}" exec -T client-a-tun getent hosts example.com 2>/dev/null | head -1 || true)"
+  [ -n "$external" ] || fail "client-a-tun cannot forward external names after DNS takeover"
+  echo "OK: forwarded DNS resolved through the TUN resolver ($external)"
+fi
 
 log "quorum must certify a new peer with one manager down"
 "${COMPOSE[@]}" stop manager-4 >/dev/null

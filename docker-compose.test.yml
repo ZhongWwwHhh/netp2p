@@ -103,8 +103,17 @@ services:
     command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
       "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
       "--setup-key", "setup-key-a", "--tun", "netp2p0",
+      "--hostname", "client-a-tun",
       "--status-file", "/status/client-a-tun.json"]
     volumes: ["./deploy/run:/status", "client-a-tun-data:/data"]
+    environment:
+      NETP2P_DEBUG_DATA: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show netp2p0 && ip addr show netp2p0 | grep -q 'inet 100.64.'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
   client-b-tun:
     image: netp2p-test:latest
     profiles: ["tun"]
@@ -114,8 +123,17 @@ services:
     command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
       "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
       "--setup-key", "setup-key-b", "--tun", "netp2p0",
+      "--hostname", "client-b-tun",
       "--status-file", "/status/client-b-tun.json"]
     volumes: ["./deploy/run:/status", "client-b-tun-data:/data"]
+    environment:
+      NETP2P_DEBUG_DATA: "1"
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show netp2p0 && ip addr show netp2p0 | grep -q 'inet 100.64.'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
 
 volumes:
   client-a-tun-data:

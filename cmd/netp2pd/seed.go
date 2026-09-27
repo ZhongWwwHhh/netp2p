@@ -39,6 +39,11 @@ func defaultSeed() config.Seed {
 				Services: []model.Service{{Protocol: "icmp"}}, Effect: model.EffectAllow, Direction: model.DirectionUnidirectional,
 			},
 			{
+				ID: "allow-a-to-b-tcp", SourceGroups: []string{"clients-a"}, DestinationGroups: []string{"clients-b"},
+				Services: []model.Service{{Protocol: "tcp", StartPort: 0, EndPort: 65535}}, Effect: model.EffectAllow,
+				Direction: model.DirectionUnidirectional,
+			},
+			{
 				ID: "deny-b-to-a-icmp", SourceGroups: []string{"clients-b"}, DestinationGroups: []string{"clients-a"},
 				Services: []model.Service{{Protocol: "icmp"}}, Effect: model.EffectDeny, Direction: model.DirectionUnidirectional, Priority: 100,
 			},
