@@ -45,6 +45,7 @@ type Client struct {
 	forwarding      *forward.Table
 	paths           *pathSelector
 	quota           *quota.Enforcer
+	hostname        string
 	admissionQueue  []netproto.AdmissionReport
 	admissionWaiter *admissionWaiter
 	pathStore       *pathStore
@@ -108,7 +109,7 @@ func (client *Client) Login(ctx context.Context, networkID, setupKey, jwtToken s
 		PeerID: client.node.Host.ID().String(), Addresses: client.node.Addresses(),
 		ProtocolVersion: version.ProtocolVersion, Capabilities: version.Capabilities(),
 	}
-	request.Hostname, _ = os.Hostname()
+	request.Hostname = client.Hostname()
 	request.OS = runtime.GOOS
 	request.ClientVersion = version.Version
 	var loginReply pb.LoginResponse
@@ -354,6 +355,19 @@ func (client *Client) Self() model.PeerRecord {
 	client.mu.RLock()
 	defer client.mu.RUnlock()
 	return client.self
+}
+
+// Hostname returns the identity advertised during login. Operators may set a
+// stable name for containers; otherwise the operating system hostname is used.
+func (client *Client) Hostname() string {
+	client.mu.RLock()
+	hostname := client.hostname
+	client.mu.RUnlock()
+	if hostname != "" {
+		return hostname
+	}
+	hostname, _ = os.Hostname()
+	return hostname
 }
 
 func (client *Client) SnapshotHeight() uint64 {

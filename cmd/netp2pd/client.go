@@ -28,6 +28,7 @@ type clientOptions struct {
 	setupKey     string
 	packetListen string
 	statusFile   string
+	hostname     string
 	tunName      string
 	tunMTU       int
 	noTun        bool
@@ -72,8 +73,11 @@ func runClient(ctx context.Context, options clientOptions) error {
 	if restoreDNS != nil {
 		defer restoreDNS()
 	}
-	netClient, err := client.New(node, options.managerAddr, sink,
-		client.WithStateDir(filepath.Join(dataDir, "client")))
+	optionsList := []client.Option{client.WithStateDir(filepath.Join(dataDir, "client"))}
+	if options.hostname != "" {
+		optionsList = append(optionsList, client.WithHostname(options.hostname))
+	}
+	netClient, err := client.New(node, options.managerAddr, sink, optionsList...)
 	if err != nil {
 		return err
 	}

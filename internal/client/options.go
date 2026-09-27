@@ -18,6 +18,14 @@ func WithStateDir(dir string) Option {
 	}
 }
 
+// WithHostname overrides the stable peer name sent during login. It is useful
+// in containers and long-lived deployments where the OS hostname is ephemeral.
+func WithHostname(hostname string) Option {
+	return func(client *Client) {
+		client.hostname = hostname
+	}
+}
+
 // Close releases persistence resources, flushing pending state to disk.
 func (client *Client) Close() {
 	if client.pathStore != nil {
