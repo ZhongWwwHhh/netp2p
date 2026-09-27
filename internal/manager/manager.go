@@ -137,7 +137,7 @@ func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
 // RunScheduler periodically converts manager mesh observations into certified
 // route assignments. Transitions remain quorum-certified.
 func (manager *Manager) RunScheduler(ctx context.Context) {
-	scheduler := link.NewScheduler(manager.mesh, manager.engine.CommitteeMembers(), manager.LinkView)
+	scheduler := link.NewScheduler(manager, manager.engine.CommitteeMembers(), manager.LinkView)
 	scheduler.Run(ctx, manager.engine.CurrentState)
 }
 

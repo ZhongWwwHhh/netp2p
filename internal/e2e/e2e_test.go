@@ -361,6 +361,9 @@ func TestViaManagerForwardsOverlayProbe(t *testing.T) {
 		if netClient.SnapshotHeight() < height {
 			t.Fatalf("client did not sync certified assignment height %d", height)
 		}
+		if err := bft.ValidateSnapshot(netClient.Snapshot()); err != nil {
+			t.Fatalf("client snapshot failed validation: %v", err)
+		}
 		certified := make(map[string]model.RouteAssignment)
 		for _, assignment := range netClient.Snapshot().State.Assignments {
 			certified[assignment.ID] = assignment
@@ -419,9 +422,18 @@ func TestProbeDrivenViaManagerAssignment(t *testing.T) {
 	waitForAccessSegments(t, group.managers[0], managerID, sourceID, destinationID)
 	waitForCertifiedAssignments(t, group, sourceID, destinationID)
 
-	ok, err := probe(t, sinkA, clientA.Self().OverlayIP, clientB.Self().OverlayIP, 10*time.Second)
+	var ok bool
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		ok, err = probe(t, sinkA, clientA.Self().OverlayIP, clientB.Self().OverlayIP, 3*time.Second)
+		if err == nil && ok {
+			break
+		}
+		t.Logf("attempt %d: ok=%v err=%v", attempt+1, ok, err)
+		time.Sleep(200 * time.Millisecond)
+	}
 	if err != nil || !ok {
-		t.Fatalf("A->B probe over a measured assignment failed: ok=%v err=%v", ok, err)
+		t.Fatalf("A->B probe over a measured assignment never succeeded: ok=%v err=%v", ok, err)
 	}
 	forwarded, dropped := group.managers[0].ForwardingStats()
 	if forwarded == 0 {

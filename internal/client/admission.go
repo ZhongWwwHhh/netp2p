@@ -14,6 +14,7 @@ const admissionTimeout = 500 * time.Millisecond
 
 type admissionWaiter struct {
 	destinationIP string
+	kind          model.PathKind
 	replies       chan []byte
 }
 
@@ -87,7 +88,7 @@ func (client *Client) probePath(source, destination peer.ID, assignment model.Ro
 		return false
 	}
 	replies := make(chan []byte, 1)
-	waiter := &admissionWaiter{destinationIP: targetIP.String(), replies: replies}
+	waiter := &admissionWaiter{destinationIP: targetIP.String(), kind: path.Kind, replies: replies}
 	client.setAdmissionWaiter(waiter)
 	defer client.setAdmissionWaiter(nil)
 	if path.Kind == model.PathKindDirect {
@@ -125,4 +126,18 @@ func (client *Client) deliverAdmission(ipPacket packet.IPv4Packet) bool {
 	default:
 		return true
 	}
+}
+
+func (client *Client) deliverAdmissionSynthesized(reply packet.IPv4Packet) bool {
+	client.mu.RLock()
+	waiter := client.admissionWaiter
+	var kind model.PathKind
+	if waiter != nil {
+		kind = waiter.kind
+	}
+	client.mu.RUnlock()
+	if kind != model.PathKindViaManager {
+		return false
+	}
+	return client.deliverAdmission(reply)
 }
