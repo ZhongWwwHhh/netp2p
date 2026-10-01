@@ -373,6 +373,8 @@ manager committee 不能强迫 client 使用实测失败路径；client 也不�
 | 虚假 manager 宣传 | manager identity 和 forwarding capability 来自 certified snapshot |
 | path flapping | current path penalty、min dwell time、双阈值切换 |
 | 恶意 client 频繁请求 replan | per-peer assignment rate limit |
+| 恶意 exit gateway 注入伪造回程包 | 仅接受「来源是覆盖该 foreign 地址的 certified gateway」且「命中本端出向 flow」的 foreign-source 包；其余按伪造丢弃；`IsExitNode` 只能由 admin 经 `update_peer` 设置 |
+| 未授权 peer 充当 gateway | `upsert_route` 在 BFT 内要求 routing group 至少一个 `IsExitNode` peer；客户端只对可见 route 安装内核路由 |
 
 ## 权威状态与非权威状态
 
@@ -388,6 +390,7 @@ NetworkSettings {
   via_manager_enabled
   max_manager_hops
   direct_path_enabled
+  exit_node_enabled
   trust_client_global_observations: false
 }
 

@@ -63,6 +63,7 @@ scripts/e2e.sh --with-tun
 6. 断言 `client-a` 的 status 文件包含 certified `assignments`（`kind` ∈ `direct`/`via_manager`）与递增 `height`；
 7. 从宿主抓取 `manager-1` 的 `http://127.0.0.1:9100/metrics`，断言存在 `netp2p_bft_height` 与 `netp2p_forward_*` 指标。
 8. `--with-tun` 时先等待 overlay DNS 解析 peer 名，再验证内核 ICMP `client-a-tun -> client-b-tun` 收到 reply、TCP 按 certified policy 通、外部域名继续由备份上游转发。
+9. `--with-exit` 时（隐含 `--with-tun`）用 admin CLI 把 `client-exit-tun` 提升为 exit node 并认证一条 `198.18.0.0/24` 的 route，然后验证 `client-a-tun` 安装该内核路由、`ping 198.18.0.10` 经 gateway 抵达、gateway 上存在 MASQUERADE 规则。
 
 `NETP2P_E2E_KEEP=1 scripts/e2e.sh` 保留容器便于排查；默认退出时 `down -v` 清理。
 

@@ -87,3 +87,26 @@ be attempted during production traffic.
   TUN or DNS takeover, add `--cap-add NET_ADMIN` and pass
   `--device /dev/net/tun`; the host path `/var/lib/netp2p` must be writable by
   uid/gid 999.
+
+## Exit nodes and subnet routes
+
+An exit/subnet gateway needs the kernel to forward and (optionally) masquerade
+traffic, so it has stricter host requirements than a plain client:
+
+- Linux only, with a working TUN device (`/dev/net/tun`) and `CAP_NET_ADMIN`.
+  Without them `netp2pd` logs an explicit warning and disables exit capability
+  on that node; it still works as an ordinary peer.
+- `iptables` must be installed. The gateway installs managed
+  `POSTROUTING ... MASQUERADE` (only for routes with `masquerade: true`) and
+  `FORWARD ... ACCEPT` rules and flips `net.ipv4.ip_forward` on, restoring the
+  previous value when it stops. The `netp2p-test` image already includes
+  `iptables`.
+- Marking a peer as an exit node is a certified change (`update_peer`), not a
+  local flag: use the Peers page (needs `peers:update`) or
+  `netp2pd --role admin --action update-peer --file peer.json` with
+  `{"peerId":"<id>","isExitNode":true}`. The route itself is a normal
+  `upsert-route` whose routing group must contain that peer.
+- On the container runtime, start the gateway with `--cap-add NET_ADMIN`,
+  `--device /dev/net/tun`, and (for a real default route) a corresponding
+  network attachment. Do not run the gateway as the unprivileged `runtime`
+  stage without those grants.

@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 go build -o /out/netp2pd ./cmd/netp2pd && \
 
 FROM debian:bookworm-slim AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        iproute2 iputils-ping netcat-openbsd \
+        iproute2 iputils-ping netcat-openbsd iptables \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/netp2pd /usr/local/bin/netp2pd
 COPY --from=build /out/netp2p-probe /usr/local/bin/netp2p-probe

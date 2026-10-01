@@ -3,6 +3,8 @@ tmp/
 deploy/run/
 deploy/compose.env
 deploy/state.json
+deploy/exit-peer.json
+deploy/exit-route.json
 ui/node_modules/
 bin/
 # nfpm package output (root only). The console build under

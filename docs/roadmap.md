@@ -83,3 +83,21 @@
 - [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
 - [ ] Windows/macOS TUN 实现（当前仅接口抽象与 stub）与第三方安全审计。
 - [ ] threshold DKG（替代种子确定性派生）、billing。
+
+## Phase 7：TUN 数据面验收闭环
+
+- [x] `scripts/e2e.sh --with-tun`：等待 TUN 健康检查与 overlay DNS 后，验证内核 ICMP、policy TCP 与外部 DNS 转发。
+- [x] tun profile 增加 `healthcheck`（TUN 接口存在且分配了 overlay IP）。
+
+## Phase 8：Exit Node 与 Subnet Route（Linux/TUN）
+
+- [x] 模型：`Route.Masquerade`、`PeerRecord.IsExitNode`、`NetworkSettings.ExitNodeEnabled`（JSON + proto + wire 双向映射）。
+- [x] BFT 校验：`upsert_route` 要求 routing group 至少一个 exit-node peer；`register_peer` 一律落 `IsExitNode=false`；`update_peer` 是唯一的开关入口且支持部分更新（不再清空 hostname/OS/version）。
+- [x] 客户端 CIDR 路由：`applySnapshot` 为可见 certified Route 安装 `ip route replace <cidr> dev netp2p0`，并 pin underlay 目的地址以保住 0.0.0.0/0 场景；网关选择确定性（Metric→ID，RoutingGroup 内最低 PeerID）。
+- [x] 客户端出向：非 overlay 目的命中 certified Route 时经 `sendToPeer` 发给 gateway（复用 quota / assignment / direct fallback）。
+- [x] Exit gateway 服务端（`internal/exitnode`，Linux）：`ip_forward`（保存/恢复原值）+ iptables `MASQUERADE`/FORWARD 幂等 reconcile；TUN 注入内核完成转发与 SNAT，conntrack 回程。
+- [x] 回程安全：masquerade 的 foreign 源地址仅在「来源是覆盖该地址的 certified gateway + 命中本地出向 flow」时交付内核，否则按伪造丢弃；非 exit peer 不得转发 off-overlay 包。
+- [x] 非 Linux / 非 TUN：`ErrUnsupported`，显式告警并禁用本机 exit 能力，不影响普通 client。
+- [x] admin CLI 新增 `update-peer` 动作，operator 无需 Web 也可标记 exit node。
+- [x] Web 控制台：Routes 页 masquerade toggle 与 exit-node 提示；Peers 页 exit-node 列/抽屉开关（`peers:update`）；Settings 页 `exitNodeEnabled`。
+- [x] Docker E2E `--with-exit`：foreign 子网 target + TUN exit gateway，验证内核 ICMP 经 gateway 抵达、MASQUERADE 生效。

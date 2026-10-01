@@ -135,7 +135,62 @@ services:
       retries: 12
       start_period: 30s
 
+  # Exit-node scenario. client-exit-tun is a normal overlay client that is also
+  # attached to a foreign "public" subnet; an admin transition promotes it to an
+  # exit node and certifies a route for that subnet. client-a-tun then reaches
+  # the subnet target through the overlay, with the gateway doing kernel SNAT.
+  client-exit-tun:
+    image: netp2p-test:latest
+    profiles: ["exit"]
+    depends_on: [manager-1]
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls: ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.forwarding=1"]
+    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
+      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
+      "--setup-key", "setup-key-exit", "--tun", "netp2p0",
+      "--hostname", "client-exit-tun",
+      "--status-file", "/status/client-exit-tun.json"]
+    volumes: ["./deploy/run:/status", "client-exit-tun-data:/data"]
+    environment:
+      NETP2P_DEBUG_DATA: "1"
+    networks:
+      default:
+      subnet-net:
+        ipv4_address: 198.18.0.20
+    healthcheck:
+      test: ["CMD-SHELL", "ip link show netp2p0 && ip addr show netp2p0 | grep -q 'inet 100.64.'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  # A plain host on the foreign subnet. The kernel answers ICMP and a listener
+  # serves TCP, so the source client can verify real end-to-end connectivity.
+  subnet-target:
+    image: netp2p-test:latest
+    profiles: ["exit"]
+    entrypoint: ["sleep", "infinity"]
+    networks:
+      subnet-net:
+        ipv4_address: 198.18.0.10
+
+  # Long-lived container used to submit admin transitions (promote the exit
+  # node, certify the subnet route) from the e2e script.
+  admin-cli:
+    image: netp2p-test:latest
+    profiles: ["exit"]
+    entrypoint: ["sleep", "infinity"]
+    volumes: ["./deploy:/config:ro"]
+
+networks:
+  subnet-net:
+    ipam:
+      config:
+        - subnet: 198.18.0.0/24
+
 volumes:
   client-a-tun-data:
   client-b-tun-data:
   client-sso-data:
+  client-exit-tun-data:

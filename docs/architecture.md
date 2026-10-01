@@ -119,10 +119,11 @@ Deny 优先于 allow。Peer membership 或 user group membership 变化后，man
 
 Manager 下发候选与约束，peer 根据本地探测结果选择路径：
 
-- direct path：libp2p hole punching 后的直连；
-- relay path：libp2p circuit relay；
-- multi-hop path：受信 overlay relay/gateway 组合；
-- exit path：提供受限外网访问的 gateway。
+- direct path：两个 client 经 libp2p hole punching 后的直连；
+- via-manager path：`client -> manager (-manager...) -> client`，manager 由 committee 认证并转发；
+- multi-hop path：多 manager 跳数的 via-manager（不重复 hop，受 `MaxHops` 约束）。
+
+跨子网/公网访问不是一种 path 类型，而是 certified `Route` + exit-node gateway（见「Exit Node 与 Subnet Route」）。
 
 路径不是简单“P2P 优先、relay 兜底”。每个候选路径维护 `LinkProfile`：
 
@@ -213,12 +214,44 @@ overlay frame 建立在 libp2p secure stream 上。数据面通过一个统一�
 2. 先用 conntrack flow 判断是否为已放行连接的回复；否则用 certified state 对 source→destination 方向执行 policy，允许则经 `/netp2p/data/frame/1.0.0` 发给对端；
 3. 接收端校验 `RemotePeer()`、source overlay IP、目标为本机 overlay IP，再走同样的 flow → policy 判定；
 4. userspace 模式下，若收到 ICMP echo request，接收端生成 echo reply 并经 frame stream 发回请求方；TUN 模式交给内核。
+5. 目标不是 overlay peer 时，按 certified `Route` 解析 gateway（见下节）；命中则经同一 `sendToPeer` 送给 gateway，否则丢弃。
 
 Flow 表（`internal/conntrack`）使「请求方向被 allow、回复方向被 deny」的连接仍能工作：reply 只需匹配一个本机已观测过的 flow，不必要求镜像 policy。
 
 数据面不再每包开一条 stream，也不再使用 JSON/base64：`internal/transport.FrameConn` 为每个远端 peer 维持一条长连接，二进制分帧为 `4 字节大端长度 + payload`，写入走有界发送队列（默认 1024，满则按 flow 丢弃并计数），断开后指数退避重连（250ms 起，上限 5s）。控制协议（login/sync/admin/presence/web）继续使用 `Envelope{protocol, payload}` JSON。
 
 加密与完整性由 libp2p secure channel 保证，不需要在 frame 层重复加密。
+
+## Exit Node 与 Subnet Route
+
+overlay 默认只做 peer ↔ peer。要访问 peer 背后的子网或公网，需要一个显式 certified 的 `Route`，gateway 只能是 **client peer**（`PeerRecord.IsExitNode`），manager 依旧只做 overlay 转发：
+
+```text
+Route {
+  id
+  destination        # IPv4 CIDR，0.0.0.0/0 表示公网 exit
+  routing_group      # 承担转发的 peer 组，必须至少有一个 IsExitNode peer
+  distribution_group # 允许使用该 route 的组
+  metric
+  masquerade         # gateway 出向是否做 SNAT
+}
+```
+
+控制面：`NetworkSettings.ExitNodeEnabled` 是总开关；`IsExitNode` 只能经 `update_peer` 由 admin 设置（`register_peer` 一律落 false）。`upsert_route` 在 BFT 内校验 destination 是合法 IPv4 CIDR、routing/distribution group 存在、routing group 至少有一个 exit-node peer。
+
+客户端：
+
+- `applySnapshot` 后为「可见且已准入」的 route 安装内核路由 `ip route replace <cidr> dev netp2p0`（撤销时 `ip route del`），并对 route 里出现过的 underlay 目的地址先 pin 更具体的路由，避免安装 `0.0.0.0/0` 时把 manager/IdP 的连接也吸进 TUN；
+- gateway 选择完全确定：候选是 routing group 内运行 `IsExitNode` 的 peer，先按 route `Metric` 再按 `Route.ID` 选 route，再取最低 `PeerID`；不消费 client 自报质量；
+- 出向包命中 route 时走与普通 peer 相同的 `sendToPeer`（含 quota、certified assignment、direct fallback）。
+
+Gateway（`internal/exitnode`，Linux + TUN only）：
+
+- `Reconcile` 幂等安装 `net.ipv4.ip_forward=1`（保存原值，退出恢复）与托管 iptables 规则：`POSTROUTING -s <overlayCidr> -d <destination> -j MASQUERADE`（仅 `Masquerade`）与 `FORWARD ... -j ACCEPT`；
+- 收到本机为该 route gateway 的 overlay 帧时，校验来源属于 `DistributionGroup`、目的落在 `destination`，把 payload 写入 TUN 注入内核，由内核完成转发、SNAT 与连接跟踪；
+- 回程：内核 DENAT 后目的为本机 overlay peer 的包回到 userspace，经 `sendToPeer` 送回源客户端。源客户端在 `handleFrame` 中放宽严格源地址校验的情形必须同时满足「来源是覆盖该 foreign 地址的 certified gateway」且「命中本机出向 flow」，否则按伪造丢弃。
+
+安全边界：manager/committee 只认证「谁可以成为 gateway、哪个 CIDR 被转发」，通道上的字节仍由 libp2p secure channel 保护；真正的隔离靠 iptables（只 NAT/FORWARD certified `destination`）与客户端的 flow + gateway 归属双重校验。非 Linux 或非 TUN 时 `internal/exitnode` 返回 `ErrUnsupported`，客户端显式告警并禁用本机 exit 能力，但不影响其作为普通 peer。
 
 ## 多跳路径与配额
 

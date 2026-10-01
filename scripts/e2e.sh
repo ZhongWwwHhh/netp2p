@@ -3,6 +3,7 @@
 #
 #   scripts/e2e.sh              userspace UDP data plane only
 #   scripts/e2e.sh --with-tun   also verify real kernel traffic through TUN
+#   scripts/e2e.sh --with-exit  also verify subnet/exit routing (implies --with-tun)
 #
 # Requires docker (with sudo) and python3. TUN mode additionally needs
 # /dev/net/tun on the host and runs TUN clients with NET_ADMIN. Set
@@ -17,11 +18,14 @@ COMPOSE=("${DOCKER[@]}" compose -f docker-compose.test.yml --env-file deploy/com
 IMAGE=netp2p-test:latest
 RUN_DIR=deploy/run
 WITH_TUN=0
+WITH_EXIT=0
+ADMIN_TOKEN=netp2p-admin-v0
 
 for arg in "$@"; do
   case "$arg" in
     --with-tun) WITH_TUN=1 ;;
-    *) printf 'unknown flag: %s\nusage: e2e.sh [--with-tun]\n' "$arg" >&2; exit 2 ;;
+    --with-exit) WITH_TUN=1; WITH_EXIT=1 ;;
+    *) printf 'unknown flag: %s\nusage: e2e.sh [--with-tun|--with-exit]\n' "$arg" >&2; exit 2 ;;
   esac
 done
 
@@ -46,6 +50,30 @@ wait_status() {
   return 1
 }
 
+wait_healthy() {
+  local service=$1
+  for _ in $(seq 1 30); do
+    state="$("${COMPOSE[@]}" ps --format json "$service" 2>/dev/null | python3 -c 'import json,sys; value=sys.stdin.read().strip(); print(json.loads(value).get("Health","") if value else "")')"
+    if [ "$state" = "healthy" ]; then return 0; fi
+    sleep 1
+  done
+  printf '%s never became healthy\n' "$service" >&2
+  return 1
+}
+
+admin_transition() {
+  local action=$1 file=$2 attempt
+  for attempt in $(seq 1 15); do
+    if "${COMPOSE[@]}" --profile exit exec -T admin-cli netp2pd \
+      --role admin --manager "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}" \
+      --admin-token "$ADMIN_TOKEN" --action "$action" --file "$file"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 probe() {
   local service=$1 source=$2 target=$3 timeout=$4
   "${COMPOSE[@]}" exec -T "$service" netp2p-probe \
@@ -59,6 +87,7 @@ cleanup() {
   fi
   profiles="--profile quorum"
   [ "$WITH_TUN" = "1" ] && profiles="$profiles --profile tun"
+  [ "$WITH_EXIT" = "1" ] && profiles="$profiles --profile exit"
   # shellcheck disable=SC2086
   "${COMPOSE[@]}" $profiles down -v --remove-orphans >/dev/null 2>&1 || true
 }
@@ -84,6 +113,7 @@ log "build image"
 log "start managers and clients"
 start_profiles=""
 [ "$WITH_TUN" = "1" ] && start_profiles="--profile tun"
+[ "$WITH_EXIT" = "1" ] && start_profiles="$start_profiles --profile exit"
 # shellcheck disable=SC2086
 "${COMPOSE[@]}" $start_profiles up -d --force-recreate
 
@@ -99,15 +129,7 @@ if [ "$WITH_TUN" = "1" ]; then
   A_TUN_MODE="$(status_field "$RUN_DIR/client-a-tun.json" mode)"
   [ "$A_TUN_MODE" = "tun" ] || fail "client-a-tun reported mode=$A_TUN_MODE, want tun"
   for service in client-a-tun client-b-tun; do
-    healthy=0
-    for _ in $(seq 1 30); do
-      if [ "$("${COMPOSE[@]}" ps --format json "$service" 2>/dev/null | python3 -c 'import json,sys; value=sys.stdin.read().strip(); print(json.loads(value).get("Health","") if value else "")')" = healthy ]; then
-        healthy=1
-        break
-      fi
-      sleep 1
-    done
-    [ "$healthy" = "1" ] || fail "$service never became healthy"
+    wait_healthy "$service" || fail "$service never became healthy"
   done
   echo "client-a-tun overlayIP=$A_TUN_IP ($A_TUN_MODE)"
   echo "client-b-tun overlayIP=$B_TUN_IP"
@@ -178,6 +200,54 @@ if [ "$WITH_TUN" = "1" ]; then
   external="$("${COMPOSE[@]}" exec -T client-a-tun getent hosts example.com 2>/dev/null | head -1 || true)"
   [ -n "$external" ] || fail "client-a-tun cannot forward external names after DNS takeover"
   echo "OK: forwarded DNS resolved through the TUN resolver ($external)"
+fi
+
+if [ "$WITH_EXIT" = "1" ]; then
+  log "EXIT: promote client-exit-tun and certify a subnet route"
+  wait_status "$RUN_DIR/client-exit-tun.json" client-exit-tun
+  EXIT_PEER_ID="$(status_field "$RUN_DIR/client-exit-tun.json" peerID)"
+  wait_healthy client-exit-tun
+  echo "exit gateway peerID=$EXIT_PEER_ID"
+
+  cat > deploy/exit-peer.json <<JSON
+{"peerId":"$EXIT_PEER_ID","isExitNode":true}
+JSON
+  cat > deploy/exit-route.json <<'JSON'
+{"id":"subnet-exit","destination":"198.18.0.0/24","routingGroup":"exit-gateways","distributionGroups":["clients-a"],"metric":10,"masquerade":true}
+JSON
+
+  admin_transition update-peer /config/exit-peer.json || fail "update-peer admin transition failed"
+  admin_transition upsert-route /config/exit-route.json || fail "upsert-route admin transition failed"
+  echo "OK: exit node promoted and subnet route certified"
+
+  log "EXIT: source client must install the certified subnet route"
+  route_ok=0
+  for _ in $(seq 1 30); do
+    if "${DOCKER[@]}" exec netp2p-client-a-tun-1 ip route show 198.18.0.0/24 2>/dev/null | grep -q netp2p0; then
+      route_ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$route_ok" = "1" ] || fail "client-a-tun never installed the subnet route"
+  echo "OK: client-a-tun routes 198.18.0.0/24 through netp2p0"
+
+  log "EXIT: kernel traffic must reach the foreign subnet through the gateway"
+  exit_ok=0
+  for _ in $(seq 1 30); do
+    if "${DOCKER[@]}" exec netp2p-client-a-tun-1 ping -c 1 -W 3 198.18.0.10 >/dev/null 2>&1; then
+      exit_ok=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$exit_ok" = "1" ] || fail "client-a-tun never reached the subnet target via the exit node"
+  echo "OK: subnet target reachable through the exit node"
+
+  log "EXIT: the gateway must masquerade overlay sources"
+  "${DOCKER[@]}" exec netp2p-client-exit-tun-1 iptables -t nat -S POSTROUTING | grep -q MASQUERADE \
+    || fail "exit node did not install a MASQUERADE rule"
+  echo "OK: gateway installed a MASQUERADE rule"
 fi
 
 log "quorum must certify a new peer with one manager down"
