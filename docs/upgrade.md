@@ -110,3 +110,23 @@ traffic, so it has stricter host requirements than a plain client:
   `--device /dev/net/tun`, and (for a real default route) a corresponding
   network attachment. Do not run the gateway as the unprivileged `runtime`
   stage without those grants.
+
+## Platform support and TUN privileges
+
+TUN is abstracted behind a platform `RouteConfigurator`, so the overlay works
+wherever the platform backend and the required privileges are available:
+
+- **Linux** (fully supported): `/dev/net/tun` plus `CAP_NET_ADMIN` (or root).
+  Routing and addressing use `iproute2`.
+- **macOS** (compile-verified, not covered by CI runtime tests): a utun device
+  is created through `wireguard-go/tun` and configured with `ifconfig`/`route`.
+  Requires root.
+- **Windows** (compile-verified, not covered by CI runtime tests): a Wintun
+  adapter is created through `wireguard-go/tun` and configured with `netsh` /
+  `route`. Requires administrator rights, and wireguard-go installs the signed
+  Wintun driver on first use.
+- Any other platform has no TUN backend; run with `--no-tun` to use the
+  userspace UDP packet endpoint.
+
+`netp2pd --role doctor` reports the platform TUN status and the privilege it
+needs, so an operator can confirm the environment before starting a node.

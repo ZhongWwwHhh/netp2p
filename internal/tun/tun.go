@@ -64,6 +64,7 @@ type Device struct {
 	name   string
 	run    Runner
 	output OutputRunner
+	config RouteConfigurator
 	closed bool
 
 	mu       sync.Mutex
@@ -72,6 +73,15 @@ type Device struct {
 	pinned   map[string]struct{}
 
 	underlayHosts []string
+}
+
+// configurator returns the platform route configurator, defaulting to the
+// platform implementation built from the runner and output hooks.
+func (device *Device) configurator() RouteConfigurator {
+	if device.config != nil {
+		return device.config
+	}
+	return platformConfigurator(device.run, device.output)
 }
 
 // Name returns the interface name, which the kernel may have adjusted when the
@@ -118,15 +128,14 @@ func (device *Device) Configure(address string, mtu int) error {
 	if mtu <= 0 {
 		mtu = DefaultMTU
 	}
-	if err := device.run("ip", "link", "set", "dev", device.name, "up"); err != nil {
+	config := device.configurator()
+	if err := config.SetUp(device.name); err != nil {
 		return err
 	}
-	// "replace" is idempotent, so reconfiguring on reconnect cannot fail with
-	// an address-already-exists error.
-	if err := device.run("ip", "addr", "replace", address+"/32", "dev", device.name); err != nil {
+	if err := config.AddAddress(device.name, address); err != nil {
 		return err
 	}
-	return device.run("ip", "link", "set", "dev", device.name, "mtu", fmt.Sprint(mtu))
+	return config.SetMTU(device.name, mtu)
 }
 
 // ReconcileRoutes makes the interface's /32 routes match exactly the peers the
@@ -170,7 +179,7 @@ func (device *Device) ReconcileRoutes(overlayIPs []string) error {
 	}
 	sort.Strings(added)
 	for _, address := range added {
-		if err := device.run("ip", "route", "replace", address+"/32", "dev", device.name); err != nil {
+		if err := device.configurator().AddRoute(device.name, address+"/32"); err != nil {
 			record(err)
 			continue
 		}
@@ -189,7 +198,7 @@ func (device *Device) ReconcileRoutes(overlayIPs []string) error {
 	for _, address := range removed {
 		// A route may already be gone if the interface was recreated; a failure
 		// here must not prevent the remaining removals.
-		record(device.run("ip", "route", "del", address+"/32", "dev", device.name))
+		record(device.configurator().DelRoute(device.name, address+"/32"))
 	}
 	return firstError
 }
@@ -262,7 +271,7 @@ func (device *Device) ReconcileNetworks(cidrs []string) error {
 		return added[i] < added[j]
 	})
 	for _, cidr := range added {
-		if err := device.run("ip", "route", "replace", cidr, "dev", device.name); err != nil {
+		if err := device.configurator().AddRoute(device.name, cidr); err != nil {
 			record(err)
 			continue
 		}
@@ -279,14 +288,14 @@ func (device *Device) ReconcileNetworks(cidrs []string) error {
 	}
 	sort.Strings(removed)
 	for _, cidr := range removed {
-		record(device.run("ip", "route", "del", cidr, "dev", device.name))
+		record(device.configurator().DelRoute(device.name, cidr))
 	}
 	if !capturesDefault {
 		if _, hadDefault := current["0.0.0.0/0"]; hadDefault {
 			// Leaving exit mode: drop the underlay pins we installed, once the
 			// overlay default route is gone.
 			for host := range pinned {
-				record(device.run("ip", "route", "del", host+"/32"))
+				record(device.configurator().DelHostRoute(host))
 			}
 		}
 	}
@@ -308,7 +317,7 @@ func (device *Device) pinUnderlayLocked(hosts []string, previous map[string]stru
 		if host == "" {
 			continue
 		}
-		if err := device.run("ip", "route", "replace", host+"/32", "via", gateway); err != nil {
+		if err := device.configurator().AddHostRoute(device.name, host, gateway); err != nil {
 			record(err)
 			continue
 		}
@@ -320,20 +329,7 @@ func (device *Device) pinUnderlayLocked(hosts []string, previous map[string]stru
 
 // defaultGateway reads "ip route show default" and returns the first gateway.
 func (device *Device) defaultGateway() string {
-	if device.output == nil {
-		return ""
-	}
-	out, err := device.output("ip", "route", "show", "default")
-	if err != nil {
-		return ""
-	}
-	fields := strings.Fields(out)
-	for index, field := range fields {
-		if field == "via" && index+1 < len(fields) {
-			return fields[index+1]
-		}
-	}
-	return ""
+	return device.configurator().DefaultGateway()
 }
 
 // Networks reports the CIDR routes the device currently believes it installed.

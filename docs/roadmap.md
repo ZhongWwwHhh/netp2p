@@ -81,7 +81,7 @@
 - [x] tracing（OTLP 可选导出）。
 - [x] Docker compose `multihop` / `quota` / `chaos` profile 与 `scripts/e2e.sh --with-multihop/--with-quota/--with-chaos` 断言。
 - [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
-- [ ] Windows/macOS TUN 实现（当前仅接口抽象与 stub）与第三方安全审计。
+- [x] Windows/macOS TUN 实现（`RouteConfigurator` 抽象 + `wireguard-go/tun` 后端；本机仅编译验证）与第三方安全审计（仍待外部完成）。
 - [x] threshold DKG（Pedersen DKG，`--dkg`，替代种子确定性派生）。
 - [x] billing（`/api/v1/quota/history`，见 Phase 11）。
 
@@ -128,3 +128,11 @@
 - [x] admin CLI 新增 `update-settings` 动作，用于 e2e 提交 `NetworkSettings`。
 - [x] GitHub Actions CI：`lint`（go vet + gofmt）、`test`（`go test ./internal/...`）、`e2e`（userspace）、`ui`（build + vitest）、`build-other`（GOOS=darwin/windows）。
 - [x] billing：`GET /api/v1/quota/history?period=daily|monthly` 从 decision log 的 `update_budget_usage` 按 budget + 时间桶重算（`budgets` 读权限）。
+
+## Phase 12：多平台 TUN
+
+- [x] `internal/tun` 抽出 `RouteConfigurator`（`SetUp`/`AddAddress`/`SetMTU`/`AddRoute`/`DelRoute`/`AddHostRoute`/`DelHostRoute`/`DefaultGateway`）；Device 不再直接调用 `ip`。
+- [x] Linux 保持 iproute2 实现与既有命令序列（单测不变）；darwin 用 `ifconfig`/`route`，windows 用 `netsh`/`route`。
+- [x] darwin/windows 通过 `golang.zx2c4.com/wireguard/tun`（新增依赖）创建 utun/Wintun 设备；其他平台返回 `ErrUnsupported`。
+- [x] `netp2pd --role doctor` 报告平台 TUN 可用性与所需权限；`docs/upgrade.md` 补齐各平台特权要求。
+- [x] 验收：`GOOS=darwin`/`GOOS=windows` `go build ./...` 通过；Linux `internal/tun` 测试全绿（真机运行验证不在本轮范围）。

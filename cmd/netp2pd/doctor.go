@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -74,10 +75,26 @@ func checkTUN(name string) doctorCheck {
 	device, err := tun.Open(name, nil)
 	if err != nil {
 		return doctorCheck{name: "tun", ok: false, warning: true,
-			detail: fmt.Sprintf("TUN device %q unavailable (%v); run with --no-tun to use the userspace endpoint", name, err)}
+			detail: fmt.Sprintf("TUN device %q unavailable on %s (%v); %s; run with --no-tun to use the userspace endpoint",
+				name, runtime.GOOS, err, tunPrivilegeHint())}
 	}
 	_ = device.Close()
-	return doctorCheck{name: "tun", ok: true, detail: fmt.Sprintf("TUN device %q is available", name)}
+	return doctorCheck{name: "tun", ok: true,
+		detail: fmt.Sprintf("TUN device %q is available on %s (%s)", name, runtime.GOOS, tunPrivilegeHint())}
+}
+
+// tunPrivilegeHint names the privilege the current platform needs for TUN.
+func tunPrivilegeHint() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "needs CAP_NET_ADMIN"
+	case "darwin":
+		return "needs root"
+	case "windows":
+		return "needs administrator rights and the Wintun driver"
+	default:
+		return "not implemented on this platform"
+	}
 }
 
 func checkDNS(listen string) doctorCheck {
