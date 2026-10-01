@@ -8,8 +8,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/client"
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/dns"
@@ -100,7 +102,11 @@ func runClient(ctx context.Context, options clientOptions) error {
 		log.Printf("tun device %s up with overlay address %s", tunDevice.Name(), overlayIP)
 		// The login snapshot was applied before the interface existed, so push
 		// the allowed routes now.
+		tunDevice.SetUnderlayHosts(underlayHosts(options))
+		netClient.EnableExitForwarding(netClient.Snapshot().State.OverlayCIDR, nil)
 		netClient.ReconcileRoutes()
+	} else if netClient.Self().IsExitNode {
+		log.Printf("this peer is a certified exit node but the userspace packet endpoint cannot forward kernel traffic; exit/subnet routing is disabled")
 	}
 	go netClient.SyncLoop(ctx)
 	go netClient.RunQuotaReporting(ctx)
@@ -210,6 +216,64 @@ func clientMode(tunDevice *tun.Device) string {
 		return "tun"
 	}
 	return "userspace"
+}
+
+// underlayHosts lists the manager addresses that must keep using the physical
+// default route while 0.0.0.0/0 is pointed at the overlay. It is a best-effort
+// heuristic: only literal addresses and hostnames are returned, and the TUN
+// device resolves the gateway itself.
+func underlayHosts(options clientOptions) []string {
+	hosts := make([]string, 0, 2)
+	if options.managerAddr != "" {
+		hosts = append(hosts, hostFromMultiaddr(options.managerAddr)...)
+	}
+	if options.seedPath != "" {
+		if seed, err := config.Load(options.seedPath); err == nil {
+			for _, manager := range seed.Managers {
+				hosts = append(hosts, hostFromMultiaddr(manager.Address)...)
+			}
+		}
+	}
+	return dedupeStrings(hosts)
+}
+
+// hostFromMultiaddr extracts the /dns4, /dns6, /ip4 or /ip6 component of a
+// multiaddr string. It is deliberately forgiving; unparseable input yields nil.
+func hostFromMultiaddr(value string) []string {
+	addr, err := multiaddr.NewMultiaddr(value)
+	if err != nil {
+		return nil
+	}
+	if host, err := addr.ValueForProtocol(multiaddr.P_DNS4); err == nil {
+		return []string{host}
+	}
+	if host, err := addr.ValueForProtocol(multiaddr.P_DNS6); err == nil {
+		return []string{host}
+	}
+	if host, err := addr.ValueForProtocol(multiaddr.P_IP4); err == nil {
+		return []string{host}
+	}
+	if host, err := addr.ValueForProtocol(multiaddr.P_IP6); err == nil {
+		return []string{host}
+	}
+	return nil
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // openClientSink prefers a TUN device so the host network stack routes real

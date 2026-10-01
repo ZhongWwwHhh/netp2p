@@ -71,6 +71,13 @@ func buildTransition(action, file, target string) (model.StateTransition, error)
 	case "remove-policy":
 		transition.Type = bft.TransitionRemovePolicy
 		transition.TargetID = target
+	case "update-peer":
+		transition.Type = bft.TransitionUpdatePeer
+		var peer model.PeerRecord
+		if err := loadRecord(file, &peer); err != nil {
+			return transition, err
+		}
+		transition.Peer = peer
 	case "upsert-route":
 		transition.Type = bft.TransitionUpsertRoute
 		var route model.Route

@@ -28,10 +28,12 @@ func defaultSeed() config.Seed {
 		SetupKeys: []model.SetupKey{
 			{ID: "setup-key-a", Name: "Bootstrap A", Token: "setup-key-a", TokenPrefix: "setup-key-a"[:8], Type: model.SetupKeyReusable, Groups: []string{"clients-a"}},
 			{ID: "setup-key-b", Name: "Bootstrap B", Token: "setup-key-b", TokenPrefix: "setup-key-b"[:8], Type: model.SetupKeyReusable, Groups: []string{"clients-b"}},
+			{ID: "setup-key-exit", Name: "Bootstrap Exit", Token: "setup-key-exit", TokenPrefix: "setup-key-exit"[:8], Type: model.SetupKeyReusable, Groups: []string{"exit-gateways"}},
 		},
 		Groups: []model.Group{
 			{ID: "clients-a"},
 			{ID: "clients-b"},
+			{ID: "exit-gateways"},
 		},
 		Policies: []model.Policy{
 			{
@@ -47,12 +49,18 @@ func defaultSeed() config.Seed {
 				ID: "deny-b-to-a-icmp", SourceGroups: []string{"clients-b"}, DestinationGroups: []string{"clients-a"},
 				Services: []model.Service{{Protocol: "icmp"}}, Effect: model.EffectDeny, Direction: model.DirectionUnidirectional, Priority: 100,
 			},
+			{
+				ID: "allow-a-to-exit", SourceGroups: []string{"clients-a"}, DestinationGroups: []string{"exit-gateways"},
+				Services: []model.Service{{Protocol: "icmp"}, {Protocol: "tcp", StartPort: 0, EndPort: 65535}},
+				Effect:   model.EffectAllow, Direction: model.DirectionUnidirectional,
+			},
 		},
 		Settings: model.NetworkSettings{
 			DNSDomain:           "netp2p.internal",
 			LoginExpirationDays: 30,
 			JWTGroupsEnabled:    true,
 			JWTGroupsClaimName:  "groups",
+			ExitNodeEnabled:     true,
 		},
 		OIDC: oidc.Config{
 			Issuer:      "http://mock-idp:9999",
