@@ -16,6 +16,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/conntrack"
+	"github.com/netp2p/netp2p/internal/exitnode"
 	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/model"
@@ -51,6 +52,8 @@ type Client struct {
 	pathStore       *pathStore
 	synthesizeICMP  bool
 	routesReady     bool
+	exitReconciler  *exitnode.Reconciler
+	exitNodeEnabled bool
 	dnsUpdater      DNSUpdater
 	dnsUpstreams    []string
 }
@@ -216,6 +219,8 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	client.mu.Unlock()
 	client.rememberPeers(snapshot, localPeerID)
 	client.reconcileRoutesWhenReady(overlayIPs)
+	client.reconcileNetworks()
+	client.reconcileExitNode()
 	client.publishDNS()
 	client.paths.replaceAssignments(snapshot.State.Assignments)
 	client.forwarding.Replace(snapshot.State)
@@ -275,6 +280,39 @@ func (client *Client) ReconcileRoutes() {
 	overlayIPs := client.peerOverlayIPsLocked()
 	client.mu.Unlock()
 	client.applyRoutes(overlayIPs)
+	client.reconcileNetworks()
+}
+
+// reconcileNetworks installs certified subnet/exit CIDR routes so the kernel
+// hands those destinations to the overlay instead of the default gateway.
+func (client *Client) reconcileNetworks() {
+	client.mu.RLock()
+	ready := client.routesReady
+	client.mu.RUnlock()
+	if !ready {
+		return
+	}
+	reconciler, ok := client.sink.(packet.RouteReconciler)
+	if !ok {
+		return
+	}
+	if err := reconciler.ReconcileNetworks(client.networkCIDRs()); err != nil {
+		log.Printf("overlay network route reconcile: %v", err)
+	}
+}
+
+// reconcileExitNode installs the kernel forwarding state for routes this node
+// serves as an exit/subnet gateway.
+func (client *Client) reconcileExitNode() {
+	client.mu.RLock()
+	reconciler := client.exitReconciler
+	client.mu.RUnlock()
+	if reconciler == nil {
+		return
+	}
+	if err := reconciler.Reconcile(client.exitRoutes()); err != nil {
+		log.Printf("exit node reconcile: %v", err)
+	}
 }
 
 // reconcileRoutesWhenReady installs routes for a freshly applied snapshot, but

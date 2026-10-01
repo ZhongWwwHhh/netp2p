@@ -28,6 +28,9 @@ type UserspaceICMP interface {
 // operating system sends those destinations into the overlay.
 type RouteReconciler interface {
 	ReconcileRoutes(overlayIPs []string) error
+	// ReconcileNetworks installs routes for certified subnet/exit CIDRs
+	// (for example a corporate /16 or 0.0.0.0/0), removing stale ones.
+	ReconcileNetworks(cidrs []string) error
 }
 
 type UDPPacketSink struct {

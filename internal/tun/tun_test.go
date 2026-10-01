@@ -87,6 +87,64 @@ func TestConfigureRequiresAddress(t *testing.T) {
 	}
 }
 
+func TestReconcileNetworksInstallsAndRemoves(t *testing.T) {
+	runner := &recordingRunner{fail: map[string]error{}}
+	device, _ := linkDevice(t, runner.run)
+
+	if err := device.ReconcileNetworks([]string{"10.10.0.0/16", "192.168.0.0/24"}); err != nil {
+		t.Fatalf("reconcile networks: %v", err)
+	}
+	if got := device.Networks(); len(got) != 2 {
+		t.Fatalf("networks = %v, want two entries", got)
+	}
+
+	if err := device.ReconcileNetworks([]string{"10.10.0.0/16"}); err != nil {
+		t.Fatalf("reconcile networks: %v", err)
+	}
+	lines := runner.lines()
+	last := lines[len(lines)-1]
+	if last != "ip route del 192.168.0.0/24 dev netp2p0" {
+		t.Fatalf("last command = %q, want stale network removal", last)
+	}
+	if got := device.Networks(); len(got) != 1 || got[0] != "10.10.0.0/16" {
+		t.Fatalf("networks = %v, want only 10.10.0.0/16", got)
+	}
+}
+
+func TestReconcileNetworksPinsUnderlayForDefaultRoute(t *testing.T) {
+	runner := &recordingRunner{fail: map[string]error{}}
+	device, _ := linkDevice(t, runner.run)
+	device.output = func(name string, args ...string) (string, error) {
+		return "default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.10 metric 100\n", nil
+	}
+	device.SetUnderlayHosts([]string{"198.51.100.7"})
+
+	if err := device.ReconcileNetworks([]string{"0.0.0.0/0"}); err != nil {
+		t.Fatalf("reconcile networks: %v", err)
+	}
+	lines := runner.lines()
+	wantPin := "ip route replace 198.51.100.7/32 via 192.0.2.1"
+	found := false
+	for _, line := range lines {
+		if line == wantPin {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("underlay pin not installed; commands = %v", lines)
+	}
+
+	// Dropping the default route removes the pin.
+	if err := device.ReconcileNetworks(nil); err != nil {
+		t.Fatalf("reconcile networks: %v", err)
+	}
+	lines = runner.lines()
+	last := lines[len(lines)-1]
+	if last != "ip route del 198.51.100.7/32" {
+		t.Fatalf("last command = %q, want underlay pin removal", last)
+	}
+}
+
 func TestReconcileRoutesAddsAndRemoves(t *testing.T) {
 	runner := &recordingRunner{fail: map[string]error{}}
 	device, _ := linkDevice(t, runner.run)

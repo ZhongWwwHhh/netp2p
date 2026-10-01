@@ -1,6 +1,11 @@
 package client
 
-import "path/filepath"
+import (
+	"path/filepath"
+
+	"github.com/netp2p/netp2p/internal/exitnode"
+	"github.com/netp2p/netp2p/internal/tun"
+)
 
 // Option customizes the client at construction time.
 type Option func(*Client)
@@ -26,9 +31,38 @@ func WithHostname(hostname string) Option {
 	}
 }
 
+// WithExitForwarding enables subnet/exit gateway duties for this client. The
+// overlay CIDR is the source range that gets masqueraded; run executes the
+// iptables/sysctl commands (nil uses the real runner).
+func WithExitForwarding(overlayCIDR string, run tun.Runner) Option {
+	return func(client *Client) {
+		if overlayCIDR == "" {
+			return
+		}
+		client.exitReconciler = exitnode.New(overlayCIDR, run)
+		client.exitNodeEnabled = true
+	}
+}
+
+// EnableExitForwarding turns on subnet/exit gateway duties after construction,
+// once the certified overlay CIDR is known. It is a no-op for an empty CIDR.
+func (client *Client) EnableExitForwarding(overlayCIDR string, run tun.Runner) {
+	if overlayCIDR == "" {
+		return
+	}
+	client.mu.Lock()
+	client.exitReconciler = exitnode.New(overlayCIDR, run)
+	client.exitNodeEnabled = true
+	client.mu.Unlock()
+	client.reconcileExitNode()
+}
+
 // Close releases persistence resources, flushing pending state to disk.
 func (client *Client) Close() {
 	if client.pathStore != nil {
 		client.pathStore.close()
+	}
+	if client.exitReconciler != nil {
+		_ = client.exitReconciler.Close()
 	}
 }

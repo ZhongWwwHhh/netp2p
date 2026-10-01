@@ -31,6 +31,10 @@ const DefaultMTU = 1280
 // tested without touching the host network.
 type Runner func(name string, args ...string) error
 
+// OutputRunner executes an external command and returns its stdout. It is used
+// to discover the current default route before taking over 0.0.0.0/0.
+type OutputRunner func(name string, args ...string) (string, error)
+
 // RunCommand executes a command and returns its combined output on failure.
 func RunCommand(name string, args ...string) error {
 	output, err := exec.Command(name, args...).CombinedOutput()
@@ -44,15 +48,30 @@ func RunCommand(name string, args ...string) error {
 	return nil
 }
 
+// RunCommandOutput executes a command and returns its stdout. It is the
+// discovery counterpart to RunCommand.
+func RunCommandOutput(name string, args ...string) (string, error) {
+	output, err := exec.Command(name, args...).Output()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
 // Device is a TUN network interface carrying overlay IPv4 packets.
 type Device struct {
 	file   io.ReadWriteCloser
 	name   string
 	run    Runner
+	output OutputRunner
 	closed bool
 
-	mu     sync.Mutex
-	routes map[string]struct{}
+	mu       sync.Mutex
+	routes   map[string]struct{}
+	networks map[string]struct{}
+	pinned   map[string]struct{}
+
+	underlayHosts []string
 }
 
 // Name returns the interface name, which the kernel may have adjusted when the
@@ -175,6 +194,160 @@ func (device *Device) ReconcileRoutes(overlayIPs []string) error {
 	return firstError
 }
 
+// SetUnderlayHosts records the manager/IdP destinations that must keep using
+// the physical default route even while 0.0.0.0/0 is pointed at the overlay.
+func (device *Device) SetUnderlayHosts(hosts []string) {
+	device.mu.Lock()
+	device.underlayHosts = append([]string(nil), hosts...)
+	device.mu.Unlock()
+}
+
+// ReconcileNetworks installs a route for each certified subnet/exit CIDR and
+// removes routes that are no longer advertised. Installing 0.0.0.0/0 also pins
+// the recorded underlay hosts to the original default gateway so the tunnel
+// itself keeps working.
+func (device *Device) ReconcileNetworks(cidrs []string) error {
+	desired := make(map[string]struct{}, len(cidrs))
+	capturesDefault := false
+	for _, cidr := range cidrs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		desired[cidr] = struct{}{}
+		if cidr == "0.0.0.0/0" {
+			capturesDefault = true
+		}
+	}
+
+	device.mu.Lock()
+	if device.closed {
+		device.mu.Unlock()
+		return fmt.Errorf("tun device is closed")
+	}
+	current := device.networks
+	device.networks = make(map[string]struct{}, len(desired))
+	pinned := device.pinned
+	device.pinned = make(map[string]struct{})
+	hosts := append([]string(nil), device.underlayHosts...)
+	device.mu.Unlock()
+
+	var firstError error
+	record := func(err error) {
+		if err != nil && firstError == nil {
+			firstError = err
+		}
+	}
+
+	if capturesDefault {
+		device.pinUnderlayLocked(hosts, pinned, record)
+	}
+
+	added := make([]string, 0, len(desired))
+	for cidr := range desired {
+		if _, exists := current[cidr]; exists {
+			device.mu.Lock()
+			device.networks[cidr] = struct{}{}
+			device.mu.Unlock()
+			continue
+		}
+		added = append(added, cidr)
+	}
+	sort.Slice(added, func(i, j int) bool {
+		// Install more specific prefixes before 0.0.0.0/0 so the default route
+		// never briefly swallows overlay traffic.
+		if (added[i] == "0.0.0.0/0") != (added[j] == "0.0.0.0/0") {
+			return added[j] == "0.0.0.0/0"
+		}
+		return added[i] < added[j]
+	})
+	for _, cidr := range added {
+		if err := device.run("ip", "route", "replace", cidr, "dev", device.name); err != nil {
+			record(err)
+			continue
+		}
+		device.mu.Lock()
+		device.networks[cidr] = struct{}{}
+		device.mu.Unlock()
+	}
+
+	removed := make([]string, 0)
+	for cidr := range current {
+		if _, exists := desired[cidr]; !exists {
+			removed = append(removed, cidr)
+		}
+	}
+	sort.Strings(removed)
+	for _, cidr := range removed {
+		record(device.run("ip", "route", "del", cidr, "dev", device.name))
+	}
+	if !capturesDefault {
+		if _, hadDefault := current["0.0.0.0/0"]; hadDefault {
+			// Leaving exit mode: drop the underlay pins we installed, once the
+			// overlay default route is gone.
+			for host := range pinned {
+				record(device.run("ip", "route", "del", host+"/32"))
+			}
+		}
+	}
+	return firstError
+}
+
+// pinUnderlayLocked re-installs host routes to the physical default gateway so
+// the manager control stream survives a 0.0.0.0/0 overlay route.
+func (device *Device) pinUnderlayLocked(hosts []string, previous map[string]struct{}, record func(error)) {
+	if len(hosts) == 0 {
+		return
+	}
+	gateway := device.defaultGateway()
+	if gateway == "" {
+		return
+	}
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		if err := device.run("ip", "route", "replace", host+"/32", "via", gateway); err != nil {
+			record(err)
+			continue
+		}
+		device.mu.Lock()
+		device.pinned[host] = struct{}{}
+		device.mu.Unlock()
+	}
+}
+
+// defaultGateway reads "ip route show default" and returns the first gateway.
+func (device *Device) defaultGateway() string {
+	if device.output == nil {
+		return ""
+	}
+	out, err := device.output("ip", "route", "show", "default")
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(out)
+	for index, field := range fields {
+		if field == "via" && index+1 < len(fields) {
+			return fields[index+1]
+		}
+	}
+	return ""
+}
+
+// Networks reports the CIDR routes the device currently believes it installed.
+func (device *Device) Networks() []string {
+	device.mu.Lock()
+	defer device.mu.Unlock()
+	result := make([]string, 0, len(device.networks))
+	for cidr := range device.networks {
+		result = append(result, cidr)
+	}
+	sort.Strings(result)
+	return result
+}
+
 // Routes reports the routes the device currently believes it installed. It
 // exists for tests and diagnostics.
 func (device *Device) Routes() []string {
@@ -198,5 +371,9 @@ func Open(name string, run Runner) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Device{file: file, name: actualName, run: run, routes: make(map[string]struct{})}, nil
+	return &Device{
+		file: file, name: actualName, run: run, output: RunCommandOutput,
+		routes: make(map[string]struct{}), networks: make(map[string]struct{}),
+		pinned: make(map[string]struct{}),
+	}, nil
 }

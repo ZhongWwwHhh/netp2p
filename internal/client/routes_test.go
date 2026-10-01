@@ -8,7 +8,8 @@ import (
 
 // A sink that records the routes it is asked to install.
 type recordingSink struct {
-	routes [][]string
+	routes   [][]string
+	networks [][]string
 }
 
 func (sink *recordingSink) ReadPacket() ([]byte, error) { return nil, nil }
@@ -16,6 +17,10 @@ func (sink *recordingSink) WritePacket([]byte) error    { return nil }
 func (sink *recordingSink) Close() error                { return nil }
 func (sink *recordingSink) ReconcileRoutes(overlayIPs []string) error {
 	sink.routes = append(sink.routes, append([]string(nil), overlayIPs...))
+	return nil
+}
+func (sink *recordingSink) ReconcileNetworks(cidrs []string) error {
+	sink.networks = append(sink.networks, append([]string(nil), cidrs...))
 	return nil
 }
 

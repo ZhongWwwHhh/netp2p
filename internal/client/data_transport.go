@@ -52,7 +52,25 @@ func (client *Client) forwardLocalPacket(ctx context.Context, raw []byte) {
 	}
 	destination, err := client.peerByIP(ipPacket.Destination())
 	if err != nil {
-		debugDrop("forward: %v", err)
+		// Not an overlay peer: try a certified subnet/exit route.
+		gateway, ok := client.subnetGateway(ipPacket.Destination())
+		if !ok {
+			debugDrop("forward: %v", err)
+			return
+		}
+		flow, hasFlow := ipPacket.Flow()
+		if !(hasFlow && client.flows.ReplyAllowed(conntrack.Key(flow))) {
+			protocolName, port := describePacket(ipPacket)
+			allowed, authErr := client.authorize(gateway, protocolName, port)
+			if authErr != nil || !allowed {
+				debugDrop("forward: denied subnet %s/%d via %s (err=%v)", protocolName, port, gateway.OverlayIP, authErr)
+				return
+			}
+			if hasFlow {
+				client.flows.Observe(conntrack.Key(flow))
+			}
+		}
+		client.sendToPeer(gateway, raw)
 		return
 	}
 	flow, hasFlow := ipPacket.Flow()
@@ -163,6 +181,15 @@ func (client *Client) handleFrame(remote peer.ID, raw []byte) {
 		return
 	}
 	if source.OverlayIP != ipPacket.Source().String() {
+		// A certified exit/subnet gateway legitimately speaks for foreign
+		// source addresses when it masquerades a flow we originated. Accept
+		// the return leg only when the gateway covers the source address and
+		// the packet matches an outbound flow; everything else is spoofing.
+		if flow, hasFlow := ipPacket.Flow(); hasFlow && client.flows.ReplyAllowed(conntrack.Key(flow)) &&
+			client.gatewayCoversRemote(source, ipPacket.Source()) {
+			_ = client.sink.WritePacket(raw)
+			return
+		}
 		debugDrop("inbound: source %s does not own %s", source.OverlayIP, ipPacket.Source())
 		return
 	}
@@ -170,7 +197,17 @@ func (client *Client) handleFrame(remote peer.ID, raw []byte) {
 		return
 	}
 	if ipPacket.Destination().String() != client.selfOverlayIP() {
-		// v0 does not forward on behalf of third parties.
+		// A certified exit/subnet gateway hands the packet to the local network
+		// stack; the kernel forwards and masquerades it.
+		if client.exitNodeForPacket(source, ipPacket.Destination()) {
+			flow, hasFlow := ipPacket.Flow()
+			if hasFlow {
+				client.flows.Observe(conntrack.Key(flow))
+			}
+			_ = client.sink.WritePacket(raw)
+			return
+		}
+		// Otherwise we do not forward on behalf of third parties.
 		debugDrop("inbound: not for us (%s)", ipPacket.Destination())
 		return
 	}
