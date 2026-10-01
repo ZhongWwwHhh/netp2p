@@ -485,8 +485,12 @@ func TestAdminTransitions(t *testing.T) {
 	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionRemoveSetupKey, TargetID: "key-c"}); err != nil {
 		t.Fatal(err)
 	}
+	state.Groups[0].PeerIDs = []string{"exit-1"}
+	state.Peers = append(state.Peers, model.PeerRecord{
+		PeerID: "exit-1", OverlayIP: "100.64.0.9", Groups: []string{"clients-a"}, IsExitNode: true,
+	})
 	// Route upsert/remove.
-	route := model.Route{ID: "route-x", Destination: "10.0.0.0/8"}
+	route := model.Route{ID: "route-x", Destination: "10.0.0.0/8", RoutingGroup: "clients-a"}
 	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertRoute, Route: &route}); err != nil {
 		t.Fatal(err)
 	}

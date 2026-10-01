@@ -54,6 +54,9 @@ type PeerRecord struct {
 	// LastLogin is when the peer last authenticated. SSO-registered peers can
 	// be required to re-authenticate periodically.
 	LastLogin string `json:"lastLogin,omitempty"`
+	// IsExitNode marks a certified client that may forward overlay traffic
+	// toward certified subnet destinations. It is admin controlled.
+	IsExitNode bool `json:"isExitNode,omitempty"`
 }
 
 // NetworkSettings carries network-wide toggles that are part of certified
@@ -92,6 +95,9 @@ type NetworkSettings struct {
 	// DefaultFlowClass is the planner's default scoring class when no route or
 	// policy overrides it.
 	DefaultFlowClass string `json:"defaultFlowClass,omitempty"`
+	// ExitNodeEnabled enables subnet/exit routing globally. Individual traffic
+	// still requires a certified Route.
+	ExitNodeEnabled bool `json:"exitNodeEnabled,omitempty"`
 }
 
 type PathKind string
@@ -446,6 +452,8 @@ type Route struct {
 	BudgetIDs         []string `json:"budgetIds,omitempty"`
 	// FlowClass overrides the network default scoring class for this route.
 	FlowClass string `json:"flowClass,omitempty"`
+	// Masquerade asks an exit node to SNAT traffic toward this destination.
+	Masquerade bool `json:"masquerade,omitempty"`
 }
 
 type TrafficBudget struct {

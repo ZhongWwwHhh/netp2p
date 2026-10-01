@@ -748,6 +748,7 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		peer := transition.Peer
 		peer.OverlayIP = address
+		peer.IsExitNode = false
 		peer.Groups = dedupeSorted(groups)
 		peer.DNSLabel = allocateDNSLabel(*state, peer.Hostname)
 		state.Peers = append(state.Peers, peer)
@@ -806,6 +807,9 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 	case TransitionUpsertRoute:
 		if transition.Route == nil || transition.Route.ID == "" {
 			return fmt.Errorf("route record is required")
+		}
+		if err := validateRoute(*state, *transition.Route); err != nil {
+			return err
 		}
 		for index := range state.Routes {
 			if state.Routes[index].ID == transition.Route.ID {
@@ -902,9 +906,18 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			if transition.Peer.OverlayIP != "" {
 				return fmt.Errorf("client may not choose overlay IP")
 			}
-			state.Peers[index].Hostname = transition.Peer.Hostname
-			state.Peers[index].OS = transition.Peer.OS
-			state.Peers[index].ClientVersion = transition.Peer.ClientVersion
+			// Metadata fields are optional in a partial update (for example an
+			// admin action that only toggles the exit-node flag); only apply
+			// the ones the caller actually supplied.
+			if transition.Peer.Hostname != "" {
+				state.Peers[index].Hostname = transition.Peer.Hostname
+			}
+			if transition.Peer.OS != "" {
+				state.Peers[index].OS = transition.Peer.OS
+			}
+			if transition.Peer.ClientVersion != "" {
+				state.Peers[index].ClientVersion = transition.Peer.ClientVersion
+			}
 			if transition.Peer.UserID != "" {
 				if findUser(*state, transition.Peer.UserID) == nil {
 					return fmt.Errorf("unknown user %q", transition.Peer.UserID)
@@ -914,6 +927,7 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			if transition.Peer.LastLogin != "" {
 				state.Peers[index].LastLogin = transition.Peer.LastLogin
 			}
+			state.Peers[index].IsExitNode = transition.Peer.IsExitNode
 			if state.Peers[index].DNSLabel == "" {
 				state.Peers[index].DNSLabel = allocateDNSLabel(*state, transition.Peer.Hostname)
 			}
@@ -1274,6 +1288,60 @@ func requireGroups(state *model.NetworkState, groups []string) error {
 		}
 	}
 	return nil
+}
+
+func validateRoute(state model.NetworkState, route model.Route) error {
+	if route.Destination == "" {
+		return fmt.Errorf("route destination is required")
+	}
+	prefix, err := netip.ParsePrefix(route.Destination)
+	if err != nil {
+		return fmt.Errorf("route destination %q is not an IPv4 CIDR: %w", route.Destination, err)
+	}
+	if prefix.Addr().Is4() == false {
+		return fmt.Errorf("route destination %q must be IPv4", route.Destination)
+	}
+	if prefix.Bits() < 0 || prefix.Bits() > 32 {
+		return fmt.Errorf("route destination %q has an invalid prefix length", route.Destination)
+	}
+	if route.RoutingGroup == "" {
+		return fmt.Errorf("route routing group is required")
+	}
+	if err := requireGroups(&state, append([]string{route.RoutingGroup}, route.DistributionGroup...)); err != nil {
+		return err
+	}
+	hasExitNode := false
+	for _, peer := range state.Peers {
+		if !peer.IsExitNode || !groupContainsPeer(state.Groups, route.RoutingGroup, peer.PeerID) {
+			continue
+		}
+		hasExitNode = true
+		break
+	}
+	if !hasExitNode {
+		return fmt.Errorf("routing group %q has no exit-node peer", route.RoutingGroup)
+	}
+	if route.Metric < 0 {
+		return fmt.Errorf("route metric cannot be negative")
+	}
+	if route.MaxHops < 0 {
+		return fmt.Errorf("route max hops cannot be negative")
+	}
+	return nil
+}
+
+func groupContainsPeer(groups []model.Group, groupID, peerID string) bool {
+	for _, group := range groups {
+		if group.ID != groupID {
+			continue
+		}
+		for _, member := range group.PeerIDs {
+			if member == peerID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func validateManagerPath(committee []model.CommitteeMember, path model.PathSpec) error {

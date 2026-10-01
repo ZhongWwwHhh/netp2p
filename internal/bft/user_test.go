@@ -58,7 +58,7 @@ func TestRegisterPeerUnionsSetupKeyAndUserGroups(t *testing.T) {
 	if len(peer.Groups) != 2 {
 		t.Fatalf("peer groups = %v, want servers+eng", peer.Groups)
 	}
-	if !groupContainsPeer(state, "eng", "peer-a") || !groupContainsPeer(state, "servers", "peer-a") {
+	if !groupContainsPeer(state.Groups, "eng", "peer-a") || !groupContainsPeer(state.Groups, "servers", "peer-a") {
 		t.Fatalf("peer not recorded in both groups: %+v", state.Groups)
 	}
 }
@@ -94,10 +94,10 @@ func TestUpdateUserGroupsPropagatesToPeers(t *testing.T) {
 		Type: TransitionUpdateUserGroups,
 		User: &model.User{ID: "user-1", AutoGroups: []string{"ops"}},
 	})
-	if groupContainsPeer(state, "eng", "peer-a") {
+	if groupContainsPeer(state.Groups, "eng", "peer-a") {
 		t.Fatal("peer must leave the removed jwt group")
 	}
-	if !groupContainsPeer(state, "ops", "peer-a") {
+	if !groupContainsPeer(state.Groups, "ops", "peer-a") {
 		t.Fatalf("peer must join the new group: %+v", state.Groups)
 	}
 	peer := state.Peers[0]
@@ -148,7 +148,7 @@ func TestRemoveUserRemovesTheirPeers(t *testing.T) {
 	if len(state.Peers) != 0 {
 		t.Fatalf("peers = %d", len(state.Peers))
 	}
-	if groupContainsUser(state, "eng", "user-1") || groupContainsPeer(state, "eng", "peer-a") {
+	if groupContainsUser(state, "eng", "user-1") || groupContainsPeer(state.Groups, "eng", "peer-a") {
 		t.Fatal("removed user must leave group membership")
 	}
 }
@@ -208,20 +208,6 @@ func groupContainsUser(state model.NetworkState, groupID, userID string) bool {
 		}
 		for _, member := range group.UserIDs {
 			if member == userID {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func groupContainsPeer(state model.NetworkState, groupID, peerID string) bool {
-	for _, group := range state.Groups {
-		if group.ID != groupID {
-			continue
-		}
-		for _, member := range group.PeerIDs {
-			if member == peerID {
 				return true
 			}
 		}

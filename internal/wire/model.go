@@ -75,6 +75,7 @@ func PeerRecordToProto(peer model.PeerRecord) *pb.PeerRecord {
 		UserId:        peer.UserID,
 		DnsLabel:      peer.DNSLabel,
 		LastLogin:     peer.LastLogin,
+		IsExitNode:    peer.IsExitNode,
 	}
 }
 
@@ -93,6 +94,7 @@ func PeerRecordFromProto(message *pb.PeerRecord) model.PeerRecord {
 		UserID:        message.GetUserId(),
 		DNSLabel:      message.GetDnsLabel(),
 		LastLogin:     message.GetLastLogin(),
+		IsExitNode:    message.GetIsExitNode(),
 	}
 }
 
@@ -115,6 +117,7 @@ func NetworkSettingsToProto(settings model.NetworkSettings) *pb.NetworkSettings 
 		QuotaEnforcementEnabled:      settings.QuotaEnforcementEnabled,
 		QuotaReportIntervalSeconds:   int32(settings.QuotaReportIntervalSeconds),
 		DefaultFlowClass:             settings.DefaultFlowClass,
+		ExitNodeEnabled:              settings.ExitNodeEnabled,
 	}
 }
 
@@ -140,6 +143,7 @@ func NetworkSettingsFromProto(message *pb.NetworkSettings) model.NetworkSettings
 		QuotaEnforcementEnabled:      message.GetQuotaEnforcementEnabled(),
 		QuotaReportIntervalSeconds:   int(message.GetQuotaReportIntervalSeconds()),
 		DefaultFlowClass:             message.GetDefaultFlowClass(),
+		ExitNodeEnabled:              message.GetExitNodeEnabled(),
 	}
 }
 
@@ -371,6 +375,7 @@ func RouteToProto(route model.Route) *pb.Route {
 		MaxHops:            int32(route.MaxHops),
 		BudgetIds:          cloneStrings(route.BudgetIDs),
 		FlowClass:          route.FlowClass,
+		Masquerade:         route.Masquerade,
 	}
 }
 
@@ -388,6 +393,7 @@ func RouteFromProto(message *pb.Route) model.Route {
 		MaxHops:           int(message.GetMaxHops()),
 		BudgetIDs:         cloneStrings(message.GetBudgetIds()),
 		FlowClass:         message.GetFlowClass(),
+		Masquerade:        message.GetMasquerade(),
 	}
 }
 

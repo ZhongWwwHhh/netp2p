@@ -49,6 +49,7 @@ message PeerRecord {
   string user_id = 8;
   string dns_label = 9;
   string last_login = 10;
+  bool is_exit_node = 11;
 }
 
 message NetworkSettings {
@@ -69,6 +70,7 @@ message NetworkSettings {
   bool quota_enforcement_enabled = 15;
   int32 quota_report_interval_seconds = 16;
   string default_flow_class = 17;
+  bool exit_node_enabled = 18;
 }
 
 message PathSpec {
@@ -201,6 +203,7 @@ message Route {
   int32 max_hops = 7;
   repeated string budget_ids = 8;
   string flow_class = 9;
+  bool masquerade = 10;
 }
 
 message TrafficBudget {

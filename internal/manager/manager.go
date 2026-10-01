@@ -532,6 +532,10 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 				PeerID: registration.PeerID, Addresses: registration.Addresses,
 				Hostname: registration.Hostname, OS: registration.OS, ClientVersion: registration.ClientVersion,
 				UserID: registration.UserID, LastLogin: registration.LastLogin,
+				// IsExitNode is an admin-controlled capability. A peer's routine
+				// metadata refresh must not clear it, so carry the certified
+				// value forward; only an explicit admin transition may change it.
+				IsExitNode: peer.IsExitNode,
 			},
 		}
 		snapshot, err := manager.SubmitAs(transition, auth.PeerActor(registration.PeerID))

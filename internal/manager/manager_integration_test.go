@@ -107,6 +107,25 @@ func TestFourManagerMeshRegistersPeer(t *testing.T) {
 			t.Fatalf("manager %s height=%d, want 2", engine.Leader(0, 0).ID, engine.Height())
 		}
 	}
+
+	// An admin may promote the peer to an exit node; a later routine metadata
+	// refresh must not silently clear that capability.
+	if _, err := managers[0].Submit(model.StateTransition{
+		Type: bft.TransitionUpdatePeer,
+		Peer: model.PeerRecord{PeerID: "peer-a", IsExitNode: true},
+	}); err != nil {
+		t.Fatalf("promote exit node: %v", err)
+	}
+	refreshed, updated, err := managers[0].Register(Registration{SetupKey: "key-a", PeerID: "peer-a", Hostname: "renamed"})
+	if err != nil {
+		t.Fatalf("metadata refresh: %v", err)
+	}
+	if !updated.IsExitNode {
+		t.Fatal("metadata refresh cleared the exit-node capability")
+	}
+	if !findPeer(refreshed, "peer-a").IsExitNode {
+		t.Fatal("certified state lost the exit-node capability after a refresh")
+	}
 }
 
 func findEngineLeader(engines []*bft.Engine, height uint64) int {

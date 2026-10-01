@@ -214,6 +214,7 @@ type PeerRecord struct {
 	UserId        string                 `protobuf:"bytes,8,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
 	DnsLabel      string                 `protobuf:"bytes,9,opt,name=dns_label,json=dnsLabel,proto3" json:"dns_label,omitempty"`
 	LastLogin     string                 `protobuf:"bytes,10,opt,name=last_login,json=lastLogin,proto3" json:"last_login,omitempty"`
+	IsExitNode    bool                   `protobuf:"varint,11,opt,name=is_exit_node,json=isExitNode,proto3" json:"is_exit_node,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -318,6 +319,13 @@ func (x *PeerRecord) GetLastLogin() string {
 	return ""
 }
 
+func (x *PeerRecord) GetIsExitNode() bool {
+	if x != nil {
+		return x.IsExitNode
+	}
+	return false
+}
+
 type NetworkSettings struct {
 	state                        protoimpl.MessageState `protogen:"open.v1"`
 	DnsDomain                    string                 `protobuf:"bytes,1,opt,name=dns_domain,json=dnsDomain,proto3" json:"dns_domain,omitempty"`
@@ -337,6 +345,7 @@ type NetworkSettings struct {
 	QuotaEnforcementEnabled      bool                   `protobuf:"varint,15,opt,name=quota_enforcement_enabled,json=quotaEnforcementEnabled,proto3" json:"quota_enforcement_enabled,omitempty"`
 	QuotaReportIntervalSeconds   int32                  `protobuf:"varint,16,opt,name=quota_report_interval_seconds,json=quotaReportIntervalSeconds,proto3" json:"quota_report_interval_seconds,omitempty"`
 	DefaultFlowClass             string                 `protobuf:"bytes,17,opt,name=default_flow_class,json=defaultFlowClass,proto3" json:"default_flow_class,omitempty"`
+	ExitNodeEnabled              bool                   `protobuf:"varint,18,opt,name=exit_node_enabled,json=exitNodeEnabled,proto3" json:"exit_node_enabled,omitempty"`
 	unknownFields                protoimpl.UnknownFields
 	sizeCache                    protoimpl.SizeCache
 }
@@ -488,6 +497,13 @@ func (x *NetworkSettings) GetDefaultFlowClass() string {
 		return x.DefaultFlowClass
 	}
 	return ""
+}
+
+func (x *NetworkSettings) GetExitNodeEnabled() bool {
+	if x != nil {
+		return x.ExitNodeEnabled
+	}
+	return false
 }
 
 type PathSpec struct {
@@ -1584,6 +1600,7 @@ type Route struct {
 	MaxHops            int32                  `protobuf:"varint,7,opt,name=max_hops,json=maxHops,proto3" json:"max_hops,omitempty"`
 	BudgetIds          []string               `protobuf:"bytes,8,rep,name=budget_ids,json=budgetIds,proto3" json:"budget_ids,omitempty"`
 	FlowClass          string                 `protobuf:"bytes,9,opt,name=flow_class,json=flowClass,proto3" json:"flow_class,omitempty"`
+	Masquerade         bool                   `protobuf:"varint,10,opt,name=masquerade,proto3" json:"masquerade,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -1679,6 +1696,13 @@ func (x *Route) GetFlowClass() string {
 		return x.FlowClass
 	}
 	return ""
+}
+
+func (x *Route) GetMasquerade() bool {
+	if x != nil {
+		return x.Masquerade
+	}
+	return false
 }
 
 type TrafficBudget struct {
@@ -3772,7 +3796,7 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\tthreshold\x18\x01 \x01(\rR\tthreshold\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\rR\x04size\x12(\n" +
 	"\x10group_public_key\x18\x03 \x01(\fR\x0egroupPublicKey\x12'\n" +
-	"\x0fcommittee_epoch\x18\x04 \x01(\x04R\x0ecommitteeEpoch\"\xa2\x02\n" +
+	"\x0fcommittee_epoch\x18\x04 \x01(\x04R\x0ecommitteeEpoch\"\xc4\x02\n" +
 	"\n" +
 	"PeerRecord\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x1d\n" +
@@ -3787,7 +3811,9 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\tdns_label\x18\t \x01(\tR\bdnsLabel\x12\x1d\n" +
 	"\n" +
 	"last_login\x18\n" +
-	" \x01(\tR\tlastLogin\"\x96\a\n" +
+	" \x01(\tR\tlastLogin\x12 \n" +
+	"\fis_exit_node\x18\v \x01(\bR\n" +
+	"isExitNode\"\xc2\a\n" +
 	"\x0fNetworkSettings\x12\x1d\n" +
 	"\n" +
 	"dns_domain\x18\x01 \x01(\tR\tdnsDomain\x122\n" +
@@ -3807,7 +3833,8 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\x19probe_bandwidth_budget_kb\x18\x0e \x01(\x05R\x16probeBandwidthBudgetKb\x12:\n" +
 	"\x19quota_enforcement_enabled\x18\x0f \x01(\bR\x17quotaEnforcementEnabled\x12A\n" +
 	"\x1dquota_report_interval_seconds\x18\x10 \x01(\x05R\x1aquotaReportIntervalSeconds\x12,\n" +
-	"\x12default_flow_class\x18\x11 \x01(\tR\x10defaultFlowClass\"\xfa\x01\n" +
+	"\x12default_flow_class\x18\x11 \x01(\tR\x10defaultFlowClass\x12*\n" +
+	"\x11exit_node_enabled\x18\x12 \x01(\bR\x0fexitNodeEnabled\"\xfa\x01\n" +
 	"\bPathSpec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12!\n" +
@@ -3918,7 +3945,7 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\bpriority\x18\t \x01(\x05R\bpriority\x12\x1d\n" +
 	"\n" +
 	"flow_class\x18\n" +
-	" \x01(\tR\tflowClass\"\xae\x02\n" +
+	" \x01(\tR\tflowClass\"\xce\x02\n" +
 	"\x05Route\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12 \n" +
 	"\vdestination\x18\x02 \x01(\tR\vdestination\x12#\n" +
@@ -3930,7 +3957,11 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\n" +
 	"budget_ids\x18\b \x03(\tR\tbudgetIds\x12\x1d\n" +
 	"\n" +
-	"flow_class\x18\t \x01(\tR\tflowClass\"\xba\x03\n" +
+	"flow_class\x18\t \x01(\tR\tflowClass\x12\x1e\n" +
+	"\n" +
+	"masquerade\x18\n" +
+	" \x01(\bR\n" +
+	"masquerade\"\xba\x03\n" +
 	"\rTrafficBudget\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12!\n" +
 	"\fsubject_type\x18\x02 \x01(\tR\vsubjectType\x12\x1d\n" +
