@@ -4,6 +4,7 @@ package bft
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -75,11 +76,15 @@ type (
 )
 
 type Engine struct {
-	mu              sync.RWMutex
-	committee       []model.CommitteeMember
-	byID            map[string]model.CommitteeMember
-	blsKeys         *bls.KeySet
-	blsIndex        map[string]int
+	mu        sync.RWMutex
+	committee []model.CommitteeMember
+	byID      map[string]model.CommitteeMember
+	blsKeys   *bls.KeySet
+	blsIndex  map[string]int
+	// dkgLoader returns locally held DKG shares by committee epoch. When set, a
+	// rotation that carries an external group public key adopts that material
+	// instead of the deterministic seed derivation.
+	dkgLoader       func(epoch uint64) (*bls.KeySet, bool)
 	committeeConfig model.CommitteeConfig
 	privateKey      ed25519.PrivateKey
 	localID         string
@@ -332,6 +337,13 @@ func (engine *Engine) LocalID() string {
 	return engine.localID
 }
 
+// CommitteeEpoch returns the epoch the engine is currently signing under.
+func (engine *Engine) CommitteeEpoch() uint64 {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return engine.committeeConfig.CommitteeEpoch
+}
+
 func (engine *Engine) CurrentState() model.NetworkState {
 	engine.mu.RLock()
 	defer engine.mu.RUnlock()
@@ -423,6 +435,12 @@ func (engine *Engine) CatchUp(snapshot model.SignedSnapshot) error {
 	engine.committed[snapshot.Height] = snapshot
 	delete(engine.proposals, snapshot.Height)
 	delete(engine.votes, snapshot.Height)
+	// A snapshot may carry a committee change (membership or key rotation); adopt
+	// it so this manager can vote at the new epoch.
+	if err := engine.adoptCommitteeLocked(snapshot.Transition); err != nil {
+		engine.mu.Unlock()
+		return err
+	}
 	listeners := make([]func(model.SignedSnapshot), len(engine.listeners))
 	copy(listeners, engine.listeners)
 	engine.mu.Unlock()
@@ -634,6 +652,9 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 // adoptCommitteeLocked applies a membership or key-rotation transition to the
 // engine so subsequent heights use the new committee and epoch.
 func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) error {
+	if transition.Type != TransitionUpdateCommittee && transition.Type != TransitionRotateCommittee {
+		return nil
+	}
 	committee := append([]model.CommitteeMember(nil), engine.committee...)
 	epoch := engine.committeeConfig.CommitteeEpoch
 	switch transition.Type {
@@ -645,7 +666,7 @@ func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) err
 		epoch++
 	}
 	sort.Slice(committee, func(i, j int) bool { return committee[i].ID < committee[j].ID })
-	config, keys, index, err := deriveCommitteeKeys(committee, engine.current.NetworkID, epoch)
+	config, keys, index, err := engine.committeeMaterialLocked(committee, epoch, transition)
 	if err != nil {
 		return err
 	}
@@ -661,6 +682,61 @@ func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) err
 	engine.committeeConfig = config
 	engine.current.CommitteeConfig = config
 	return nil
+}
+
+// committeeMaterialLocked resolves the key material for a committee change.
+// When a rotation carries a DKG-produced group public key, the locally held
+// share for that epoch is adopted; otherwise the deterministic seed sharing is
+// used so genesis and non-DKG deployments keep working unchanged.
+func (engine *Engine) committeeMaterialLocked(committee []model.CommitteeMember, epoch uint64, transition model.StateTransition) (model.CommitteeConfig, *bls.KeySet, map[string]int, error) {
+	if transition.Type == TransitionRotateCommittee && transition.CommitteeConfig != nil {
+		groupKey := transition.CommitteeConfig.GroupPublicKey
+		if len(groupKey) == bls.PublicKeySize && bls.ValidG2Point(groupKey) {
+			if engine.dkgLoader != nil {
+				if keys, ok := engine.dkgLoader(epoch); ok && bytes.Equal(keys.GroupPublicKey, groupKey) {
+					config := model.CommitteeConfig{
+						Threshold: uint32(QuorumSize), Size: uint32(len(committee)),
+						GroupPublicKey: append([]byte(nil), groupKey...), CommitteeEpoch: epoch,
+					}
+					return config, keys, committeeIndex(committee), nil
+				}
+			}
+			return model.CommitteeConfig{}, nil, nil, fmt.Errorf("rotate_committee_keys carried a DKG group key but no local share is available for epoch %d", epoch)
+		}
+	}
+	return deriveCommitteeKeys(committee, engine.current.NetworkID, epoch)
+}
+
+// committeeIndex maps member IDs to their position in the sorted committee.
+func committeeIndex(committee []model.CommitteeMember) map[string]int {
+	index := make(map[string]int, len(committee))
+	for position, member := range committee {
+		index[member.ID] = position
+	}
+	return index
+}
+
+// SetDKGLoader installs a source of locally held DKG shares keyed by committee
+// epoch. If the engine is already operating under a DKG-derived configuration,
+// it immediately switches to the matching local share.
+func (engine *Engine) SetDKGLoader(loader func(epoch uint64) (*bls.KeySet, bool)) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	engine.dkgLoader = loader
+	if loader == nil || len(engine.committeeConfig.GroupPublicKey) != bls.PublicKeySize {
+		return
+	}
+	keys, ok := loader(engine.committeeConfig.CommitteeEpoch)
+	if !ok || !bytes.Equal(keys.GroupPublicKey, engine.committeeConfig.GroupPublicKey) {
+		return
+	}
+	index := committeeIndex(engine.committee)
+	engine.blsKeys = keys
+	engine.blsIndex = index
+	for position := range engine.committee {
+		engine.committee[position].BLSPublicKey = keys.PublicKeyShare(index[engine.committee[position].ID])
+		engine.byID[engine.committee[position].ID] = engine.committee[position]
+	}
 }
 
 func (engine *Engine) verifyQCLocked(qc model.QuorumCertificate) error {
@@ -1191,7 +1267,7 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 	case TransitionUpdateCommittee:
 		return applyUpdateCommittee(state, transition)
 	case TransitionRotateCommittee:
-		return applyRotateCommitteeKeys(state)
+		return applyRotateCommitteeKeys(state, transition)
 	case TransitionUpdateBudgetUse:
 		return applyBudgetUsage(state, transition)
 	default:
@@ -1277,13 +1353,26 @@ func applyUpdateCommittee(state *model.NetworkState, transition model.StateTrans
 	return nil
 }
 
-// applyRotateCommitteeKeys bumps the committee epoch, which deterministically
-// regenerates every share and the group public key.
-func applyRotateCommitteeKeys(state *model.NetworkState) error {
+// applyRotateCommitteeKeys bumps the committee epoch. It adopts a DKG-produced
+// group public key when the transition carries one, otherwise it deterministically
+// regenerates every share and the group public key from the committee seed.
+func applyRotateCommitteeKeys(state *model.NetworkState, transition model.StateTransition) error {
 	if len(state.EngineCommittee) != CommitteeSize {
 		return fmt.Errorf("committee context is required to rotate keys")
 	}
 	epoch := state.CommitteeConfig.CommitteeEpoch + 1
+	if transition.CommitteeConfig != nil && len(transition.CommitteeConfig.GroupPublicKey) > 0 {
+		if !bls.ValidG2Point(transition.CommitteeConfig.GroupPublicKey) {
+			return fmt.Errorf("rotate_committee_keys group public key is not a valid G2 point")
+		}
+		state.CommitteeConfig = model.CommitteeConfig{
+			Threshold:      uint32(QuorumSize),
+			Size:           uint32(len(state.EngineCommittee)),
+			GroupPublicKey: append([]byte(nil), transition.CommitteeConfig.GroupPublicKey...),
+			CommitteeEpoch: epoch,
+		}
+		return nil
+	}
 	config, _, _, err := deriveCommitteeKeys(state.EngineCommittee, state.NetworkID, epoch)
 	if err != nil {
 		return err
@@ -1402,8 +1491,10 @@ func validateManagerPath(committee []model.CommitteeMember, path model.PathSpec)
 }
 
 func findSetupKeyByToken(state model.NetworkState, token string) *model.SetupKey {
+	hash := model.SetupKeyHash(token)
 	for index := range state.SetupKeys {
-		if bytes.Equal(state.SetupKeys[index].TokenHash, model.SetupKeyHash(token)) {
+		// Constant-time comparison so token lookups do not leak hash prefixes.
+		if hmac.Equal(state.SetupKeys[index].TokenHash, hash) {
 			return &state.SetupKeys[index]
 		}
 	}

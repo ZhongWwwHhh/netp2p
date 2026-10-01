@@ -82,7 +82,8 @@
 - [ ] Docker compose `quota` / `multihop` / `chaos` / `path` profile（当前 chaos/path/quota 场景在进程内 `go test ./internal/...` 覆盖；compose 仅新增 `/metrics` 抓取断言）。
 - [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
 - [ ] Windows/macOS TUN 实现（当前仅接口抽象与 stub）与第三方安全审计。
-- [ ] threshold DKG（替代种子确定性派生）、billing。
+- [x] threshold DKG（Pedersen DKG，`--dkg`，替代种子确定性派生）。
+- [ ] billing（`/api/v1/quota/history`，见 Phase 11）。
 
 ## Phase 7：TUN 数据面验收闭环
 
@@ -110,3 +111,12 @@
 - [x] Budget 约束：候选路径累计 `PathSpec.Cost` 超过关联 `TrafficBudget.ForwardingCostLimit`（limit>0）时 score=0 硬排除。
 - [x] `policy.Authorize` 新增 `sourcePosture`；`Policy.Posture` 非空且 `required ⊄ sourcePosture` 时该策略按 deny 计；client 出向传自身 posture、入向传源 peer posture。
 - [x] Web：Routes 页新增 flowClass 选择；Peers 抽屉展示并按 `peers:update` 编辑 posture 标签。
+
+## Phase 10：Threshold DKG + 安全加固
+
+- [x] 安全加固：setup key 查表改用 `hmac.Equal` 常量时间比较；告警 webhook 强制 `https`（`--allow-insecure-webhook` 才能用 http）；`doctor` 在 seed 含 `keySeed` 时输出 WARN 建议启用 DKG。
+- [x] `internal/crypto/bls` Pedersen DKG 原语：成员多项式承诺（G2 compressed）、share 验证（`g^share == Π C_k^{x^k}`）、群公钥与全体成员 share 公钥派生、`NewKeySetFromShares` 兼容已有签名/聚合路径。
+- [x] `internal/dkg` + `/netp2p/control/dkg/2.0.0`：两轮 commit→share 加一轮结果广播与就绪屏障；仅 committee 成员参与，按 peer 身份鉴权。
+- [x] share 持久化：`<dataDir>/dkg-share-<epoch>.json`（原子写）；`SetDKGLoader` 让 manager 重启后继续用本地 share 签名。
+- [x] BFT 接线：`rotate_committee_keys` 可携带经校验的 DKG `GroupPublicKey`，engine 在 commit/catch-up 时采用本地 DKG share；缺省仍走确定性 seed 派生。
+- [x] CLI：`--dkg`（默认 off，全体 manager 需同开）跑一轮 ceremony 后由 leader 提交轮换；`--rotate-committee-keys` 单独提交确定性轮换。

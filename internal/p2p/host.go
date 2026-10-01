@@ -40,6 +40,7 @@ var (
 	WebAPIProtocol      = protocol.ID(ProtocolPrefix + "/web-api/" + Version)
 	PresenceProtocol    = protocol.ID(ProtocolPrefix + "/presence/" + Version)
 	LinkGossipProtocol  = protocol.ID(ProtocolPrefix + "/link/gossip/" + Version)
+	DKGProtocol         = protocol.ID(ProtocolPrefix + "/control/dkg/" + Version)
 )
 
 type Config struct {

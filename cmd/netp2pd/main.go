@@ -32,6 +32,8 @@ func main() {
 	dnsManage := flag.Bool("dns-manage-resolv-conf", true, "point /etc/resolv.conf at the overlay resolver (TUN mode only)")
 	noDNS := flag.Bool("no-dns", false, "do not start the local DNS resolver")
 	noForward := flag.Bool("no-forward", false, "disable manager forwarding for certified overlay paths")
+	dkgEnabled := flag.Bool("dkg", false, "run a Pedersen DKG ceremony at startup and rotate the committee to a distributed group key (all managers must enable it)")
+	rotateKeys := flag.Bool("rotate-committee-keys", false, "submit a rotate_committee_keys transition at startup (uses a DKG key when --dkg is set)")
 	sso := flag.Bool("sso", false, "authenticate the client with an OIDC device flow")
 	ssoIssuer := flag.String("sso-issuer", "", "OIDC issuer URL used with --sso")
 	ssoClientID := flag.String("sso-client-id", "", "OIDC client id used with --sso")
@@ -46,6 +48,7 @@ func main() {
 	metricsListen := flag.String("metrics-listen", "", "manager Prometheus /metrics address (empty disables metrics)")
 	alertWebhook := flag.String("alert-webhook", "", "manager alert webhook URL (empty logs only)")
 	alertWebhookSecret := flag.String("alert-webhook-secret", "", "bearer token sent to the alert webhook")
+	alertAllowInsecure := flag.Bool("allow-insecure-webhook", false, "permit an http alert webhook URL (unsafe)")
 	alertInterval := flag.Duration("alert-interval", 15*time.Second, "manager alert evaluation interval")
 	alertDropCount := flag.Uint64("alert-drop-count", 100, "dropped frames in one interval that fire the forward_drops alert")
 	alertDropRatePercent := flag.Float64("alert-drop-rate-percent", 5, "dropped share of traffic that fires the forward_drops alert")
@@ -63,9 +66,10 @@ func main() {
 		if *configPath == "" {
 			log.Fatal("--config is required for manager role")
 		}
-		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen, *metricsListen, !*noForward, alertOptions{
+		if err := runManager(ctx, *dataDir, *configPath, *listen, *webListen, *metricsListen, !*noForward, *dkgEnabled, *rotateKeys, alertOptions{
 			webhook: *alertWebhook, webhookSecret: *alertWebhookSecret, interval: *alertInterval,
 			dropCount: *alertDropCount, dropRatePercent: *alertDropRatePercent,
+			allowInsecureWebhook: *alertAllowInsecure,
 		}); err != nil {
 			log.Fatal(err)
 		}

@@ -110,6 +110,39 @@ func DeriveKeySet(seed []byte, threshold int, points []fr.Element) (*KeySet, err
 	return keys, nil
 }
 
+// NewKeySetFromShares builds a KeySet from externally distributed shares, such
+// as those produced by a Pedersen DKG ceremony. Only ownShare is known locally;
+// the other shares stay zero because signing uses only the local share and
+// aggregation uses only the evaluation points.
+func NewKeySetFromShares(threshold, size int, points []fr.Element, ownIndex int, ownShare fr.Element, sharePublics [][]byte, groupPublicKey []byte) (*KeySet, error) {
+	if size < 1 || threshold < 1 || threshold > size {
+		return nil, ErrInvalidThreshold
+	}
+	if ownIndex < 0 || ownIndex >= size {
+		return nil, fmt.Errorf("bls: share index %d out of range", ownIndex)
+	}
+	if len(points) != size {
+		return nil, fmt.Errorf("bls: %d points for committee size %d", len(points), size)
+	}
+	if len(groupPublicKey) != PublicKeySize {
+		return nil, fmt.Errorf("bls: group public key must be %d bytes", PublicKeySize)
+	}
+	keys := &KeySet{
+		Threshold: threshold,
+		Size:      size,
+		shares:    make([]fr.Element, size),
+		points:    make([]fr.Element, size),
+		sharePubs: make([][]byte, size),
+	}
+	copy(keys.points, points)
+	keys.shares[ownIndex] = ownShare
+	keys.GroupPublicKey = append([]byte(nil), groupPublicKey...)
+	for index := 0; index < size && index < len(sharePublics); index++ {
+		keys.sharePubs[index] = append([]byte(nil), sharePublics[index]...)
+	}
+	return keys, nil
+}
+
 // Points returns the evaluation points used for the shares, in index order.
 func (keys *KeySet) Points() []fr.Element {
 	return append([]fr.Element(nil), keys.points...)

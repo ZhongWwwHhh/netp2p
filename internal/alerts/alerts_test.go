@@ -163,9 +163,12 @@ func TestWebhookDeliversJSONAndRetriesOn5xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	sink := NewWebhookSink(server.URL, "sekret")
+	sink, err := NewWebhookSink(server.URL, "sekret", true)
+	if err != nil {
+		t.Fatalf("build webhook sink: %v", err)
+	}
 	sink.Backoff = time.Millisecond
-	err := sink.Send(context.Background(), Event{
+	err = sink.Send(context.Background(), Event{
 		Status: "firing", Manager: "manager-1", Height: 7,
 		Alert: Alert{ID: "x", Rule: RuleQuorumDegraded, Severity: SeverityWarning, Summary: "down"},
 		Time:  time.Now(),
@@ -195,7 +198,10 @@ func TestWebhookDoesNotRetry4xx(t *testing.T) {
 	}))
 	defer server.Close()
 
-	sink := NewWebhookSink(server.URL, "")
+	sink, err := NewWebhookSink(server.URL, "", true)
+	if err != nil {
+		t.Fatalf("build webhook sink: %v", err)
+	}
 	sink.Backoff = time.Millisecond
 	if err := sink.Send(context.Background(), Event{Alert: Alert{ID: "x"}}); err == nil {
 		t.Fatal("expected an error for a 4xx response")
@@ -209,8 +215,27 @@ func TestWebhookDoesNotRetry4xx(t *testing.T) {
 }
 
 func TestNoWebhookConfiguredIsNoOp(t *testing.T) {
-	if err := NewWebhookSink("", "").Send(context.Background(), Event{Alert: Alert{ID: "x"}}); err != nil {
+	sink, err := NewWebhookSink("", "", false)
+	if err != nil {
+		t.Fatalf("empty webhook should not error: %v", err)
+	}
+	if err := sink.Send(context.Background(), Event{Alert: Alert{ID: "x"}}); err != nil {
 		t.Fatalf("empty webhook should be a no-op, got %v", err)
+	}
+}
+
+func TestWebhookRequiresHTTPS(t *testing.T) {
+	if _, err := NewWebhookSink("http://example.com/hook", "", false); err == nil {
+		t.Fatal("plain http webhook was accepted without the insecure override")
+	}
+	if _, err := NewWebhookSink("http://example.com/hook", "", true); err != nil {
+		t.Fatalf("http webhook rejected despite override: %v", err)
+	}
+	if _, err := NewWebhookSink("ftp://example.com/hook", "", true); err == nil {
+		t.Fatal("non-http scheme was accepted")
+	}
+	if _, err := NewWebhookSink("https://example.com/hook", "", false); err != nil {
+		t.Fatalf("https webhook rejected: %v", err)
 	}
 }
 

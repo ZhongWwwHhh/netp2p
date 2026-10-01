@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -20,14 +21,31 @@ type WebhookSink struct {
 	Backoff     time.Duration
 }
 
-// NewWebhookSink builds a webhook sink with sane defaults.
-func NewWebhookSink(url, secret string) *WebhookSink {
+// NewWebhookSink builds a webhook sink with sane defaults. An empty URL yields
+// a disabled sink. The URL must use https unless allowInsecure is set: alert
+// payloads carry operational detail that should not travel in the clear.
+func NewWebhookSink(rawURL, secret string, allowInsecure bool) (*WebhookSink, error) {
+	if rawURL != "" {
+		parsed, err := url.Parse(rawURL)
+		if err != nil {
+			return nil, fmt.Errorf("alert webhook url %q is invalid: %w", rawURL, err)
+		}
+		switch parsed.Scheme {
+		case "https":
+		case "http":
+			if !allowInsecure {
+				return nil, fmt.Errorf("alert webhook url %q must use https (pass --allow-insecure-webhook to permit http)", rawURL)
+			}
+		default:
+			return nil, fmt.Errorf("alert webhook url %q must use https", rawURL)
+		}
+	}
 	return &WebhookSink{
-		URL: url, Secret: secret,
+		URL: rawURL, Secret: secret,
 		Client:      &http.Client{Timeout: 5 * time.Second},
 		MaxAttempts: 3,
 		Backoff:     500 * time.Millisecond,
-	}
+	}, nil
 }
 
 // Send delivers one event, retrying transient failures. A permanent client

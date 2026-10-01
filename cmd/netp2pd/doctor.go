@@ -94,8 +94,16 @@ func checkSeed(path string) doctorCheck {
 		return doctorCheck{name: "seed", ok: false, detail: err.Error()}
 	}
 	managers := make([]string, 0, len(seed.Managers))
+	seeded := false
 	for _, member := range seed.Managers {
 		managers = append(managers, member.ID)
+		if member.KeySeed != 0 {
+			seeded = true
+		}
+	}
+	if seeded {
+		return doctorCheck{name: "seed", ok: false, warning: true,
+			detail: fmt.Sprintf("network %s with %d committee members %v uses deterministic keySeed material; enable --dkg to rotate to a distributed key", seed.NetworkID, len(managers), managers)}
 	}
 	return doctorCheck{name: "seed", ok: true,
 		detail: fmt.Sprintf("network %s with %d committee members: %v", seed.NetworkID, len(managers), managers)}
