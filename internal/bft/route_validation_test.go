@@ -92,3 +92,86 @@ func TestUpdatePeerPartialPreservesMetadata(t *testing.T) {
 		t.Fatalf("partial update wiped metadata: %+v", peer)
 	}
 }
+
+func TestRegisterPeerSanitizesPosture(t *testing.T) {
+	state := testState()
+	apply(t, &state, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a",
+		Peer: model.PeerRecord{PeerID: "postured", Hostname: "laptop", Posture: []string{"edr", "disk-encrypted", "edr"}},
+	})
+	peer := state.Peers[len(state.Peers)-1]
+	if len(peer.Posture) != 2 || peer.Posture[0] != "disk-encrypted" || peer.Posture[1] != "edr" {
+		t.Fatalf("posture = %v, want deduped and sorted", peer.Posture)
+	}
+
+	// Blank labels are rejected rather than silently dropped.
+	blank := model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a",
+		Peer: model.PeerRecord{PeerID: "blank", Posture: []string{"  "}},
+	}
+	if err := ApplyTransition(&state, blank); err == nil {
+		t.Fatal("blank posture label was accepted")
+	}
+}
+
+func TestUpdatePeerReplacesPosture(t *testing.T) {
+	state := testState()
+	apply(t, &state, model.StateTransition{
+		Type: TransitionRegisterPeer, SetupKey: "key-a",
+		Peer: model.PeerRecord{PeerID: "postured", Posture: []string{"edr"}},
+	})
+	// A nil posture in a metadata refresh must leave the certified labels alone.
+	apply(t, &state, model.StateTransition{
+		Type: TransitionUpdatePeer,
+		Peer: model.PeerRecord{PeerID: "postured", Hostname: "renamed"},
+	})
+	if len(state.Peers[0].Posture) != 1 || state.Peers[0].Posture[0] != "edr" {
+		t.Fatalf("nil posture refreshed to %v, want [edr]", state.Peers[0].Posture)
+	}
+	// An explicit list replaces the labels.
+	apply(t, &state, model.StateTransition{
+		Type: TransitionUpdatePeer,
+		Peer: model.PeerRecord{PeerID: "postured", Posture: []string{"agentless"}},
+	})
+	if len(state.Peers[0].Posture) != 1 || state.Peers[0].Posture[0] != "agentless" {
+		t.Fatalf("posture = %v, want [agentless]", state.Peers[0].Posture)
+	}
+}
+
+func TestUpsertRouteValidatesPathTypesAndFlowClass(t *testing.T) {
+	state := testState()
+	state.Peers = append(state.Peers, model.PeerRecord{
+		PeerID: "exit-1", OverlayIP: "100.64.0.9", Groups: []string{"clients-b"}, IsExitNode: true,
+	})
+	state.Groups[1].PeerIDs = []string{"exit-1"}
+	base := model.Route{
+		ID: "subnet", Destination: "10.10.0.0/16", RoutingGroup: "clients-b", DistributionGroup: []string{"clients-a"},
+	}
+
+	bad := base
+	bad.AllowedPathTypes = []string{"teleport"}
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertRoute, Route: &bad}); err == nil {
+		t.Fatal("unknown allowed path type was accepted")
+	}
+
+	bad = base
+	bad.FlowClass = "warp"
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertRoute, Route: &bad}); err == nil {
+		t.Fatal("unknown flow class was accepted")
+	}
+
+	bad = base
+	bad.Metric = -1
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertRoute, Route: &bad}); err == nil {
+		t.Fatal("negative metric was accepted")
+	}
+
+	good := base
+	good.AllowedPathTypes = []string{"direct", "via_manager", "multi-hop"}
+	good.FlowClass = "throughput"
+	good.Metric = 100
+	good.MaxHops = 2
+	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertRoute, Route: &good}); err != nil {
+		t.Fatalf("valid route rejected: %v", err)
+	}
+}

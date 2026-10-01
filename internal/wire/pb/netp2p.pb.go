@@ -215,6 +215,7 @@ type PeerRecord struct {
 	DnsLabel      string                 `protobuf:"bytes,9,opt,name=dns_label,json=dnsLabel,proto3" json:"dns_label,omitempty"`
 	LastLogin     string                 `protobuf:"bytes,10,opt,name=last_login,json=lastLogin,proto3" json:"last_login,omitempty"`
 	IsExitNode    bool                   `protobuf:"varint,11,opt,name=is_exit_node,json=isExitNode,proto3" json:"is_exit_node,omitempty"`
+	Posture       []string               `protobuf:"bytes,12,rep,name=posture,proto3" json:"posture,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -324,6 +325,13 @@ func (x *PeerRecord) GetIsExitNode() bool {
 		return x.IsExitNode
 	}
 	return false
+}
+
+func (x *PeerRecord) GetPosture() []string {
+	if x != nil {
+		return x.Posture
+	}
+	return nil
 }
 
 type NetworkSettings struct {
@@ -2762,6 +2770,7 @@ type LoginRequest struct {
 	ClientVersion   string                 `protobuf:"bytes,8,opt,name=client_version,json=clientVersion,proto3" json:"client_version,omitempty"`
 	ProtocolVersion string                 `protobuf:"bytes,9,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
 	Capabilities    []string               `protobuf:"bytes,10,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
+	Posture         []string               `protobuf:"bytes,11,rep,name=posture,proto3" json:"posture,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -2862,6 +2871,13 @@ func (x *LoginRequest) GetProtocolVersion() string {
 func (x *LoginRequest) GetCapabilities() []string {
 	if x != nil {
 		return x.Capabilities
+	}
+	return nil
+}
+
+func (x *LoginRequest) GetPosture() []string {
+	if x != nil {
+		return x.Posture
 	}
 	return nil
 }
@@ -3796,7 +3812,7 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\tthreshold\x18\x01 \x01(\rR\tthreshold\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\rR\x04size\x12(\n" +
 	"\x10group_public_key\x18\x03 \x01(\fR\x0egroupPublicKey\x12'\n" +
-	"\x0fcommittee_epoch\x18\x04 \x01(\x04R\x0ecommitteeEpoch\"\xc4\x02\n" +
+	"\x0fcommittee_epoch\x18\x04 \x01(\x04R\x0ecommitteeEpoch\"\xde\x02\n" +
 	"\n" +
 	"PeerRecord\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x1d\n" +
@@ -3813,7 +3829,8 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"last_login\x18\n" +
 	" \x01(\tR\tlastLogin\x12 \n" +
 	"\fis_exit_node\x18\v \x01(\bR\n" +
-	"isExitNode\"\xc2\a\n" +
+	"isExitNode\x12\x18\n" +
+	"\aposture\x18\f \x03(\tR\aposture\"\xc2\a\n" +
 	"\x0fNetworkSettings\x12\x1d\n" +
 	"\n" +
 	"dns_domain\x18\x01 \x01(\tR\tdnsDomain\x122\n" +
@@ -4086,7 +4103,7 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"transition\x18\x05 \x01(\v2\x1a.netp2p.v1.StateTransitionR\n" +
 	"transition\x12\x16\n" +
 	"\x06height\x18\x06 \x01(\x04R\x06height\x12\x14\n" +
-	"\x05round\x18\a \x01(\x04R\x05round\"\xc0\x02\n" +
+	"\x05round\x18\a \x01(\x04R\x05round\"\xda\x02\n" +
 	"\fLoginRequest\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\tR\tnetworkId\x12\x1b\n" +
@@ -4099,7 +4116,8 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\x0eclient_version\x18\b \x01(\tR\rclientVersion\x12)\n" +
 	"\x10protocol_version\x18\t \x01(\tR\x0fprotocolVersion\x12\"\n" +
 	"\fcapabilities\x18\n" +
-	" \x03(\tR\fcapabilities\"\xea\x01\n" +
+	" \x03(\tR\fcapabilities\x12\x18\n" +
+	"\aposture\x18\v \x03(\tR\aposture\"\xea\x01\n" +
 	"\rLoginResponse\x125\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x19.netp2p.v1.SignedSnapshotR\bsnapshot\x12)\n" +
 	"\x04peer\x18\x02 \x01(\v2\x15.netp2p.v1.PeerRecordR\x04peer\x12\x14\n" +

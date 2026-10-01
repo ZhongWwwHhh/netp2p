@@ -183,6 +183,13 @@
         <FormField label="Metric"><input class="input" type="number" bind:value={editing.metric} /></FormField>
         <FormField label="Max hops" hint="0 means unlimited."><input class="input" type="number" bind:value={editing.maxHops} /></FormField>
       </div>
+      <FormField label="Flow class" hint="Overrides the network default scoring weights for this route.">
+        <select class="input" bind:value={editing.flowClass}>
+          {#each ['', 'latency', 'throughput', 'reliability', 'cost'] as flowClass (flowClass)}
+            <option value={flowClass}>{flowClass || 'default'}</option>
+          {/each}
+        </select>
+      </FormField>
       <label class="flex items-start gap-2">
         <input class="mt-1" type="checkbox" bind:checked={editing.masquerade} />
         <span>

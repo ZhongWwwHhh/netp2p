@@ -136,7 +136,7 @@ func (client *Client) deliverAdmissionSynthesized(reply packet.IPv4Packet) bool 
 		kind = waiter.kind
 	}
 	client.mu.RUnlock()
-	if kind != model.PathKindViaManager {
+	if kind != model.PathKindViaManager && kind != model.PathKindMultiHop {
 		return false
 	}
 	return client.deliverAdmission(reply)

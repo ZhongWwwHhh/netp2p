@@ -33,8 +33,9 @@ func (client *Client) authorize(destination model.PeerRecord, protocol string, p
 		Policies:  client.snapshot.State.Policies,
 	}
 	self := client.self.PeerID
+	posture := client.self.Posture
 	client.mu.RUnlock()
-	return policy.Authorize(state, self, destination.PeerID, protocol, port)
+	return policy.Authorize(state, self, destination.PeerID, protocol, port, posture)
 }
 
 // authorizeInbound checks whether sourcePeer is allowed to reach this client.
@@ -47,5 +48,5 @@ func (client *Client) authorizeInbound(sourcePeer model.PeerRecord, protocol str
 	}
 	self := client.self.PeerID
 	client.mu.RUnlock()
-	return policy.Authorize(state, sourcePeer.PeerID, self, protocol, port)
+	return policy.Authorize(state, sourcePeer.PeerID, self, protocol, port, sourcePeer.Posture)
 }

@@ -175,3 +175,15 @@ func roundTrip(t *testing.T, message proto.Message, restored proto.Message) {
 		t.Fatal(err)
 	}
 }
+
+// Posture labels must survive the protobuf boundary and keep their order.
+func TestPeerRecordPostureRoundTrip(t *testing.T) {
+	peer := model.PeerRecord{
+		PeerID: "peer-a", OverlayIP: "100.64.0.1",
+		Posture: []string{"disk-encrypted", "edr"},
+	}
+	restored := wire.PeerRecordFromProto(wire.PeerRecordToProto(peer))
+	if len(restored.Posture) != 2 || restored.Posture[0] != "disk-encrypted" || restored.Posture[1] != "edr" {
+		t.Fatalf("posture = %v, want round-tripped labels", restored.Posture)
+	}
+}

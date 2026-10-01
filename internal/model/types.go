@@ -57,6 +57,10 @@ type PeerRecord struct {
 	// IsExitNode marks a certified client that may forward overlay traffic
 	// toward certified subnet destinations. It is admin controlled.
 	IsExitNode bool `json:"isExitNode,omitempty"`
+	// Posture is a set of declarative capability labels reported by the peer.
+	// Policies may require a posture; a peer only matches when it advertises
+	// every required label. It is not a security scan, just tag matching.
+	Posture []string `json:"posture,omitempty"`
 }
 
 // NetworkSettings carries network-wide toggles that are part of certified

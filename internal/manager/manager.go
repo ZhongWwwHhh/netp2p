@@ -410,6 +410,7 @@ func toRegistration(request protocol.LoginRequest) Registration {
 		Hostname:      request.Hostname,
 		OS:            request.OS,
 		ClientVersion: request.ClientVersion,
+		Posture:       request.Posture,
 	}
 }
 
@@ -504,6 +505,7 @@ type Registration struct {
 	Hostname      string
 	OS            string
 	ClientVersion string
+	Posture       []string
 }
 
 // Register adds a peer to certified state, or refreshes its metadata when the
@@ -536,6 +538,9 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 				// metadata refresh must not clear it, so carry the certified
 				// value forward; only an explicit admin transition may change it.
 				IsExitNode: peer.IsExitNode,
+				// Posture is likewise admin/operator controlled; a reconnect
+				// must not silently widen or narrow a peer's declared labels.
+				Posture: append([]string(nil), peer.Posture...),
 			},
 		}
 		snapshot, err := manager.SubmitAs(transition, auth.PeerActor(registration.PeerID))
@@ -551,6 +556,7 @@ func (manager *Manager) Register(registration Registration) (model.SignedSnapsho
 			PeerID: registration.PeerID, Addresses: registration.Addresses,
 			Hostname: registration.Hostname, OS: registration.OS, ClientVersion: registration.ClientVersion,
 			UserID: registration.UserID, LastLogin: registration.LastLogin,
+			Posture: registration.Posture,
 		},
 	}
 	snapshot, err := manager.SubmitAs(transition, auth.PeerActor(registration.PeerID))

@@ -19,6 +19,12 @@
   let sortKey = $state('name');
   let sortAsc = $state(true);
   let busy = $state(false);
+  let postureDraft = $state('');
+
+  // Keep the posture editor in sync with the selected peer's certified labels.
+  $effect(() => {
+    postureDraft = (selected?.posture ?? []).join(', ');
+  });
 
   const canWrite = $derived(can('peers', 'update'));
 
@@ -92,6 +98,24 @@
     if (ok) {
       selected = { ...peer, isExitNode: !peer.isExitNode };
       notify(`${peer.hostname || shortPeerId(peer.peerId, 12)} ${peer.isExitNode ? 'is no longer' : 'is now'} an exit node`);
+    } else {
+      notify(network.error || 'commit failed', 'error');
+    }
+  }
+
+  // Posture labels are peer-advertised but only certified through update_peer,
+  // so editing them is admin-gated.
+  async function savePosture(peer: Peer) {
+    const posture = postureDraft
+      .split(',')
+      .map((label) => label.trim())
+      .filter((label) => label.length > 0);
+    busy = true;
+    const ok = await submit({ type: 'update_peer', peer: { ...peer, posture } });
+    busy = false;
+    if (ok) {
+      selected = { ...peer, posture };
+      notify('Posture updated');
     } else {
       notify(network.error || 'commit failed', 'error');
     }
@@ -233,6 +257,31 @@
         <dd class="mt-1 text-xs text-slate-500">
           Exit nodes may gateway internet or subnet routes (Linux/TUN clients only).
         </dd>
+      </div>
+      <div>
+        <dt class="text-xs uppercase tracking-wide text-slate-400">Posture</dt>
+        <dd class="mt-1 flex flex-wrap gap-1">
+          {#each selected.posture ?? [] as label (label)}
+            <span class="code">{label}</span>
+          {/each}
+          {#if (selected.posture ?? []).length === 0}
+            <span class="text-xs text-slate-400">none</span>
+          {/if}
+        </dd>
+        {#if canWrite}
+          <dd class="mt-1 flex items-center gap-2">
+            <input
+              class="input"
+              placeholder="labels, comma separated"
+              bind:value={postureDraft}
+              disabled={busy}
+            />
+            <button class="btn-ghost text-xs" disabled={busy} onclick={() => savePosture(selected!)}>Save</button>
+          </dd>
+          <dd class="mt-1 text-xs text-slate-500">
+            Declarative labels matched by policy posture requirements.
+          </dd>
+        {/if}
       </div>
       <div>
         <dt class="text-xs uppercase tracking-wide text-slate-400">Certified metadata</dt>

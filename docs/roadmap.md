@@ -101,3 +101,12 @@
 - [x] admin CLI 新增 `update-peer` 动作，operator 无需 Web 也可标记 exit node。
 - [x] Web 控制台：Routes 页 masquerade toggle 与 exit-node 提示；Peers 页 exit-node 列/抽屉开关（`peers:update`）；Settings 页 `exitNodeEnabled`。
 - [x] Docker E2E `--with-exit`：foreign 子网 target + TUN exit gateway，验证内核 ICMP 经 gateway 抵达、MASQUERADE 生效。
+
+## Phase 9：Route 约束执行 + Posture Check
+
+- [x] `PeerRecord.Posture []string`（json `posture`）随 `register_peer` 上报、`update_peer` 覆盖（nil 保留旧值），BFT 校验去重、拒空、上限 32；proto/`internal/wire`/`NormalizeState` 同步。
+- [x] `upsert_route` 校验 `AllowedPathTypes ⊆ {direct, via_manager, multi-hop}`、`FlowClass ∈ {"", latency, throughput, reliability, cost}`、`MaxHops`/`Metric` 非负。
+- [x] planner 按 certified `Route` 派生约束：destination CIDR 匹配（`netip.ParsePrefix`）、source 隶属 `DistributionGroup`（空=全体）、多命中按 `Metric`→`Route.ID` 取唯一；`AllowedPathTypes`/`MaxHops`/`FlowClass` 覆盖网络默认，`Metric` 作为 score→centrality 后的 tie-break。
+- [x] Budget 约束：候选路径累计 `PathSpec.Cost` 超过关联 `TrafficBudget.ForwardingCostLimit`（limit>0）时 score=0 硬排除。
+- [x] `policy.Authorize` 新增 `sourcePosture`；`Policy.Posture` 非空且 `required ⊄ sourcePosture` 时该策略按 deny 计；client 出向传自身 posture、入向传源 peer posture。
+- [x] Web：Routes 页新增 flowClass 选择；Peers 抽屉展示并按 `peers:update` 编辑 posture 标签。

@@ -50,6 +50,7 @@ message PeerRecord {
   string dns_label = 9;
   string last_login = 10;
   bool is_exit_node = 11;
+  repeated string posture = 12;
 }
 
 message NetworkSettings {
@@ -343,6 +344,7 @@ message LoginRequest {
   string client_version = 8;
   string protocol_version = 9;
   repeated string capabilities = 10;
+  repeated string posture = 11;
 }
 
 message LoginResponse {

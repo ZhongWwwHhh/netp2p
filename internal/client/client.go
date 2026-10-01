@@ -52,6 +52,7 @@ type Client struct {
 	pathStore       *pathStore
 	synthesizeICMP  bool
 	routesReady     bool
+	posture         []string
 	exitReconciler  *exitnode.Reconciler
 	exitNodeEnabled bool
 	dnsUpdater      DNSUpdater
@@ -115,6 +116,7 @@ func (client *Client) Login(ctx context.Context, networkID, setupKey, jwtToken s
 	request.Hostname = client.Hostname()
 	request.OS = runtime.GOOS
 	request.ClientVersion = version.Version
+	request.Posture = append([]string(nil), client.posture...)
 	var loginReply pb.LoginResponse
 	if err := client.request(ctx, p2p.LoginProtocol, wire.LoginRequestToProto(request), &loginReply); err != nil {
 		return err

@@ -42,7 +42,7 @@ func TestPlannerGeneratesDirectAndManagerFallback(t *testing.T) {
 	t.Logf("candidates assignment=%+v view=%+v", assignment, view)
 	foundManagerFallback := false
 	for _, fallback := range assignment.Fallbacks {
-		if fallback.Kind != model.PathKindViaManager || len(fallback.ManagerHops) == 0 {
+		if (fallback.Kind != model.PathKindViaManager && fallback.Kind != model.PathKindMultiHop) || len(fallback.ManagerHops) == 0 {
 			continue
 		}
 		// Hops must be libp2p PeerIDs so the data plane can dial them and BFT
@@ -127,5 +127,99 @@ func TestPlannerAcceptsViaManagerWithUnknownBandwidth(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("via-manager fallback missing for unknown-bandwidth view: %+v", assignment)
+	}
+}
+
+// twoManagerRouteFixture builds a state with two forwarding managers and a
+// bidirectional measurement set that makes both one-hop and two-hop paths
+// viable. The optional route scopes the peer pair.
+func twoManagerRouteFixture(t *testing.T, route *model.Route) (model.NetworkState, []model.CommitteeMember, LinkView) {
+	t.Helper()
+	state := model.NetworkState{
+		NetworkID: "net",
+		Peers: []model.PeerRecord{
+			{PeerID: "client-a", OverlayIP: "100.64.0.2", Groups: []string{"clients"}},
+			{PeerID: "client-b", OverlayIP: "100.64.0.3", Groups: []string{"servers"}},
+		},
+		Groups: []model.Group{
+			{ID: "clients", PeerIDs: []string{"client-a"}},
+			{ID: "servers", PeerIDs: []string{"client-b"}},
+			{ID: "gateways", PeerIDs: []string{"manager-a"}},
+		},
+		Settings: model.NetworkSettings{DirectPathEnabled: true, ViaManagerEnabled: true, MaxManagerHops: 2, LinkMinBandwidthMbps: 10},
+	}
+	if route != nil {
+		state.Routes = []model.Route{*route}
+	}
+	committee := []model.CommitteeMember{
+		{ID: "manager-a", PeerID: testCommitteePeerID(t, 421), ForwardingEnabled: true},
+		{ID: "manager-b", PeerID: testCommitteePeerID(t, 422), ForwardingEnabled: true},
+	}
+	hopA := committee[0].PeerID
+	hopB := committee[1].PeerID
+	now := time.Now().UTC()
+	view := Aggregate([]Observation{
+		{ObserverID: "client-a", SubjectID: hopA, Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: hopA, SubjectID: "client-b", Scope: ScopeManagerMesh, RTTMilliseconds: 10, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: "client-a", SubjectID: hopB, Scope: ScopeManagerMesh, RTTMilliseconds: 30, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: hopB, SubjectID: "client-b", Scope: ScopeManagerMesh, RTTMilliseconds: 30, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: hopA, SubjectID: hopB, Scope: ScopeManagerMesh, RTTMilliseconds: 20, LossPercent: 0, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+	}, now, time.Minute, 100)
+	return state, committee, view
+}
+
+// A route that allows only direct paths must suppress every manager path.
+func TestPlannerHonoursRouteAllowedPathTypes(t *testing.T) {
+	route := &model.Route{
+		ID: "pair", Destination: "100.64.0.3/32", RoutingGroup: "gateways",
+		DistributionGroup: []string{"clients"}, Metric: 10, AllowedPathTypes: []string{"direct"},
+	}
+	state, committee, view := twoManagerRouteFixture(t, route)
+	assignment, ok := AssignmentFor(AssignmentInput{State: state, Committee: committee, View: view}, "client-a", "client-b", 5)
+	if !ok {
+		t.Fatal("assignment not generated")
+	}
+	for _, path := range assignment.Paths() {
+		if path.Kind != model.PathKindDirect {
+			t.Fatalf("route restricted to direct planned %q", path.Kind)
+		}
+	}
+}
+
+// A route's MaxHops must override the network default.
+func TestPlannerHonoursRouteMaxHops(t *testing.T) {
+	route := &model.Route{
+		ID: "pair", Destination: "100.64.0.3/32", RoutingGroup: "gateways",
+		DistributionGroup: []string{"clients"}, Metric: 10, MaxHops: 1,
+	}
+	state, committee, view := twoManagerRouteFixture(t, route)
+	assignment, ok := AssignmentFor(AssignmentInput{State: state, Committee: committee, View: view}, "client-a", "client-b", 5)
+	if !ok {
+		t.Fatal("assignment not generated")
+	}
+	for _, path := range assignment.Paths() {
+		if len(path.ManagerHops) > 1 {
+			t.Fatalf("route max hops 1 planned %d hops", len(path.ManagerHops))
+		}
+	}
+}
+
+// A route budget whose forwarding-cost limit is below a path's hop count must
+// hard-exclude that path.
+func TestPlannerHonoursRouteBudgetCostLimit(t *testing.T) {
+	route := &model.Route{
+		ID: "pair", Destination: "100.64.0.3/32", RoutingGroup: "gateways",
+		DistributionGroup: []string{"clients"}, Metric: 10, BudgetIDs: []string{"cheap"},
+	}
+	state, committee, view := twoManagerRouteFixture(t, route)
+	state.Budgets = []model.TrafficBudget{{ID: "cheap", ForwardingCostLimit: 1}}
+	assignment, ok := AssignmentFor(AssignmentInput{State: state, Committee: committee, View: view}, "client-a", "client-b", 5)
+	if !ok {
+		t.Fatal("assignment not generated")
+	}
+	for _, path := range assignment.Paths() {
+		if len(path.ManagerHops) > 1 {
+			t.Fatalf("budget cost limit 1 allowed a %d-hop path", len(path.ManagerHops))
+		}
 	}
 }

@@ -1,7 +1,9 @@
 package link
 
 import (
+	"net/netip"
 	"sort"
+	"strings"
 
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/path"
@@ -32,8 +34,14 @@ func AssignmentFor(input AssignmentInput, sourcePeerID, destinationPeerID string
 		return model.RouteAssignment{}, false
 	}
 	settings := input.State.Settings
+	route, hasRoute := routeFor(input.State, source, destination)
+	options := pathOptions{Settings: settings}
+	if hasRoute {
+		options.Route = &route
+		options.BudgetLimits = forwardingCostLimits(input.State, route.BudgetIDs)
+	}
 	forwarding := forwardingManagers(input.Committee)
-	candidates := candidatePaths(source.PeerID, destination.PeerID, forwarding, input.View, settings)
+	candidates := candidatePaths(source.PeerID, destination.PeerID, forwarding, input.View, options)
 	if len(candidates) == 0 {
 		return model.RouteAssignment{}, false
 	}
@@ -43,6 +51,11 @@ func AssignmentFor(input AssignmentInput, sourcePeerID, destinationPeerID string
 		}
 		if candidates[i].Centrality != candidates[j].Centrality {
 			return candidates[i].Centrality > candidates[j].Centrality
+		}
+		// Lower metric wins a remaining tie, then a stable path id keeps the
+		// ordering deterministic across managers.
+		if candidates[i].Metric != candidates[j].Metric {
+			return candidates[i].Metric < candidates[j].Metric
 		}
 		return candidates[i].Spec.ID < candidates[j].Spec.ID
 	})
@@ -79,12 +92,26 @@ type scoredPath struct {
 	Spec       model.PathSpec
 	Score      float64
 	Centrality float64
+	Metric     int
 }
 
-func candidatePaths(source, destination string, managers []model.CommitteeMember, view LinkView, settings model.NetworkSettings) []scoredPath {
-	constraints := scoringConstraints(settings)
+// pathOptions carries the certified settings plus the route (if any) that
+// scopes the current peer pair. A route overrides the network defaults for
+// allowed path types, hop ceiling and flow class.
+type pathOptions struct {
+	Settings     model.NetworkSettings
+	Route        *model.Route
+	BudgetLimits []uint64
+}
+
+func candidatePaths(source, destination string, managers []model.CommitteeMember, view LinkView, options pathOptions) []scoredPath {
+	constraints := scoringConstraints(options)
 	result := make([]scoredPath, 0)
-	if settings.DirectPathEnabled {
+	metric := 0
+	if options.Route != nil {
+		metric = options.Route.Metric
+	}
+	if options.Settings.DirectPathEnabled {
 		spec := model.PathSpec{Kind: model.PathKindDirect, Confidence: 0.5}
 		spec.ID = AssignmentID(source, destination) + "-direct"
 		// The manager mesh cannot measure the peer-to-peer direct link, so the
@@ -94,13 +121,15 @@ func candidatePaths(source, destination string, managers []model.CommitteeMember
 		// and only loses when it is disabled or when a via-manager path's
 		// measured advantage clears the scoring window and switch penalty.
 		profile := path.LinkProfile{PathID: spec.ID, Type: path.PathDirect, Stability: 1}
-		result = append(result, scoredPath{Spec: spec, Score: path.Score(profile, constraints)})
+		// A direct path has no forwarding cost, so budget limits never exclude
+		// it; it still honours an AllowedTypes filter through path.Score.
+		result = append(result, scoredPath{Spec: spec, Score: path.Score(profile, constraints), Metric: metric})
 	}
-	if !settings.ViaManagerEnabled {
+	if !options.Settings.ViaManagerEnabled {
 		return result
 	}
-	for _, hops := range enumerateManagerPaths(managers, effectiveMaxHops(settings)) {
-		appendViaManagerPath(&result, source, destination, hops, view, constraints)
+	for _, hops := range enumerateManagerPaths(managers, maxHopsFor(options)) {
+		appendViaManagerPath(&result, source, destination, hops, view, constraints, options.BudgetLimits, metric)
 	}
 	return result
 }
@@ -157,8 +186,43 @@ func effectiveMaxHops(settings model.NetworkSettings) int {
 	return 2
 }
 
-func appendViaManagerPath(result *[]scoredPath, source, destination string, hops []string, view LinkView, constraints path.Constraints) {
-	spec := model.PathSpec{Kind: model.PathKindViaManager, ManagerHops: hops, Confidence: 0.6}
+// maxHopsFor returns the certified hop ceiling, preferring a route-level
+// override when one is present.
+func maxHopsFor(options pathOptions) int {
+	if options.Route != nil && options.Route.MaxHops > 0 {
+		return options.Route.MaxHops
+	}
+	return effectiveMaxHops(options.Settings)
+}
+
+// forwardingCostLimits collects the cost ceilings of the budgets attached to a
+// route so the planner can hard-exclude paths that exceed them.
+func forwardingCostLimits(state model.NetworkState, budgetIDs []string) []uint64 {
+	if len(budgetIDs) == 0 {
+		return nil
+	}
+	limits := make([]uint64, 0, len(budgetIDs))
+	for _, id := range budgetIDs {
+		for _, budget := range state.Budgets {
+			if budget.ID == id {
+				limits = append(limits, budget.ForwardingCostLimit)
+				break
+			}
+		}
+	}
+	return limits
+}
+
+func appendViaManagerPath(result *[]scoredPath, source, destination string, hops []string, view LinkView, constraints path.Constraints, budgetLimits []uint64, metric int) {
+	// A single manager hop is a via-manager path; two or more is multi-hop. The
+	// distinction lets a route allow one without the other.
+	kind := model.PathKindViaManager
+	pathType := path.PathViaManager
+	if len(hops) >= 2 {
+		kind = model.PathKindMultiHop
+		pathType = path.PathMultiHop
+	}
+	spec := model.PathSpec{Kind: kind, ManagerHops: hops, Confidence: 0.6}
 	spec.ID = AssignmentID(source, destination) + "-via-" + hops[0]
 	for _, hop := range hops {
 		spec.ID += "-" + hop
@@ -176,7 +240,7 @@ func appendViaManagerPath(result *[]scoredPath, source, destination string, hops
 	spec.Cost = uint64(len(hops))
 	profile := path.LinkProfile{
 		PathID:             spec.ID,
-		Type:               path.PathViaManager,
+		Type:               pathType,
 		RTTMilliseconds:    metrics.rtt,
 		LossPercent:        metrics.loss,
 		JitterMilliseconds: metrics.jitter,
@@ -184,22 +248,120 @@ func appendViaManagerPath(result *[]scoredPath, source, destination string, hops
 		Stability:          metrics.stability,
 		ForwardingCost:     float64(len(hops)),
 	}
+	score := path.Score(profile, constraints)
+	for _, limit := range budgetLimits {
+		if limit > 0 && spec.Cost > limit {
+			score = 0
+			break
+		}
+	}
 	*result = append(*result, scoredPath{
-		Spec: spec, Score: path.Score(profile, constraints), Centrality: hopCentrality(view, hops),
+		Spec: spec, Score: score, Centrality: hopCentrality(view, hops), Metric: metric,
 	})
 }
 
-func scoringConstraints(settings model.NetworkSettings) path.Constraints {
+func scoringConstraints(options pathOptions) path.Constraints {
+	settings := options.Settings
 	flowClass := path.FlowClass(settings.DefaultFlowClass)
+	if options.Route != nil && options.Route.FlowClass != "" {
+		flowClass = path.FlowClass(options.Route.FlowClass)
+	}
 	if flowClass == "" {
 		flowClass = path.FlowLatency
 	}
-	return path.Constraints{
+	constraints := path.Constraints{
 		FlowClass:                    flowClass,
 		MinBandwidthMbps:             settings.LinkMinBandwidthMbps,
 		ViaManagerLatencyAdvantageMs: settings.ViaManagerLatencyAdvantageMs,
 		ViaManagerLossAdvantagePct:   settings.ViaManagerLossAdvantagePct,
 	}
+	if options.Route != nil {
+		constraints.AllowedTypes = mapAllowedPathTypes(options.Route.AllowedPathTypes)
+	}
+	return constraints
+}
+
+// mapAllowedPathTypes translates the certified route vocabulary
+// (direct/via_manager/multi-hop) into the planner's PathType constants. An
+// empty result means "any".
+func mapAllowedPathTypes(values []string) []path.PathType {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[path.PathType]struct{}, len(values))
+	result := make([]path.PathType, 0, len(values))
+	for _, value := range values {
+		var pathType path.PathType
+		switch strings.TrimSpace(value) {
+		case "direct":
+			pathType = path.PathDirect
+		case "via_manager":
+			pathType = path.PathViaManager
+		case "multi-hop", "multi_hop":
+			pathType = path.PathMultiHop
+		default:
+			continue
+		}
+		if _, exists := seen[pathType]; exists {
+			continue
+		}
+		seen[pathType] = struct{}{}
+		result = append(result, pathType)
+	}
+	return result
+}
+
+// routeFor returns the certified route that covers a source->destination peer
+// pair. Destination matching is by CIDR against the destination overlay IP;
+// source matching requires membership in the route's distribution groups
+// (empty means every peer). Multiple matches resolve by metric then route id so
+// every manager agrees.
+func routeFor(state model.NetworkState, source, destination model.PeerRecord) (model.Route, bool) {
+	address, err := netip.ParseAddr(destination.OverlayIP)
+	if err != nil {
+		return model.Route{}, false
+	}
+	address = address.Unmap()
+	matches := make([]model.Route, 0)
+	for _, route := range state.Routes {
+		prefix, err := netip.ParsePrefix(route.Destination)
+		if err != nil || !prefix.Contains(address) {
+			continue
+		}
+		if !sourceInRoute(state, route, source.PeerID) {
+			continue
+		}
+		matches = append(matches, route)
+	}
+	if len(matches) == 0 {
+		return model.Route{}, false
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].Metric != matches[j].Metric {
+			return matches[i].Metric < matches[j].Metric
+		}
+		return matches[i].ID < matches[j].ID
+	})
+	return matches[0], true
+}
+
+func sourceInRoute(state model.NetworkState, route model.Route, peerID string) bool {
+	if len(route.DistributionGroup) == 0 {
+		return true
+	}
+	for _, groupID := range route.DistributionGroup {
+		for _, group := range state.Groups {
+			if group.ID != groupID {
+				continue
+			}
+			for _, member := range group.PeerIDs {
+				if member == peerID {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // hopCentrality sums the EigenSpeed score of a path's managers. It is only used

@@ -44,7 +44,7 @@ func TestAuthorizeDenyPrecedence(t *testing.T) {
 		ID: "deny-db", SourceGroups: []string{"workers"}, DestinationGroups: []string{"database"},
 		Services: []model.Service{{Protocol: "tcp", StartPort: 0, EndPort: 65535}}, Effect: model.EffectDeny, Priority: 10,
 	})
-	allowed, err := Authorize(state, "worker-a", "db-1", "tcp", 5432)
+	allowed, err := Authorize(state, "worker-a", "db-1", "tcp", 5432, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,14 +57,14 @@ func TestAuthorizeDenyPrecedence(t *testing.T) {
 // parses out of the packet rather than reporting as zero.
 func TestAuthorizeMatchesPort(t *testing.T) {
 	state := testState()
-	allowed, err := Authorize(state, "worker-a", "db-1", "tcp", 5432)
+	allowed, err := Authorize(state, "worker-a", "db-1", "tcp", 5432, nil)
 	if err != nil || !allowed {
 		t.Fatalf("tcp/5432 allowed = %v err = %v, want true", allowed, err)
 	}
-	if allowed, err = Authorize(state, "worker-a", "db-1", "tcp", 22); err != nil || allowed {
+	if allowed, err = Authorize(state, "worker-a", "db-1", "tcp", 22, nil); err != nil || allowed {
 		t.Fatalf("tcp/22 allowed = %v err = %v, want false", allowed, err)
 	}
-	if allowed, err = Authorize(state, "worker-a", "db-1", "udp", 5432); err != nil || allowed {
+	if allowed, err = Authorize(state, "worker-a", "db-1", "udp", 5432, nil); err != nil || allowed {
 		t.Fatalf("udp/5432 allowed = %v err = %v, want false", allowed, err)
 	}
 }
@@ -88,7 +88,7 @@ func TestAuthorizeMatchesAnyProtocol(t *testing.T) {
 	}{
 		{"tcp", 443}, {"udp", 53}, {"icmp", 0}, {"tcp", 5432},
 	} {
-		allowed, err := Authorize(state, "worker-a", "db-1", probe.protocol, probe.port)
+		allowed, err := Authorize(state, "worker-a", "db-1", probe.protocol, probe.port, nil)
 		if err != nil || !allowed {
 			t.Fatalf("%s/%d allowed = %v err = %v, want true", probe.protocol, probe.port, allowed, err)
 		}
@@ -106,8 +106,31 @@ func TestAuthorizeEmptyProtocolMeansAny(t *testing.T) {
 			Effect:            model.EffectAllow,
 		},
 	}
-	allowed, err := Authorize(state, "worker-a", "db-1", "tcp", 8080)
+	allowed, err := Authorize(state, "worker-a", "db-1", "tcp", 8080, nil)
 	if err != nil || !allowed {
 		t.Fatalf("allowed = %v err = %v, want true", allowed, err)
+	}
+}
+
+// A policy that requires posture only authorizes a source advertising every
+// required label; a source with a missing label is denied even when the group
+// and service match.
+func TestAuthorizeRequiresSourcePosture(t *testing.T) {
+	state := testState()
+	state.Policies[0].Posture = []string{"disk-encrypted", "edr"}
+
+	allowed, err := Authorize(state, "worker-a", "db-1", "tcp", 5432, []string{"disk-encrypted", "edr", "extra"})
+	if err != nil || !allowed {
+		t.Fatalf("fully satisfied posture allowed = %v err = %v, want true", allowed, err)
+	}
+
+	allowed, err = Authorize(state, "worker-a", "db-1", "tcp", 5432, []string{"disk-encrypted"})
+	if err != nil || allowed {
+		t.Fatalf("missing posture allowed = %v err = %v, want false", allowed, err)
+	}
+
+	allowed, err = Authorize(state, "worker-a", "db-1", "tcp", 5432, nil)
+	if err != nil || allowed {
+		t.Fatalf("empty posture allowed = %v err = %v, want false", allowed, err)
 	}
 }

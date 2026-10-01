@@ -97,6 +97,7 @@ export interface Route {
   maxHops?: number;
   budgetIds?: string[];
   masquerade?: boolean;
+  flowClass?: string;
 }
 
 export interface SetupKey {
@@ -140,6 +141,7 @@ export interface Peer {
   dnsLabel?: string;
   lastLogin?: string;
   isExitNode?: boolean;
+  posture?: string[];
 }
 
 export interface CommitteeMember {

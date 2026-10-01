@@ -21,6 +21,9 @@ type LoginRequest struct {
 	// mismatch is rejected with an explicit error instead of a decode failure.
 	ProtocolVersion string   `json:"protocolVersion,omitempty"`
 	Capabilities    []string `json:"capabilities,omitempty"`
+	// Posture is the declarative capability labels the peer advertises. It is
+	// recorded on first registration and later managed through update_peer.
+	Posture []string `json:"posture,omitempty"`
 }
 
 type LoginResponse struct {

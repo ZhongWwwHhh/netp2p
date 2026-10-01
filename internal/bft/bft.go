@@ -223,6 +223,9 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	normalized.Zones = append([]model.DNSZone{}, state.Zones...)
 	normalized.Assignments = append([]model.RouteAssignment{}, state.Assignments...)
 	sort.Slice(normalized.Peers, func(i, j int) bool { return normalized.Peers[i].PeerID < normalized.Peers[j].PeerID })
+	for index := range normalized.Peers {
+		normalized.Peers[index].Posture = dedupeSorted(normalized.Peers[index].Posture)
+	}
 	sort.Slice(normalized.Users, func(i, j int) bool { return normalized.Users[i].ID < normalized.Users[j].ID })
 	sort.Slice(normalized.Groups, func(i, j int) bool { return normalized.Groups[i].ID < normalized.Groups[j].ID })
 	sort.Slice(normalized.Policies, func(i, j int) bool { return normalized.Policies[i].ID < normalized.Policies[j].ID })
@@ -742,6 +745,10 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		if transition.Peer.OverlayIP != "" {
 			return fmt.Errorf("client may not choose overlay IP")
 		}
+		posture, err := sanitizePosture(transition.Peer.Posture)
+		if err != nil {
+			return err
+		}
 		address, err := allocateAddress(*state)
 		if err != nil {
 			return err
@@ -749,6 +756,7 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		peer := transition.Peer
 		peer.OverlayIP = address
 		peer.IsExitNode = false
+		peer.Posture = posture
 		peer.Groups = dedupeSorted(groups)
 		peer.DNSLabel = allocateDNSLabel(*state, peer.Hostname)
 		state.Peers = append(state.Peers, peer)
@@ -926,6 +934,16 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			}
 			if transition.Peer.LastLogin != "" {
 				state.Peers[index].LastLogin = transition.Peer.LastLogin
+			}
+			// Posture is nullable: a nil slice leaves the certified labels
+			// untouched so a routine metadata refresh cannot clear them, while
+			// an explicit (even empty) list replaces them.
+			if transition.Peer.Posture != nil {
+				posture, err := sanitizePosture(transition.Peer.Posture)
+				if err != nil {
+					return err
+				}
+				state.Peers[index].Posture = posture
 			}
 			state.Peers[index].IsExitNode = transition.Peer.IsExitNode
 			if state.Peers[index].DNSLabel == "" {
@@ -1327,6 +1345,18 @@ func validateRoute(state model.NetworkState, route model.Route) error {
 	if route.MaxHops < 0 {
 		return fmt.Errorf("route max hops cannot be negative")
 	}
+	for _, pathType := range route.AllowedPathTypes {
+		switch pathType {
+		case "direct", "via_manager", "multi-hop":
+		default:
+			return fmt.Errorf("route allowed path type %q is unknown", pathType)
+		}
+	}
+	switch route.FlowClass {
+	case "", "latency", "throughput", "reliability", "cost":
+	default:
+		return fmt.Errorf("route flow class %q is unknown", route.FlowClass)
+	}
 	return nil
 }
 
@@ -1411,6 +1441,37 @@ func countOwners(state model.NetworkState) int {
 
 // dedupeSorted returns the distinct values in sorted order. Sorting keeps the
 // derived peer groups identical on every committee member.
+// maxPostureLabels bounds the declared posture so a peer cannot bloat certified
+// state with an unbounded label list.
+const maxPostureLabels = 32
+
+// sanitizePosture trims, rejects empties, dedupes and sorts declared posture
+// labels. It returns an error for blank or oversized input so a malformed
+// registration is rejected rather than silently truncated.
+func sanitizePosture(values []string) ([]string, error) {
+	if len(values) > maxPostureLabels {
+		return nil, fmt.Errorf("posture has %d labels, maximum is %d", len(values), maxPostureLabels)
+	}
+	if len(values) == 0 {
+		return []string{}, nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		label := strings.TrimSpace(value)
+		if label == "" {
+			return nil, fmt.Errorf("posture labels must not be empty")
+		}
+		if _, exists := seen[label]; exists {
+			continue
+		}
+		seen[label] = struct{}{}
+		result = append(result, label)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
 func dedupeSorted(values []string) []string {
 	if len(values) == 0 {
 		return []string{}

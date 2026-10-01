@@ -76,6 +76,7 @@ func PeerRecordToProto(peer model.PeerRecord) *pb.PeerRecord {
 		DnsLabel:      peer.DNSLabel,
 		LastLogin:     peer.LastLogin,
 		IsExitNode:    peer.IsExitNode,
+		Posture:       cloneStrings(peer.Posture),
 	}
 }
 
@@ -95,6 +96,7 @@ func PeerRecordFromProto(message *pb.PeerRecord) model.PeerRecord {
 		DNSLabel:      message.GetDnsLabel(),
 		LastLogin:     message.GetLastLogin(),
 		IsExitNode:    message.GetIsExitNode(),
+		Posture:       cloneStrings(message.GetPosture()),
 	}
 }
 

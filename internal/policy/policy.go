@@ -147,11 +147,19 @@ func Compile(state State, peerID string, epoch uint64) NetworkMap {
 }
 
 // Authorize checks one service access. It reuses Compile semantics for now.
-func Authorize(state State, sourcePeer, destinationPeer, protocol string, port uint16) (bool, error) {
+// Authorize decides whether sourcePeer may send protocol/port to
+// destinationPeer. sourcePosture is the source peer's declared posture; a
+// policy carrying posture requirements only matches when every requirement is
+// present in that set. Deny still takes precedence over allow.
+func Authorize(state State, sourcePeer, destinationPeer, protocol string, port uint16, sourcePosture []string) (bool, error) {
 	if sourcePeer == "" || destinationPeer == "" || sourcePeer == destinationPeer {
 		return false, fmt.Errorf("invalid source/destination peer")
 	}
 	groupIndex := indexGroups(state.Groups)
+	posture := make(map[string]struct{}, len(sourcePosture))
+	for _, label := range sourcePosture {
+		posture[label] = struct{}{}
+	}
 	denied := false
 	allowed := false
 	for _, item := range state.Policies {
@@ -166,6 +174,13 @@ func Authorize(state State, sourcePeer, destinationPeer, protocol string, port u
 		if !matchesService {
 			continue
 		}
+		// A policy requiring posture only applies when the source advertises
+		// every required label; otherwise it is treated as a deny so a missing
+		// posture cannot silently satisfy an allow rule.
+		if !postureSatisfied(item.Posture, posture) {
+			denied = true
+			continue
+		}
 		switch item.Effect {
 		case model.EffectDeny:
 			denied = true
@@ -177,6 +192,17 @@ func Authorize(state State, sourcePeer, destinationPeer, protocol string, port u
 		return false, nil
 	}
 	return allowed, nil
+}
+
+// postureSatisfied reports whether the source posture contains every required
+// label.
+func postureSatisfied(required []string, posture map[string]struct{}) bool {
+	for _, label := range required {
+		if _, ok := posture[label]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // AllowedServices reports the merged service list a source may send to one

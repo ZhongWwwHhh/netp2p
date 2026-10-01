@@ -41,6 +41,7 @@ type clientOptions struct {
 	ssoIssuer    string
 	ssoClientID  string
 	seedPath     string
+	posture      []string
 }
 
 func runClient(ctx context.Context, options clientOptions) error {
@@ -78,6 +79,9 @@ func runClient(ctx context.Context, options clientOptions) error {
 	optionsList := []client.Option{client.WithStateDir(filepath.Join(dataDir, "client"))}
 	if options.hostname != "" {
 		optionsList = append(optionsList, client.WithHostname(options.hostname))
+	}
+	if len(options.posture) > 0 {
+		optionsList = append(optionsList, client.WithPosture(options.posture))
 	}
 	netClient, err := client.New(node, options.managerAddr, sink, optionsList...)
 	if err != nil {

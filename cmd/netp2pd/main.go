@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +37,7 @@ func main() {
 	ssoClientID := flag.String("sso-client-id", "", "OIDC client id used with --sso")
 	statusFile := flag.String("status-file", "", "write client status JSON to this path after login")
 	hostname := flag.String("hostname", "", "stable client hostname advertised for DNS (defaults to the OS hostname)")
+	posture := flag.String("posture", "", "comma-separated posture labels this client advertises at registration")
 	networkID := flag.String("network", "netp2p-test", "network id")
 	adminToken := flag.String("admin-token", "", "admin auth token from seed")
 	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, update-peer, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key, upsert-nameserver, remove-nameserver, upsert-zone, remove-zone, update-dns-settings, update-committee, rotate-committee-keys")
@@ -79,6 +81,7 @@ func main() {
 			dataDir: *dataDir, listenAddr: *listen, managerAddr: *managerAddr,
 			networkID: *networkID, setupKey: *setupKey, packetListen: *packetListen,
 			statusFile: *statusFile, hostname: *hostname, tunName: *tunName, tunMTU: *tunMTU, noTun: *noTun,
+			posture:   strings.Split(*posture, ","),
 			dnsListen: *dnsListen, dnsManage: *dnsManage, noDNS: *noDNS,
 			sso: *sso, ssoIssuer: *ssoIssuer, ssoClientID: *ssoClientID,
 			seedPath: *seedPath,

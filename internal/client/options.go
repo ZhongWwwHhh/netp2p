@@ -31,6 +31,20 @@ func WithHostname(hostname string) Option {
 	}
 }
 
+// WithPosture sets the declarative capability labels this peer advertises at
+// registration. Empty labels are ignored.
+func WithPosture(labels []string) Option {
+	cleaned := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if label != "" {
+			cleaned = append(cleaned, label)
+		}
+	}
+	return func(client *Client) {
+		client.posture = cleaned
+	}
+}
+
 // WithExitForwarding enables subnet/exit gateway duties for this client. The
 // overlay CIDR is the source range that gets masqueraded; run executes the
 // iptables/sysctl commands (nil uses the real runner).

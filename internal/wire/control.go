@@ -18,6 +18,7 @@ func LoginRequestToProto(request protocol.LoginRequest) *pb.LoginRequest {
 		ClientVersion:   request.ClientVersion,
 		ProtocolVersion: request.ProtocolVersion,
 		Capabilities:    cloneStrings(request.Capabilities),
+		Posture:         cloneStrings(request.Posture),
 	}
 }
 
@@ -36,6 +37,7 @@ func LoginRequestFromProto(message *pb.LoginRequest) protocol.LoginRequest {
 		ClientVersion:   message.GetClientVersion(),
 		ProtocolVersion: message.GetProtocolVersion(),
 		Capabilities:    cloneStrings(message.GetCapabilities()),
+		Posture:         cloneStrings(message.GetPosture()),
 	}
 }
 
