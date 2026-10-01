@@ -58,6 +58,7 @@ export interface NetworkSettings {
   quotaEnforcementEnabled?: boolean;
   quotaReportIntervalSeconds?: number;
   defaultFlowClass?: string;
+  exitNodeEnabled?: boolean;
 }
 
 export type PathKind = 'direct' | 'via_manager' | 'multi_hop';
@@ -95,6 +96,7 @@ export interface Route {
   allowedPathTypes?: string[];
   maxHops?: number;
   budgetIds?: string[];
+  masquerade?: boolean;
 }
 
 export interface SetupKey {
@@ -137,6 +139,7 @@ export interface Peer {
   userId?: string;
   dnsLabel?: string;
   lastLogin?: string;
+  isExitNode?: boolean;
 }
 
 export interface CommitteeMember {
@@ -301,6 +304,7 @@ export type StateTransition = (
   | { type: 'set_user_blocked'; user: User }
   | { type: 'remove_user'; targetId: string }
   | { type: 'update_network_settings'; settings: NetworkSettings }
+  | { type: 'update_peer'; peer: Peer }
   | { type: 'update_route_assignment'; assignment: RouteAssignment }
   | { type: 'remove_route_assignment'; targetId: string }
   | { type: 'update_committee'; committee: CommitteeMember[]; committeeConfig?: CommitteeConfig }

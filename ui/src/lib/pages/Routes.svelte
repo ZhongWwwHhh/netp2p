@@ -20,7 +20,7 @@
   const routes = $derived(network.snapshot?.state.routes ?? []);
   const groups = $derived((network.snapshot?.state.groups ?? []).map((group) => group.id));
   const budgets = $derived(network.snapshot?.state.budgets ?? []);
-  const pathTypes = ['direct', 'relay', 'multi-hop', 'gateway'];
+  const pathTypes = ['direct', 'via_manager', 'multi-hop'];
 
   const filtered = $derived(
     routes.filter((route) =>
@@ -41,6 +41,7 @@
       allowedPathTypes: [],
       maxHops: 0,
       budgetIds: [],
+      masquerade: false,
     } as Route;
   }
 
@@ -91,6 +92,7 @@
         { key: 'routing', label: 'Routing group' },
         { key: 'distribution', label: 'Distribution' },
         { key: 'paths', label: 'Allowed paths' },
+        { key: 'masquerade', label: 'NAT' },
         { key: 'metric', label: 'Metric', align: 'right' },
         { key: 'actions', label: '', align: 'right' },
       ]}
@@ -115,6 +117,12 @@
             {#each route.allowedPathTypes ?? [] as path (path)}<span class="code">{path}</span>{/each}
             {#if (route.allowedPathTypes ?? []).length === 0}<span class="text-xs text-slate-400">any</span>{/if}
           </div>
+        {:else if key === 'masquerade'}
+          {#if route.masquerade}
+            <Badge tone="sky" label="masquerade" />
+          {:else}
+            <span class="text-xs text-slate-400">—</span>
+          {/if}
         {:else if key === 'metric'}
           <span class="text-sm text-slate-600">{route.metric}</span>
         {:else if key === 'actions'}
@@ -142,6 +150,9 @@
       <FormField label="Routing group" hint="Peers in this group forward the traffic.">
         <input class="input" bind:value={editing.routingGroup} placeholder="servers" />
       </FormField>
+      <p class="-mt-2 text-xs text-slate-500">
+        For internet or subnet gateways this group must contain at least one peer marked as an exit node on the Peers page.
+      </p>
       <FormField label="Distribution groups" hint="Who may use this route. Empty means every peer.">
         <MultiSelect options={groups} bind:selected={editing.distributionGroups} placeholder="Add distribution group…" />
       </FormField>
@@ -172,6 +183,15 @@
         <FormField label="Metric"><input class="input" type="number" bind:value={editing.metric} /></FormField>
         <FormField label="Max hops" hint="0 means unlimited."><input class="input" type="number" bind:value={editing.maxHops} /></FormField>
       </div>
+      <label class="flex items-start gap-2">
+        <input class="mt-1" type="checkbox" bind:checked={editing.masquerade} />
+        <span>
+          <span class="block text-sm text-slate-700">Masquerade (source NAT)</span>
+          <span class="block text-xs text-slate-500">
+            Rewrite the overlay source when routing to a public or foreign subnet. Required for internet exit nodes.
+          </span>
+        </span>
+      </label>
       <FormField label="Traffic budgets">
         <MultiSelect options={budgets.map((budget) => budget.id)} bind:selected={editing.budgetIds} placeholder="Attach budget…" />
       </FormField>

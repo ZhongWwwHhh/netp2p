@@ -7,7 +7,9 @@
   import Skeleton from '../components/Skeleton.svelte';
   import TrustBadge from '../components/TrustBadge.svelte';
   import { relativeTime, shortPeerId } from '../format';
-  import { network, presenceFor } from '../stores/network.svelte';
+  import { network, presenceFor, submit } from '../stores/network.svelte';
+  import { can } from '../stores/session.svelte';
+  import { notify } from '../stores/toast.svelte';
   import type { Peer, RouteAssignment } from '../types';
 
   let query = $state('');
@@ -16,6 +18,9 @@
   let selected = $state<Peer | null>(null);
   let sortKey = $state('name');
   let sortAsc = $state(true);
+  let busy = $state(false);
+
+  const canWrite = $derived(can('peers', 'update'));
 
   const peers = $derived(network.snapshot?.state.peers ?? []);
   const groups = $derived(network.snapshot?.state.groups ?? []);
@@ -71,11 +76,26 @@
     { key: 'name', label: 'Name', sortable: true },
     { key: 'address', label: 'Address', sortable: true },
     { key: 'groups', label: 'Groups' },
+    { key: 'role', label: 'Role' },
     { key: 'path', label: 'Path (certified)' },
     { key: 'os', label: 'OS / Version', sortable: true },
     { key: 'lastSeen', label: 'Last seen', sortable: true },
     { key: 'status', label: 'Status' },
   ];
+
+  // Exit nodes are the only peers allowed to gateway internet/subnet traffic.
+  // The flag is certified through update_peer, so the toggle is admin-gated.
+  async function toggleExitNode(peer: Peer) {
+    busy = true;
+    const ok = await submit({ type: 'update_peer', peer: { ...peer, isExitNode: !peer.isExitNode } });
+    busy = false;
+    if (ok) {
+      selected = { ...peer, isExitNode: !peer.isExitNode };
+      notify(`${peer.hostname || shortPeerId(peer.peerId, 12)} ${peer.isExitNode ? 'is no longer' : 'is now'} an exit node`);
+    } else {
+      notify(network.error || 'commit failed', 'error');
+    }
+  }
 </script>
 
 <div class="space-y-5">
@@ -142,6 +162,12 @@
                 <span class="text-xs text-slate-400">none</span>
               {/if}
             </div>
+          {:else if key === 'role'}
+            {#if peer.isExitNode}
+              <Badge tone="sky" label="exit node" />
+            {:else}
+              <span class="text-xs text-slate-400">—</span>
+            {/if}
           {:else if key === 'path'}
             {@const assignment = outboundFor(peer.peerId)}
             {#if assignment}
@@ -188,6 +214,24 @@
         <dt class="text-xs uppercase tracking-wide text-slate-400">Groups</dt>
         <dd class="flex flex-wrap gap-1">
           {#each selected.groups ?? [] as group (group)}<Badge tone="slate" label={group} />{/each}
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs uppercase tracking-wide text-slate-400">Exit node</dt>
+        <dd class="mt-1 flex items-center gap-2">
+          {#if selected.isExitNode}
+            <Badge tone="sky" label="enabled" />
+          {:else}
+            <Badge tone="slate" label="disabled" />
+          {/if}
+          {#if canWrite}
+            <button class="btn-ghost text-xs" disabled={busy} onclick={() => toggleExitNode(selected!)}>
+              {selected.isExitNode ? 'Disable' : 'Enable'}
+            </button>
+          {/if}
+        </dd>
+        <dd class="mt-1 text-xs text-slate-500">
+          Exit nodes may gateway internet or subnet routes (Linux/TUN clients only).
         </dd>
       </div>
       <div>

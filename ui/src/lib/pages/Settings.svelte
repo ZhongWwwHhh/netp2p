@@ -224,6 +224,10 @@
           <input type="checkbox" bind:checked={settings.quotaEnforcementEnabled} disabled={!canWrite} />
           <span class="text-sm text-slate-700">Enforce traffic budgets (blocks, throttles and path switches)</span>
         </label>
+        <label class="flex items-center gap-2 md:col-span-2">
+          <input type="checkbox" bind:checked={settings.exitNodeEnabled} disabled={!canWrite} />
+          <span class="text-sm text-slate-700">Allow exit nodes and subnet routes (kernel NAT on Linux/TUN gateways)</span>
+        </label>
       </div>
       {#if canWrite}
         <div class="mt-4 flex justify-end">
