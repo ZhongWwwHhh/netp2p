@@ -78,12 +78,12 @@
 - [x] metrics、审计、混沌测试（`internal/metrics`、`/api/v1/events`、`internal/chaos`）。
 - [x] 审计 actor 归属：服务端写入 `StateTransition.Actor`，纳入 transition hash 与 QC。
 - [x] 告警本地规则与 webhook 导出（`internal/alerts`、`quorum_degraded`/`forward_drops`/`quota_exceeded`/`probe_failed`，状态跳变投递 + 有限重试）。
-- [ ] tracing（OTLP 可选导出）。
-- [ ] Docker compose `quota` / `multihop` / `chaos` / `path` profile（当前 chaos/path/quota 场景在进程内 `go test ./internal/...` 覆盖；compose 仅新增 `/metrics` 抓取断言）。
+- [x] tracing（OTLP 可选导出）。
+- [x] Docker compose `multihop` / `quota` / `chaos` profile 与 `scripts/e2e.sh --with-multihop/--with-quota/--with-chaos` 断言。
 - [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
 - [ ] Windows/macOS TUN 实现（当前仅接口抽象与 stub）与第三方安全审计。
 - [x] threshold DKG（Pedersen DKG，`--dkg`，替代种子确定性派生）。
-- [ ] billing（`/api/v1/quota/history`，见 Phase 11）。
+- [x] billing（`/api/v1/quota/history`，见 Phase 11）。
 
 ## Phase 7：TUN 数据面验收闭环
 
@@ -120,3 +120,11 @@
 - [x] share 持久化：`<dataDir>/dkg-share-<epoch>.json`（原子写）；`SetDKGLoader` 让 manager 重启后继续用本地 share 签名。
 - [x] BFT 接线：`rotate_committee_keys` 可携带经校验的 DKG `GroupPublicKey`，engine 在 commit/catch-up 时采用本地 DKG share；缺省仍走确定性 seed 派生。
 - [x] CLI：`--dkg`（默认 off，全体 manager 需同开）跑一轮 ceremony 后由 leader 提交轮换；`--rotate-committee-keys` 单独提交确定性轮换。
+
+## Phase 11：可观测性收尾 + CI + billing
+
+- [x] OTLP tracing：`internal/tracing` + `--otel-endpoint`（默认空=零开销，`tracing.Enabled()` 守卫）；BFT submit、forward accept、sync handler、DNS resolve 四处埋点。
+- [x] Docker profiles：`multihop`（强制 via-manager，2 跳）、`quota`（每 peer 预算 + 用量历史）、`chaos`（manager 重启恢复）；`scripts/e2e.sh` 新增 `--with-multihop/--with-quota/--with-chaos`。
+- [x] admin CLI 新增 `update-settings` 动作，用于 e2e 提交 `NetworkSettings`。
+- [x] GitHub Actions CI：`lint`（go vet + gofmt）、`test`（`go test ./internal/...`）、`e2e`（userspace）、`ui`（build + vitest）、`build-other`（GOOS=darwin/windows）。
+- [x] billing：`GET /api/v1/quota/history?period=daily|monthly` 从 decision log 的 `update_budget_usage` 按 budget + 时间桶重算（`budgets` 读权限）。

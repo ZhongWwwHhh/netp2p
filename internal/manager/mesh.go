@@ -13,8 +13,10 @@ import (
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/tracing"
 	"github.com/netp2p/netp2p/internal/wire"
 	"github.com/netp2p/netp2p/internal/wire/pb"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -343,6 +345,10 @@ func (mesh *CommitteeMesh) CatchUp(ctx context.Context) error {
 // current leader: the transition is forwarded to the leader and the caller
 // waits for the committed snapshot.
 func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.SignedSnapshot, error) {
+	if tracing.Enabled() {
+		_, span := otel.Tracer("netp2p").Start(context.Background(), "bft.submit")
+		defer span.End()
+	}
 	// Serialize submissions so concurrent client registrations cannot propose
 	// conflicting transitions at the same height.
 	mesh.submitMu.Lock()

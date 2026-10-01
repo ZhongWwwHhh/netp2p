@@ -221,6 +221,23 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"usage": server.manager.QuotaUsage()})
+	case request.Method == http.MethodGet && path == "/api/v1/quota/history":
+		if !identity.Allows(auth.ModuleBudgets, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		period := request.URL.Query().Get("period")
+		if period == "" {
+			period = "daily"
+		}
+		if period != "daily" && period != "monthly" {
+			writeError(writer, http.StatusBadRequest, "period must be daily or monthly")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"period":  period,
+			"entries": server.manager.QuotaHistory(period),
+		})
 	case request.Method == http.MethodGet && path == "/api/v1/alerts":
 		if !identity.Allows(auth.ModuleDiagnostics, auth.OpRead) {
 			writeError(writer, http.StatusForbidden, "forbidden")

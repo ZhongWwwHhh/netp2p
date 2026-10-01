@@ -24,10 +24,12 @@ import (
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/presence"
 	"github.com/netp2p/netp2p/internal/protocol"
+	"github.com/netp2p/netp2p/internal/tracing"
 	"github.com/netp2p/netp2p/internal/transport"
 	"github.com/netp2p/netp2p/internal/version"
 	"github.com/netp2p/netp2p/internal/wire"
 	"github.com/netp2p/netp2p/internal/wire/pb"
+	"go.opentelemetry.io/otel"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -416,6 +418,10 @@ func toRegistration(request protocol.LoginRequest) Registration {
 
 func (manager *Manager) handleSync(stream network.Stream) {
 	defer stream.Close()
+	if tracing.Enabled() {
+		_, span := otel.Tracer("netp2p").Start(context.Background(), "sync.handle")
+		defer span.End()
+	}
 	envelope, err := p2p.DecodeEnvelope(stream)
 	if err != nil {
 		return

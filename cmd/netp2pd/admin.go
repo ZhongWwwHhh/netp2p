@@ -135,6 +135,13 @@ func buildTransition(action, file, target string) (model.StateTransition, error)
 			return transition, err
 		}
 		transition.DNSSettings = &settings
+	case "update-settings":
+		transition.Type = bft.TransitionUpdateSettings
+		var settings model.NetworkSettings
+		if err := loadRecord(file, &settings); err != nil {
+			return transition, err
+		}
+		transition.Settings = &settings
 	case "update-committee":
 		transition.Type = bft.TransitionUpdateCommittee
 		var committee []model.CommitteeMember

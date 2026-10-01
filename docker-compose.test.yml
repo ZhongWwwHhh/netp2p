@@ -179,7 +179,7 @@ services:
   # node, certify the subnet route) from the e2e script.
   admin-cli:
     image: netp2p-test:latest
-    profiles: ["exit"]
+    profiles: ["exit", "multihop", "quota", "chaos"]
     entrypoint: ["sleep", "infinity"]
     volumes: ["./deploy:/config:ro"]
 

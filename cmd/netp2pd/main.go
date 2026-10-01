@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/tracing"
+	"github.com/netp2p/netp2p/internal/version"
 )
 
 func main() {
@@ -42,10 +44,11 @@ func main() {
 	posture := flag.String("posture", "", "comma-separated posture labels this client advertises at registration")
 	networkID := flag.String("network", "netp2p-test", "network id")
 	adminToken := flag.String("admin-token", "", "admin auth token from seed")
-	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, update-peer, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key, upsert-nameserver, remove-nameserver, upsert-zone, remove-zone, update-dns-settings, update-committee, rotate-committee-keys")
+	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, update-peer, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key, upsert-nameserver, remove-nameserver, upsert-zone, remove-zone, update-dns-settings, update-settings, update-committee, rotate-committee-keys")
 	adminFile := flag.String("file", "", "JSON record file for upsert actions or target ID for remove actions")
 	adminTarget := flag.String("target", "", "target ID for remove actions")
 	metricsListen := flag.String("metrics-listen", "", "manager Prometheus /metrics address (empty disables metrics)")
+	otelEndpoint := flag.String("otel-endpoint", "", "OTLP/HTTP trace endpoint host:port or URL (empty disables tracing)")
 	alertWebhook := flag.String("alert-webhook", "", "manager alert webhook URL (empty logs only)")
 	alertWebhookSecret := flag.String("alert-webhook-secret", "", "bearer token sent to the alert webhook")
 	alertAllowInsecure := flag.Bool("allow-insecure-webhook", false, "permit an http alert webhook URL (unsafe)")
@@ -60,6 +63,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTracing, err := tracing.Setup(ctx, *otelEndpoint, version.ProtocolVersion)
+	if err != nil {
+		log.Fatalf("configure tracing: %v", err)
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(shutdownContext)
+	}()
 
 	switch *role {
 	case "manager":

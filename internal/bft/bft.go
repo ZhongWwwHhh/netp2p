@@ -414,6 +414,27 @@ func (engine *Engine) LatestSnapshot() (model.SignedSnapshot, bool) {
 	return snapshot, true
 }
 
+// BudgetUsageHistory returns every committed budget settlement in commit order,
+// so callers can rebuild per-period usage from the decision log rather than
+// trusting a single mutable counter.
+func (engine *Engine) BudgetUsageHistory() []model.BudgetUsage {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	heights := make([]uint64, 0, len(engine.committed))
+	for height := range engine.committed {
+		heights = append(heights, height)
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+	result := make([]model.BudgetUsage, 0, len(heights))
+	for _, height := range heights {
+		snapshot := engine.committed[height]
+		if snapshot.Transition.Type == TransitionUpdateBudgetUse && snapshot.Transition.BudgetUsage != nil {
+			result = append(result, *snapshot.Transition.BudgetUsage)
+		}
+	}
+	return result
+}
+
 // CatchUp commits a certified snapshot received from a peer without needing a
 // local proposal. It is the only path by which a restarting or lagging manager
 // can advance. It accepts height >= current+1 so a broadcast can bridge a gap.

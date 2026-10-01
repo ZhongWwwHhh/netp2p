@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # End-to-end test for the BFT manager + data plane.
 #
-#   scripts/e2e.sh              userspace UDP data plane only
-#   scripts/e2e.sh --with-tun   also verify real kernel traffic through TUN
-#   scripts/e2e.sh --with-exit  also verify subnet/exit routing (implies --with-tun)
+#   scripts/e2e.sh                userspace UDP data plane only
+#   scripts/e2e.sh --with-tun     also verify real kernel traffic through TUN
+#   scripts/e2e.sh --with-exit    also verify subnet/exit routing (implies --with-tun)
+#   scripts/e2e.sh --with-multihop force via-manager paths (implies --with-tun)
+#   scripts/e2e.sh --with-quota   verify budget enforcement and usage history
+#   scripts/e2e.sh --with-chaos   verify recovery after a manager restart
 #
 # Requires docker (with sudo) and python3. TUN mode additionally needs
 # /dev/net/tun on the host and runs TUN clients with NET_ADMIN. Set
@@ -19,13 +22,19 @@ IMAGE=netp2p-test:latest
 RUN_DIR=deploy/run
 WITH_TUN=0
 WITH_EXIT=0
+WITH_MULTIHOP=0
+WITH_QUOTA=0
+WITH_CHAOS=0
 ADMIN_TOKEN=netp2p-admin-v0
 
 for arg in "$@"; do
   case "$arg" in
     --with-tun) WITH_TUN=1 ;;
     --with-exit) WITH_TUN=1; WITH_EXIT=1 ;;
-    *) printf 'unknown flag: %s\nusage: e2e.sh [--with-tun|--with-exit]\n' "$arg" >&2; exit 2 ;;
+    --with-multihop) WITH_TUN=1; WITH_MULTIHOP=1 ;;
+    --with-quota) WITH_QUOTA=1 ;;
+    --with-chaos) WITH_CHAOS=1 ;;
+    *) printf 'unknown flag: %s\nusage: e2e.sh [--with-tun|--with-exit|--with-multihop|--with-quota|--with-chaos]\n' "$arg" >&2; exit 2 ;;
   esac
 done
 
@@ -64,7 +73,7 @@ wait_healthy() {
 admin_transition() {
   local action=$1 file=$2 attempt
   for attempt in $(seq 1 15); do
-    if "${COMPOSE[@]}" --profile exit exec -T admin-cli netp2pd \
+    if "${COMPOSE[@]}" --profile exit --profile multihop --profile quota --profile chaos exec -T admin-cli netp2pd \
       --role admin --manager "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}" \
       --admin-token "$ADMIN_TOKEN" --action "$action" --file "$file"; then
       return 0
@@ -88,6 +97,9 @@ cleanup() {
   profiles="--profile quorum"
   [ "$WITH_TUN" = "1" ] && profiles="$profiles --profile tun"
   [ "$WITH_EXIT" = "1" ] && profiles="$profiles --profile exit"
+  [ "$WITH_MULTIHOP" = "1" ] && profiles="$profiles --profile multihop"
+  [ "$WITH_QUOTA" = "1" ] && profiles="$profiles --profile quota"
+  [ "$WITH_CHAOS" = "1" ] && profiles="$profiles --profile chaos"
   # shellcheck disable=SC2086
   "${COMPOSE[@]}" $profiles down -v --remove-orphans >/dev/null 2>&1 || true
 }
@@ -114,6 +126,9 @@ log "start managers and clients"
 start_profiles=""
 [ "$WITH_TUN" = "1" ] && start_profiles="--profile tun"
 [ "$WITH_EXIT" = "1" ] && start_profiles="$start_profiles --profile exit"
+[ "$WITH_MULTIHOP" = "1" ] && start_profiles="$start_profiles --profile multihop"
+[ "$WITH_QUOTA" = "1" ] && start_profiles="$start_profiles --profile quota"
+[ "$WITH_CHAOS" = "1" ] && start_profiles="$start_profiles --profile chaos"
 # shellcheck disable=SC2086
 "${COMPOSE[@]}" $start_profiles up -d --force-recreate
 
@@ -281,5 +296,84 @@ done
 printf '%s' "$metrics" | grep -q 'netp2p_bft_height' || fail "metrics endpoint missing netp2p_bft_height"
 printf '%s' "$metrics" | grep -q 'netp2p_forward' || fail "metrics endpoint missing forwarding metrics"
 echo "OK: /metrics exposes BFT and forwarding metrics"
+
+# fetch_settings merge <overrides-json> writes a full NetworkSettings record,
+# because update_network_settings replaces the record wholesale.
+fetch_settings() {
+  local overrides=$1
+  curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8080/api/v1/snapshot \
+    | python3 -c '
+import json, sys
+snapshot = json.load(sys.stdin)
+settings = snapshot.get("state", {}).get("settings", {}) or {}
+settings.update(json.loads(sys.argv[1]))
+json.dump(settings, sys.stdout)
+' "$overrides"
+}
+
+if [ "$WITH_MULTIHOP" = "1" ]; then
+  log "MULTIHOP: force via-manager paths with two manager hops"
+  fetch_settings '{"directPathEnabled": false, "viaManagerEnabled": true, "maxManagerHops": 2}' \
+    > deploy/multihop-settings.json
+  admin_transition update-settings /config/multihop-settings.json || fail "update-settings failed"
+  echo "OK: certified settings disable direct paths and enable via-manager paths"
+
+  multihop_ok=0
+  for _ in $(seq 1 30); do
+    if python3 - "$RUN_DIR/client-a-tun.json" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1]))
+kinds = {path.get("kind") for path in status.get("assignments", [])}
+sys.exit(0 if kinds & {"via_manager", "multi_hop"} else 1)
+PY
+    then multihop_ok=1; break; fi
+    sleep 1
+  done
+  [ "$multihop_ok" = "1" ] || fail "client-a-tun never received a via-manager assignment"
+  echo "OK: planner produced a via-manager assignment under the new settings"
+
+  if "${DOCKER[@]}" exec netp2p-client-a-tun-1 ping -c 2 -W 4 "$B_TUN_IP" >/dev/null 2>&1; then
+    echo "OK: kernel traffic still reaches client-b-tun through the manager"
+  else
+    fail "client-a-tun could not reach $B_TUN_IP after forcing via-manager paths"
+  fi
+  forwarded="$(curl -fsS http://127.0.0.1:9100/metrics 2>/dev/null | grep '^netp2p_forward_forwarded_total' || true)"
+  echo "OK: manager forwarding metrics: ${forwarded:-<none>}"
+fi
+
+if [ "$WITH_QUOTA" = "1" ]; then
+  log "QUOTA: enforce a per-peer budget and rebuild usage history"
+  A_PEER_ID="$(status_field "$RUN_DIR/client-a.json" peerID)"
+  cat > deploy/quota-budget.json <<JSON
+{"id":"quota-a","subjectType":"peer","subjectID":"$A_PEER_ID","dailyBytes":4096,"monthlyBytes":4096,"peakBps":0,"forwardingCostLimit":0,"onExhausted":"block"}
+JSON
+  admin_transition upsert-budget /config/quota-budget.json || fail "upsert-budget failed"
+  fetch_settings '{"quotaEnforcementEnabled": true, "quotaReportIntervalSeconds": 5}' \
+    > deploy/quota-settings.json
+  admin_transition update-settings /config/quota-settings.json || fail "quota settings update failed"
+  echo "OK: certified budget and enforcement settings committed"
+
+  for _ in $(seq 1 20); do probe client-a "$A_IP" "$B_IP" 2s >/dev/null 2>&1 || true; sleep 1; done
+  history_ok=0
+  for _ in $(seq 1 30); do
+    count="$(curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
+      'http://127.0.0.1:8080/api/v1/quota/history?period=daily' 2>/dev/null \
+      | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("entries", [])))' 2>/dev/null || echo 0)"
+    if [ "${count:-0}" -gt 0 ]; then history_ok=1; break; fi
+    sleep 2
+  done
+  [ "$history_ok" = "1" ] || fail "quota history stayed empty after traffic"
+  echo "OK: quota history rebuilt from the decision log ($count entries)"
+fi
+
+if [ "$WITH_CHAOS" = "1" ]; then
+  log "CHAOS: restart the failed manager and confirm the committee recovers"
+  "${COMPOSE[@]}" start manager-4 >/dev/null
+  sleep 5
+  fetch_settings '{"loginExpirationDays": 30}' > deploy/chaos-settings.json
+  admin_transition update-settings /config/chaos-settings.json \
+    || fail "committee could not certify after manager-4 restarted"
+  echo "OK: four managers certified again after the restart"
+fi
 
 log "e2e passed"

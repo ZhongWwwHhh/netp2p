@@ -4,12 +4,15 @@
 package forward
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/tracing"
+	"go.opentelemetry.io/otel"
 )
 
 const DefaultTTL = 4
@@ -67,6 +70,10 @@ func (table *Table) Replace(state model.NetworkState) {
 // multi-hop path. libp2p authenticates the transport peer, so this binds the
 // in-band header to a real identity instead of trusting it.
 func (table *Table) Accept(remote peer.ID, envelope Envelope) (bool, error) {
+	if tracing.Enabled() {
+		_, span := otel.Tracer("netp2p").Start(context.Background(), "forward.accept")
+		defer span.End()
+	}
 	if envelope.Header.TTL == 0 {
 		table.dropped.Add(1)
 		return false, ErrTTLExceeded

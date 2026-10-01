@@ -166,3 +166,57 @@ func sameUTCMonth(a, b time.Time) bool {
 	by, bm, _ := b.UTC().Date()
 	return ay == by && am == bm
 }
+
+// QuotaHistoryEntry is one budget's usage in one period, rebuilt from the
+// decision log. Usage settlements carry absolute counters, so the latest
+// settlement in a period wins.
+type QuotaHistoryEntry struct {
+	BudgetID string `json:"budgetId"`
+	Period   string `json:"period"`
+	Bytes    uint64 `json:"bytes"`
+}
+
+// QuotaHistory rebuilds per-period usage from committed update_budget_usage
+// transitions. period is "daily" or "monthly".
+func (manager *Manager) QuotaHistory(period string) []QuotaHistoryEntry {
+	return aggregateQuotaHistory(manager.engine.BudgetUsageHistory(), period)
+}
+
+// aggregateQuotaHistory folds absolute usage settlements into one entry per
+// (period, budget), keeping the latest value seen in the decision log.
+func aggregateQuotaHistory(usage []model.BudgetUsage, period string) []QuotaHistoryEntry {
+	monthly := period == "monthly"
+	latest := make(map[string]map[string]uint64)
+	for _, item := range usage {
+		key := item.PeriodDay
+		bytes := item.DailyBytes
+		if monthly {
+			key = item.PeriodMonth
+			bytes = item.MonthlyBytes
+		}
+		if key == "" {
+			continue
+		}
+		if latest[key] == nil {
+			latest[key] = make(map[string]uint64)
+		}
+		latest[key][item.BudgetID] = bytes
+	}
+	keys := make([]string, 0, len(latest))
+	for key := range latest {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]QuotaHistoryEntry, 0)
+	for _, key := range keys {
+		budgetIDs := make([]string, 0, len(latest[key]))
+		for budgetID := range latest[key] {
+			budgetIDs = append(budgetIDs, budgetID)
+		}
+		sort.Strings(budgetIDs)
+		for _, budgetID := range budgetIDs {
+			result = append(result, QuotaHistoryEntry{BudgetID: budgetID, Period: key, Bytes: latest[key][budgetID]})
+		}
+	}
+	return result
+}

@@ -8,6 +8,7 @@
 package dns
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"sort"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/tracing"
+	"go.opentelemetry.io/otel"
 )
 
 // Config is the certified subset the resolver needs.
@@ -112,6 +115,10 @@ func (resolver *Resolver) Shutdown() error {
 }
 
 func (resolver *Resolver) handle(writer dns.ResponseWriter, request *dns.Msg) {
+	if tracing.Enabled() {
+		_, span := otel.Tracer("netp2p").Start(context.Background(), "dns.resolve")
+		defer span.End()
+	}
 	response := new(dns.Msg)
 	response.SetReply(request)
 	response.Authoritative = true
