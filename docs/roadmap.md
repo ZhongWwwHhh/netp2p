@@ -47,7 +47,7 @@
 - [x] B-score 链路评分：加权 RTT/loss/bandwidth/cost，归一化区间由 Web Settings 中的 relay advantage 阈值参数化。
 - [x] RTT/loss/jitter/bandwidth probe（`/netp2p/link/probe/1.0.0`）：manager 主动测量 mesh 与 client access 链路，有界突发受 `ProbeBandwidthBudgetKB` 约束。
 - [x] EigenSpeed 式 manager mesh 链路观测网与 client 不可信隔离：trimmed median + 幂迭代主特征向量 + 离群降权，access 段独立于 mesh 矩阵。
-- [x] 评分收敛到 `internal/path.Score`（删除 `link.directScore`），未知带宽不再被硬排除；scheduler 对指标抖动做容差抑制。
+- [x] 评分收敛到 `internal/path.Score`（删除 `link.directScore`），未知带宽不再被硬排除；scheduler 对指标抖动做容差抑制，并在单次扫描内收敛所有发生变化的 peer pair（避免每个 assignment 各占一个 30s 冷却窗口导致多 peer 网络收敛过慢）。
 - [x] flow class 用户可选（`Route`/`Policy.FlowClass` + `NetworkSettings.DefaultFlowClass` 接入 `path.Score` 权重）。
 - [x] 路径持久化 hot-standby（重启后恢复 last-known-good path 与准入状态，TTL 24h）。
 - [x] 取消 relay 身份，manager 成为 client/决策/转发/UI 超集。
@@ -79,7 +79,7 @@
 - [x] 审计 actor 归属：服务端写入 `StateTransition.Actor`，纳入 transition hash 与 QC。
 - [x] 告警本地规则与 webhook 导出（`internal/alerts`、`quorum_degraded`/`forward_drops`/`quota_exceeded`/`probe_failed`，状态跳变投递 + 有限重试）。
 - [x] tracing（OTLP 可选导出）。
-- [x] Docker compose `multihop` / `quota` / `chaos` profile 与 `scripts/e2e.sh --with-multihop/--with-quota/--with-chaos` 断言。
+- [x] Docker compose `multihop` / `quota` / `chaos` profile 与 `scripts/e2e.sh --with-multihop/--with-quota/--with-chaos` 断言（4 个 profile 均已本地 Docker 实测通过）。
 - [x] 安装器（nfpm DEB/RPM + systemd unit + `netp2pd --role doctor`）、协议版本协商（`/2.0.0`）与升级文档。
 - [x] Windows/macOS TUN 实现（`RouteConfigurator` 抽象 + `wireguard-go/tun` 后端；本机仅编译验证）与第三方安全审计（仍待外部完成）。
 - [x] threshold DKG（Pedersen DKG，`--dkg`，替代种子确定性派生）。
@@ -124,8 +124,8 @@
 ## Phase 11：可观测性收尾 + CI + billing
 
 - [x] OTLP tracing：`internal/tracing` + `--otel-endpoint`（默认空=零开销，`tracing.Enabled()` 守卫）；BFT submit、forward accept、sync handler、DNS resolve 四处埋点。
-- [x] Docker profiles：`multihop`（强制 via-manager，2 跳）、`quota`（每 peer 预算 + 用量历史）、`chaos`（manager 重启恢复）；`scripts/e2e.sh` 新增 `--with-multihop/--with-quota/--with-chaos`。
-- [x] admin CLI 新增 `update-settings` 动作，用于 e2e 提交 `NetworkSettings`。
+- [x] Docker profiles：`multihop`（认证 `directPathEnabled=false`/`maxManagerHops=2`，断言出现 `via_manager` assignment 且 manager 转发计数 > 0）、`quota`（每 peer block 预算，断言超限后后续 probe 被丢弃且用量结算进 decision log）、`chaos`（`manager-4` 重启后恢复出块）；`scripts/e2e.sh` 新增 `--with-multihop/--with-quota/--with-chaos`。
+- [x] admin CLI 新增 `update-settings` 动作（提交 `NetworkSettings`）与只读 `show-snapshot` 查询（认证 AdminProtocol 返回最新 certified snapshot JSON）；e2e 的设置/用量断言走该查询，因为 `--web-listen` 端口只暴露 `/api/bootstrap`。
 - [x] GitHub Actions CI：`lint`（go vet + gofmt）、`test`（`go test ./internal/...`）、`e2e`（userspace）、`ui`（build + vitest）、`build-other`（GOOS=darwin/windows）。
 - [x] billing：`GET /api/v1/quota/history?period=daily|monthly` 从 decision log 的 `update_budget_usage` 按 budget + 时间桶重算（`budgets` 读权限）。
 
