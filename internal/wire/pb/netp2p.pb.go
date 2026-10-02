@@ -3135,9 +3135,12 @@ func (x *AdmissionReport) GetObservedAt() string {
 }
 
 type AdminRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
-	Transition    *StateTransition       `protobuf:"bytes,2,opt,name=transition,proto3" json:"transition,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Token      string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	Transition *StateTransition       `protobuf:"bytes,2,opt,name=transition,proto3" json:"transition,omitempty"`
+	// query, when non-empty, turns the request into a read-only inspection
+	// instead of a transition submission. Supported: "snapshot".
+	Query         string `protobuf:"bytes,3,opt,name=query,proto3" json:"query,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3186,10 +3189,19 @@ func (x *AdminRequest) GetTransition() *StateTransition {
 	return nil
 }
 
+func (x *AdminRequest) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
 type AdminResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Snapshot      *SignedSnapshot        `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
-	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Snapshot *SignedSnapshot        `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
+	Error    string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	// data carries the JSON payload for a read-only query response.
+	Data          []byte `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3236,6 +3248,13 @@ func (x *AdminResponse) GetError() string {
 		return x.Error
 	}
 	return ""
+}
+
+func (x *AdminResponse) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
 }
 
 type PresenceObservation struct {
@@ -4142,15 +4161,17 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\x06rtt_ms\x18\x04 \x01(\x01R\x05rttMs\x12\x19\n" +
 	"\bloss_pct\x18\x05 \x01(\x01R\alossPct\x12\x1f\n" +
 	"\vobserved_at\x18\x06 \x01(\tR\n" +
-	"observedAt\"`\n" +
+	"observedAt\"v\n" +
 	"\fAdminRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12:\n" +
 	"\n" +
 	"transition\x18\x02 \x01(\v2\x1a.netp2p.v1.StateTransitionR\n" +
-	"transition\"\\\n" +
+	"transition\x12\x14\n" +
+	"\x05query\x18\x03 \x01(\tR\x05query\"p\n" +
 	"\rAdminResponse\x125\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x19.netp2p.v1.SignedSnapshotR\bsnapshot\x12\x14\n" +
-	"\x05error\x18\x02 \x01(\tR\x05error\"\xbf\x01\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12\x12\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\xbf\x01\n" +
 	"\x13PresenceObservation\x12\x17\n" +
 	"\apeer_id\x18\x01 \x01(\tR\x06peerId\x12\x16\n" +
 	"\x06online\x18\x02 \x01(\bR\x06online\x12\x1b\n" +

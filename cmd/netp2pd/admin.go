@@ -29,6 +29,12 @@ func runAdmin(ctx context.Context, managerAddr, token, action, file, target stri
 	if err := node.Host.Connect(connectCtx, *info); err != nil {
 		return fmt.Errorf("connect manager: %w", err)
 	}
+	if payload, ok, err := runAdminQuery(ctx, node, info.ID, token, action); err != nil {
+		return err
+	} else if ok {
+		fmt.Println(string(payload))
+		return nil
+	}
 	transition, err := buildTransition(action, file, target)
 	if err != nil {
 		return err
@@ -46,6 +52,25 @@ func runAdmin(ctx context.Context, managerAddr, token, action, file, target stri
 	}, "", "  ")
 	fmt.Println(string(encoded))
 	return nil
+}
+
+// adminQueries maps read-only CLI actions to admin protocol queries.
+var adminQueries = map[string]string{
+	"show-snapshot": "snapshot",
+}
+
+func runAdminQuery(ctx context.Context, node *p2p.Node, managerID peer.ID, token, action string) ([]byte, bool, error) {
+	query, ok := adminQueries[action]
+	if !ok {
+		return nil, false, nil
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	payload, err := manager.QueryAdmin(queryCtx, node, managerID, token, query)
+	if err != nil {
+		return nil, true, err
+	}
+	return payload, true, nil
 }
 
 func buildTransition(action, file, target string) (model.StateTransition, error) {

@@ -120,11 +120,18 @@ func AdminRequestToProto(token string, transition model.StateTransition) *pb.Adm
 	return &pb.AdminRequest{Token: token, Transition: StateTransitionToProto(transition)}
 }
 
-func AdminRequestFromProto(message *pb.AdminRequest) (string, model.StateTransition) {
+// AdminQueryToProto builds a read-only admin request. Queries never carry a
+// transition: the manager answers them from certified local state without
+// submitting anything to BFT.
+func AdminQueryToProto(token, query string) *pb.AdminRequest {
+	return &pb.AdminRequest{Token: token, Query: query}
+}
+
+func AdminRequestFromProto(message *pb.AdminRequest) (string, model.StateTransition, string) {
 	if message == nil {
-		return "", model.StateTransition{}
+		return "", model.StateTransition{}, ""
 	}
-	return message.GetToken(), StateTransitionFromProto(message.GetTransition())
+	return message.GetToken(), StateTransitionFromProto(message.GetTransition()), message.GetQuery()
 }
 
 func AdminResponseToProto(snapshot *model.SignedSnapshot, errMessage string) *pb.AdminResponse {
@@ -133,6 +140,11 @@ func AdminResponseToProto(snapshot *model.SignedSnapshot, errMessage string) *pb
 		response.Snapshot = SignedSnapshotToProto(*snapshot)
 	}
 	return response
+}
+
+// AdminQueryResponseToProto carries the JSON payload of a read-only query.
+func AdminQueryResponseToProto(data []byte, errMessage string) *pb.AdminResponse {
+	return &pb.AdminResponse{Data: data, Error: errMessage}
 }
 
 func AdminResponseFromProto(message *pb.AdminResponse) (*model.SignedSnapshot, string) {
@@ -145,6 +157,15 @@ func AdminResponseFromProto(message *pb.AdminResponse) (*model.SignedSnapshot, s
 		snapshot = &value
 	}
 	return snapshot, message.GetError()
+}
+
+// AdminQueryResponseFromProto returns the raw JSON payload of a read-only
+// query response.
+func AdminQueryResponseFromProto(message *pb.AdminResponse) ([]byte, string) {
+	if message == nil {
+		return nil, ""
+	}
+	return message.GetData(), message.GetError()
 }
 
 // QuotaReport is the client-to-manager usage increment.

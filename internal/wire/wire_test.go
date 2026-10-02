@@ -176,6 +176,26 @@ func roundTrip(t *testing.T, message proto.Message, restored proto.Message) {
 	}
 }
 
+// TestAdminQueryRoundTrip covers the read-only admin inspection path: a query
+// carries no transition, and a query response carries raw JSON in data.
+func TestAdminQueryRoundTrip(t *testing.T) {
+	message := wire.AdminQueryToProto("tok", "snapshot")
+	var restored pb.AdminRequest
+	roundTrip(t, message, &restored)
+	token, transition, query := wire.AdminRequestFromProto(&restored)
+	if token != "tok" || query != "snapshot" || transition.Type != "" {
+		t.Fatalf("admin query round trip mismatch: token=%q query=%q transition=%q", token, query, transition.Type)
+	}
+
+	response := wire.AdminQueryResponseToProto([]byte(`{"height":3}`), "")
+	var restoredResponse pb.AdminResponse
+	roundTrip(t, response, &restoredResponse)
+	data, errMessage := wire.AdminQueryResponseFromProto(&restoredResponse)
+	if string(data) != `{"height":3}` || errMessage != "" {
+		t.Fatalf("admin query response mismatch: data=%q err=%q", data, errMessage)
+	}
+}
+
 // Posture labels must survive the protobuf boundary and keep their order.
 func TestPeerRecordPostureRoundTrip(t *testing.T) {
 	peer := model.PeerRecord{

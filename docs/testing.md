@@ -64,8 +64,13 @@ scripts/e2e.sh --with-tun
 7. 从宿主抓取 `manager-1` 的 `http://127.0.0.1:9100/metrics`，断言存在 `netp2p_bft_height` 与 `netp2p_forward_*` 指标。
 8. `--with-tun` 时先等待 overlay DNS 解析 peer 名，再验证内核 ICMP `client-a-tun -> client-b-tun` 收到 reply、TCP 按 certified policy 通、外部域名继续由备份上游转发。
 9. `--with-exit` 时（隐含 `--with-tun`）用 admin CLI 把 `client-exit-tun` 提升为 exit node 并认证一条 `198.18.0.0/24` 的 route，然后验证 `client-a-tun` 安装该内核路由、`ping 198.18.0.10` 经 gateway 抵达、gateway 上存在 MASQUERADE 规则。
+10. `--with-multihop` 时（隐含 `--with-tun`）通过 admin CLI 认证 `directPathEnabled=false` / `viaManagerEnabled=true` / `maxManagerHops=2` 的 settings，等到 `client-a-tun` 收到 `via_manager`/`multi_hop` assignment，再验证内核流量仍经 manager 转发（转发计数 > 0）。
+11. `--with-quota` 时认证一条针对 `client-b` 的 2 KiB block 预算并开启 enforcement，持续发流量直到超限，然后断言后续 probe 被丢弃、且认证用量已结算进 decision log。
+12. `--with-chaos` 时重启先前停掉的 `manager-4`，再提交一次 settings 变更，验证 4 manager 恢复出块。
 
 `NETP2P_E2E_KEEP=1 scripts/e2e.sh` 保留容器便于排查；默认退出时 `down -v` 清理。
+
+> admin CLI 的只读动作 `--action show-snapshot` 走已认证的 AdminProtocol 返回最新 certified snapshot（JSON）。浏览器的 `--web-listen` 端口只暴露 `/api/bootstrap`，控制台其余 API 经 js-libp2p WebRTC 隧道访问，因此脚本断言一律走 admin CLI 而非 HTTP。
 
 ## Docker：TUN、SSO 与控制台
 

@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -469,5 +470,25 @@ func TestAdminSubmitRoundTrip(t *testing.T) {
 	}
 	if _, err := SubmitAdmin(ctx, adminNode, nodes[0].Host.ID(), "wrong-token", model.StateTransition{Type: bft.TransitionRemoveGroup, TargetID: "admin-group"}); err == nil {
 		t.Fatal("expected wrong token to be rejected")
+	}
+
+	// The read-only inspection path answers from certified state and must not
+	// commit a transition.
+	raw, err := QueryAdmin(ctx, adminNode, nodes[0].Host.ID(), "test-token", "snapshot")
+	if err != nil {
+		t.Fatalf("query snapshot: %v", err)
+	}
+	var queried model.SignedSnapshot
+	if err := json.Unmarshal(raw, &queried); err != nil {
+		t.Fatalf("decode queried snapshot: %v", err)
+	}
+	if queried.Height != 2 {
+		t.Fatalf("queried height %d, want 2", queried.Height)
+	}
+	if _, err := QueryAdmin(ctx, adminNode, nodes[0].Host.ID(), "wrong-token", "snapshot"); err == nil {
+		t.Fatal("expected wrong token to be rejected for a query")
+	}
+	if _, err := QueryAdmin(ctx, adminNode, nodes[0].Host.ID(), "test-token", "unknown"); err == nil {
+		t.Fatal("expected unknown query to be rejected")
 	}
 }

@@ -5,6 +5,10 @@ deploy/compose.env
 deploy/state.json
 deploy/exit-peer.json
 deploy/exit-route.json
+deploy/multihop-settings.json
+deploy/quota-budget.json
+deploy/quota-settings.json
+deploy/chaos-settings.json
 ui/node_modules/
 bin/
 # nfpm package output (root only). The console build under

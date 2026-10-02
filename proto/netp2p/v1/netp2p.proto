@@ -377,11 +377,16 @@ message AdmissionReport {
 message AdminRequest {
   string token = 1;
   StateTransition transition = 2;
+  // query, when non-empty, turns the request into a read-only inspection
+  // instead of a transition submission. Supported: "snapshot".
+  string query = 3;
 }
 
 message AdminResponse {
   SignedSnapshot snapshot = 1;
   string error = 2;
+  // data carries the JSON payload for a read-only query response.
+  bytes data = 3;
 }
 
 // ---------------------------------------------------------------------------

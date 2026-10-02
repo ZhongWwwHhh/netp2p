@@ -83,6 +83,22 @@ admin_transition() {
   return 1
 }
 
+# admin_query runs a read-only inspection over the authenticated admin
+# protocol. The manager serves it from certified local state; the plain
+# browser-bootstrap listener intentionally exposes only /api/bootstrap.
+admin_query() {
+  local action=$1 attempt
+  for attempt in $(seq 1 15); do
+    if "${COMPOSE[@]}" --profile exit --profile multihop --profile quota --profile chaos exec -T admin-cli netp2pd \
+      --role admin --manager "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}" \
+      --admin-token "$ADMIN_TOKEN" --action "$action" 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
 probe() {
   local service=$1 source=$2 target=$3 timeout=$4
   "${COMPOSE[@]}" exec -T "$service" netp2p-probe \
@@ -298,11 +314,11 @@ printf '%s' "$metrics" | grep -q 'netp2p_forward' || fail "metrics endpoint miss
 echo "OK: /metrics exposes BFT and forwarding metrics"
 
 # fetch_settings merge <overrides-json> writes a full NetworkSettings record,
-# because update_network_settings replaces the record wholesale.
+# because update_network_settings replaces the record wholesale. The current
+# record is read from the manager over the authenticated admin protocol.
 fetch_settings() {
   local overrides=$1
-  curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8080/api/v1/snapshot \
-    | python3 -c '
+  admin_query show-snapshot | python3 -c '
 import json, sys
 snapshot = json.load(sys.stdin)
 settings = snapshot.get("state", {}).get("settings", {}) or {}
@@ -319,7 +335,9 @@ if [ "$WITH_MULTIHOP" = "1" ]; then
   echo "OK: certified settings disable direct paths and enable via-manager paths"
 
   multihop_ok=0
-  for _ in $(seq 1 30); do
+  # Probe/scheduler intervals mean the first via-manager assignment can take a
+  # couple of ticks to appear; poll well past that.
+  for _ in $(seq 1 90); do
     if python3 - "$RUN_DIR/client-a-tun.json" <<'PY'
 import json, sys
 status = json.load(open(sys.argv[1]))
@@ -342,10 +360,10 @@ PY
 fi
 
 if [ "$WITH_QUOTA" = "1" ]; then
-  log "QUOTA: enforce a per-peer budget and rebuild usage history"
-  A_PEER_ID="$(status_field "$RUN_DIR/client-a.json" peerID)"
+  log "QUOTA: exhaust a per-peer budget and confirm enforcement"
+  B_PEER_ID="$(status_field "$RUN_DIR/client-b.json" peerID)"
   cat > deploy/quota-budget.json <<JSON
-{"id":"quota-a","subjectType":"peer","subjectID":"$A_PEER_ID","dailyBytes":4096,"monthlyBytes":4096,"peakBps":0,"forwardingCostLimit":0,"onExhausted":"block"}
+{"id":"quota-b","subjectType":"peer","subjectID":"$B_PEER_ID","dailyBytes":2048,"monthlyBytes":2048,"peakBps":0,"forwardingCostLimit":0,"onExhausted":"block"}
 JSON
   admin_transition upsert-budget /config/quota-budget.json || fail "upsert-budget failed"
   fetch_settings '{"quotaEnforcementEnabled": true, "quotaReportIntervalSeconds": 5}' \
@@ -353,17 +371,40 @@ JSON
   admin_transition update-settings /config/quota-settings.json || fail "quota settings update failed"
   echo "OK: certified budget and enforcement settings committed"
 
-  for _ in $(seq 1 20); do probe client-a "$A_IP" "$B_IP" 2s >/dev/null 2>&1 || true; sleep 1; done
-  history_ok=0
-  for _ in $(seq 1 30); do
-    count="$(curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" \
-      'http://127.0.0.1:8080/api/v1/quota/history?period=daily' 2>/dev/null \
-      | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("entries", [])))' 2>/dev/null || echo 0)"
-    if [ "${count:-0}" -gt 0 ]; then history_ok=1; break; fi
+  # Give clients a moment to sync the budget and the enforcement flag, then
+  # push traffic until the 2 KiB budget for client-b is spent.
+  sleep 5
+  for _ in $(seq 1 60); do probe client-a "$A_IP" "$B_IP" 2s >/dev/null 2>&1 || true; done
+
+  # Client-side admission blocks locally as soon as the tracked usage exceeds
+  # the cap, so probes to the over-budget peer must now be dropped.
+  blocked=0
+  for _ in $(seq 1 20); do
+    if ! probe client-a "$A_IP" "$B_IP" 2s >/dev/null 2>&1; then blocked=1; break; fi
+  done
+  [ "$blocked" = "1" ] || fail "client-a kept sending after its budget was exhausted"
+  echo "OK: exhausted budget blocked further client-a -> client-b traffic"
+
+  # Certified usage settles on a 60s cadence: the manager turns client reports
+  # into an update_budget_usage transition the committee must certify.
+  usage_ok=0
+  usage_bytes=0
+  for _ in $(seq 1 90); do
+    usage_bytes="$(admin_query show-snapshot | python3 -c '
+import json, sys
+snapshot = json.load(sys.stdin)
+for budget in snapshot.get("state", {}).get("budgets", []):
+    if budget.get("id") == "quota-b":
+        print(budget.get("usedDailyBytes", 0))
+        break
+else:
+    print(0)
+' 2>/dev/null || echo 0)"
+    if [ "${usage_bytes:-0}" -gt 0 ]; then usage_ok=1; break; fi
     sleep 2
   done
-  [ "$history_ok" = "1" ] || fail "quota history stayed empty after traffic"
-  echo "OK: quota history rebuilt from the decision log ($count entries)"
+  [ "$usage_ok" = "1" ] || fail "certified budget usage never settled into the decision log"
+  echo "OK: certified budget usage settled ($usage_bytes bytes)"
 fi
 
 if [ "$WITH_CHAOS" = "1" ]; then

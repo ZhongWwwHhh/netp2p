@@ -3,6 +3,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -35,9 +36,18 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 			respondAdmin(stream, AdminResponse{Error: "invalid request"})
 			return
 		}
-		token, transition := wire.AdminRequestFromProto(&message)
+		token, transition, query := wire.AdminRequestFromProto(&message)
 		if adminToken == "" || token != adminToken {
 			respondAdmin(stream, AdminResponse{Error: "forbidden"})
+			return
+		}
+		if query != "" {
+			payload, err := adminQuery(mesh, query)
+			if err != nil {
+				respondAdminQuery(stream, nil, err.Error())
+				return
+			}
+			respondAdminQuery(stream, payload, "")
 			return
 		}
 		if err := auth.AuthorizeTransition(auth.BreakGlass(), transition.Type); err != nil {
@@ -56,6 +66,51 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 		}
 		respondAdmin(stream, AdminResponse{Snapshot: &snapshot})
 	})
+}
+
+// adminQuery answers read-only admin inspections from certified local state.
+// Queries never touch BFT and never mutate anything, so a manager can serve
+// them even while the committee is degraded.
+func adminQuery(mesh *CommitteeMesh, query string) ([]byte, error) {
+	switch query {
+	case "snapshot":
+		snapshot, ok := mesh.engine.LatestSnapshot()
+		if !ok {
+			return nil, &AdminError{Message: "no certified snapshot"}
+		}
+		return json.Marshal(snapshot)
+	default:
+		return nil, &AdminError{Message: "unknown query " + query}
+	}
+}
+
+// QueryAdmin performs a read-only inspection over the admin protocol. The
+// manager authenticates the token exactly as it does for transitions.
+func QueryAdmin(ctx context.Context, node *p2p.Node, managerID peer.ID, adminToken, query string) ([]byte, error) {
+	stream, err := node.Host.NewStream(ctx, managerID, p2p.AdminProtocol)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	if err := p2p.WriteMessage(stream, p2p.AdminProtocol, wire.AdminQueryToProto(adminToken, query)); err != nil {
+		return nil, err
+	}
+	if closer, ok := stream.(interface{ CloseWrite() error }); ok {
+		_ = closer.CloseWrite()
+	}
+	envelope, err := p2p.DecodeEnvelope(stream)
+	if err != nil {
+		return nil, err
+	}
+	var message pb.AdminResponse
+	if err := proto.Unmarshal(envelope.Payload, &message); err != nil {
+		return nil, err
+	}
+	data, errMessage := wire.AdminQueryResponseFromProto(&message)
+	if errMessage != "" {
+		return nil, &AdminError{Message: errMessage}
+	}
+	return data, nil
 }
 
 // SubmitAdmin sends an authenticated transition to a manager and waits for the
@@ -101,6 +156,12 @@ func (err *AdminError) Error() string { return err.Message }
 
 func respondAdmin(stream network.Stream, response AdminResponse) {
 	if err := p2p.WriteMessage(stream, p2p.AdminProtocol, wire.AdminResponseToProto(response.Snapshot, response.Error)); err != nil {
+		stream.Reset()
+	}
+}
+
+func respondAdminQuery(stream network.Stream, data []byte, errMessage string) {
+	if err := p2p.WriteMessage(stream, p2p.AdminProtocol, wire.AdminQueryResponseToProto(data, errMessage)); err != nil {
 		stream.Reset()
 	}
 }

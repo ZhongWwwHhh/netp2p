@@ -44,7 +44,7 @@ func main() {
 	posture := flag.String("posture", "", "comma-separated posture labels this client advertises at registration")
 	networkID := flag.String("network", "netp2p-test", "network id")
 	adminToken := flag.String("admin-token", "", "admin auth token from seed")
-	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, update-peer, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key, upsert-nameserver, remove-nameserver, upsert-zone, remove-zone, update-dns-settings, update-settings, update-committee, rotate-committee-keys")
+	adminAction := flag.String("action", "", "admin action: upsert-group, remove-group, upsert-policy, remove-policy, update-peer, upsert-route, remove-route, upsert-budget, remove-budget, upsert-setup-key, remove-setup-key, upsert-nameserver, remove-nameserver, upsert-zone, remove-zone, update-dns-settings, update-settings, update-committee, rotate-committee-keys, show-snapshot")
 	adminFile := flag.String("file", "", "JSON record file for upsert actions or target ID for remove actions")
 	adminTarget := flag.String("target", "", "target ID for remove actions")
 	metricsListen := flag.String("metrics-listen", "", "manager Prometheus /metrics address (empty disables metrics)")
