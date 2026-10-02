@@ -127,3 +127,62 @@ func TestSchedulerIgnoresMetricNoise(t *testing.T) {
 		t.Fatalf("scheduler churned on metric noise: %d transitions", len(manager.transitions))
 	}
 }
+
+// A single reconcile sweep must reconcile every allowed pair, so a network
+// with several peers does not need one cooldown window per assignment.
+func TestSchedulerReconcilesEveryPairInOneSweep(t *testing.T) {
+	state := model.NetworkState{
+		NetworkID: "net",
+		Settings: model.NetworkSettings{
+			ViaManagerEnabled: true, DirectPathEnabled: true, MaxManagerHops: 2,
+		},
+		Peers: []model.PeerRecord{
+			{PeerID: "client-a"}, {PeerID: "client-b"}, {PeerID: "client-c"},
+		},
+	}
+	committee := []model.CommitteeMember{{
+		ID: "manager-a", PeerID: testCommitteePeerID(t, 303), ForwardingEnabled: true,
+	}}
+	hop := committee[0].PeerID
+	now := time.Now().UTC()
+	view := Aggregate([]Observation{
+		{ObserverID: hop, SubjectID: "client-a", Scope: ScopeAccess, RTTMilliseconds: 10, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: hop, SubjectID: "client-b", Scope: ScopeAccess, RTTMilliseconds: 10, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+		{ObserverID: hop, SubjectID: "client-c", Scope: ScopeAccess, RTTMilliseconds: 10, BandwidthMbps: 100, Samples: 5, MeasuredAt: now},
+	}, now, time.Minute, 100)
+	allowed := func(source, destination string) ([]model.Service, bool) {
+		if source == "client-a" && (destination == "client-b" || destination == "client-c") {
+			return []model.Service{{Protocol: "icmp"}}, true
+		}
+		return nil, false
+	}
+	manager := &stubSchedulerManager{}
+	scheduler := NewScheduler(manager, committee, func() LinkView { return view })
+	scheduler.allowed = allowed
+	if err := scheduler.Reconcile(state); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.transitions) != 2 {
+		t.Fatalf("expected both allowed pairs in one sweep, got %d transitions", len(manager.transitions))
+	}
+	destinations := make(map[string]bool)
+	for _, transition := range manager.transitions {
+		destinations[transition.Assignment.DestinationPeerID] = true
+	}
+	if !destinations["client-b"] || !destinations["client-c"] {
+		t.Fatalf("missing assignment in sweep: %v", destinations)
+	}
+
+	// A second sweep with unchanged inputs must not write anything.
+	state.Assignments = []model.RouteAssignment{
+		*manager.transitions[0].Assignment,
+		*manager.transitions[1].Assignment,
+	}
+	scheduler.lastReplan = time.Now().Add(-time.Minute)
+	if err := scheduler.Reconcile(state); err != nil {
+		t.Fatal(err)
+	}
+	if len(manager.transitions) != 2 {
+		t.Fatalf("unchanged sweep churned: %d transitions", len(manager.transitions))
+	}
+}

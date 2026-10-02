@@ -75,6 +75,12 @@ func (scheduler *Scheduler) Reconcile(state model.NetworkState) error {
 			}, source, destination)
 		}
 	}
+	// One sweep reconciles every policy-allowed pair and submits all changed
+	// assignments together. Submitting a single assignment per cooldown meant a
+	// network with many peers took minutes to converge; the change-detection
+	// below (sameAssignment) is what actually bounds consensus writes, so a
+	// full sweep is both correct and fast.
+	submitted := false
 	for _, source := range state.Peers {
 		for _, destination := range state.Peers {
 			if source.PeerID == destination.PeerID {
@@ -94,9 +100,11 @@ func (scheduler *Scheduler) Reconcile(state model.NetworkState) error {
 			if _, err := scheduler.manager.Submit(model.StateTransition{Type: bft.TransitionUpdateAssignment, Assignment: &next}); err != nil {
 				return err
 			}
-			scheduler.lastReplan = time.Now()
-			return nil
+			submitted = true
 		}
+	}
+	if submitted {
+		scheduler.lastReplan = time.Now()
 	}
 	return nil
 }
