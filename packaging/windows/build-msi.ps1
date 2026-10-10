@@ -5,6 +5,16 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
+$msiVersion = $Version.TrimStart("v").Split("+")[0].Split("-")[0]
+try {
+  $parsedVersion = [version]::Parse("$msiVersion.0")
+} catch {
+  throw "invalid MSI product version '$Version'"
+}
+if ($parsedVersion.Major -gt 255 -or $parsedVersion.Minor -gt 255 -or $parsedVersion.Build -gt 65535) {
+  throw "MSI product version '$msiVersion' is outside the Windows Installer range"
+}
+
 $wintun = Join-Path $BinDir "wintun.dll"
 $wintunVersion = "0.14.1"
 $wintunSHA256 = "E5DA8447DC2C320EDC0FC52FA01885C103DE8C118481F683643CACC3220DAFCE"
@@ -28,9 +38,23 @@ if (-not (Test-Path $wintun)) {
   Copy-Item $extracted $wintun
 }
 
+$definitionPath = Join-Path $PSScriptRoot "netp2p.wxs"
+if (-not (Test-Path $definitionPath)) {
+  throw "missing WiX definition: $definitionPath"
+}
+$definition = Get-Content $definitionPath -Raw
+$referencedFiles = [regex]::Matches($definition, '\$\(var\.BinDir\)\\([^"]+)') |
+  ForEach-Object { $_.Groups[1].Value -replace '/', '\' } | Select-Object -Unique
+foreach ($referencedFile in $referencedFiles) {
+  $candidate = Join-Path $BinDir $referencedFile
+  if (-not (Test-Path $candidate)) {
+    throw "WiX definition references missing packaging input: $candidate"
+  }
+}
+
 wix build `
   -arch x64 `
-  -define ProductVersion=$Version `
+  -define ProductVersion=$msiVersion `
   -define BinDir=$BinDir `
   -out (Join-Path $OutDir "netp2p-$Version-windows-amd64.msi") `
   (Join-Path $PSScriptRoot "netp2p.wxs")

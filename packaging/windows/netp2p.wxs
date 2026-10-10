@@ -11,6 +11,7 @@
           </Component>
           <Component Id="ServiceFiles" Guid="B2D83372-CBAE-42B4-90CE-1A47E2A2B3D4">
             <File Id="NetP2PCLI" Source="$(var.BinDir)\netp2p.exe" KeyPath="yes" />
+            <File Id="ConfigCheck" Source="$(var.BinDir)\netp2p-configcheck.exe" />
             <File Id="TrayScript" Source="$(var.BinDir)\tray.ps1" />
             <ServiceInstall Id="NetP2PService" Name="NetP2PClient" Type="ownProcess" Start="auto" ErrorControl="normal" Arguments="service run --config [NETP2P_CONFIG]runtime.yaml" />
             <ServiceControl Id="NetP2PServiceControl" Name="NetP2PClient" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
@@ -20,7 +21,11 @@
       <StandardDirectory Id="CommonAppDataFolder">
         <Directory Id="NETP2P_CONFIG" Name="netp2p">
           <Component Id="ConfigFiles" Guid="6DC58065-9E5A-4E28-8F57-1D2E5A98DDB0">
-            <File Id="RuntimeConfig" Source="$(var.BinDir)\runtime.yaml" KeyPath="yes" />
+            <File Id="RuntimeConfig" Source="$(var.BinDir)\runtime.yaml" KeyPath="yes">
+              <Permission User="SYSTEM" GenericAll="yes" />
+              <Permission User="Administrators" GenericAll="yes" />
+              <Permission User="Users" GenericRead="yes" GenericExecute="yes" />
+            </File>
           </Component>
         </Directory>
       </StandardDirectory>
@@ -37,5 +42,10 @@
       <ComponentRef Id="ConfigFiles" />
       <ComponentRef Id="TrayShortcut" />
     </Feature>
+
+    <CustomAction Id="ValidateWindowsRuntimeConfig" FileRef="ConfigCheck" ExeCommand="--first-run --secure" Execute="deferred" Impersonate="no" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="ValidateWindowsRuntimeConfig" Before="InstallServices" Condition='NOT REMOVE="ALL"' />
+    </InstallExecuteSequence>
   </Package>
 </Wix>

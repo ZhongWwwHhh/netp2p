@@ -1,0 +1,21 @@
+# Windows client profile. Credential fields are added during login.
+version: 1
+role: client
+dataDir: C:\ProgramData\netp2p\data
+listen: /ip4/0.0.0.0/udp/0/quic-v1
+metricsListen: 127.0.0.1:9102
+ipc:
+  path: \\.\pipe\netp2pd
+
+alert:
+  webhook: ""
+  webhookSecret: ""
+  interval: 15s
+  dropCount: 100
+  dropRatePercent: 5
+
+# Complete these with `netp2p login` or unattended provisioning:
+# network: <network-id>
+# trust: <trust bundle path>
+# manager: <manager multiaddr>
+# setupKeyFile: <protected setup-key path>
