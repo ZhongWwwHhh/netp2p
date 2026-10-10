@@ -211,6 +211,9 @@ func runManager(ctx context.Context, options managerOptions) error {
 			if snapshotParams != params {
 				return fmt.Errorf("certified committee parameters %+v do not match manifest %+v", snapshotParams, params)
 			}
+			if !sameRoutingCommittee(members, latest.Committee) {
+				return fmt.Errorf("certified committee membership does not match the network manifest")
+			}
 			if committeeConfig.CommitteeEpoch == 0 || len(committeeConfig.GroupPublicKey) == 0 {
 				return fmt.Errorf("certified ledger has no DKG committee key")
 			}
@@ -451,6 +454,31 @@ func stdEd25519PrivateKey(key hostcrypto.PrivKey) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("manager private key is not Ed25519")
 	}
 	return ed25519.PrivateKey(raw), nil
+}
+
+// sameRoutingCommittee compares identity and transport material that must not
+// drift from the public manifest. DKG public shares are intentionally excluded:
+// they are established by the certified committee epoch and verified through
+// the group key and local share.
+func sameRoutingCommittee(manifest, certified []model.CommitteeMember) bool {
+	if len(manifest) != len(certified) {
+		return false
+	}
+	normalize := func(members []model.CommitteeMember) []model.CommitteeMember {
+		result := append([]model.CommitteeMember(nil), members...)
+		sort.Slice(result, func(left, right int) bool { return result[left].ID < result[right].ID })
+		return result
+	}
+	left, right := normalize(manifest), normalize(certified)
+	for index := range left {
+		a, b := left[index], right[index]
+		if a.ID != b.ID || a.PeerID != b.PeerID || a.Address != b.Address ||
+			a.ListenAddr != b.ListenAddr || a.ForwardingEnabled != b.ForwardingEnabled ||
+			a.KeySeed != 0 || b.KeySeed != 0 || !bytes.Equal(a.PublicKey, b.PublicKey) {
+			return false
+		}
+	}
+	return true
 }
 
 func connectCommittee(ctx context.Context, node *p2p.Node, members []model.CommitteeMember, localID string) error {
