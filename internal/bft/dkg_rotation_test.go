@@ -65,29 +65,29 @@ func streamBytes(tag byte) []byte {
 // verifies the committee keeps certifying under the new epoch while the old
 // configuration is rejected.
 func TestDKGKeyRotation(t *testing.T) {
-	committee, keys := testCommittee()
+	committee, keys := legacyCommittee()
 	for index := range committee {
 		committee[index].PeerID = "peer-" + committee[index].ID
 		committee[index].Address = "/ip4/10.0.0.1/udp/1/quic-v1"
 		committee[index].ForwardingEnabled = true
 	}
 	state := testState()
-	engines := make([]*Engine, CommitteeSize)
+	engines := make([]*Engine, len(committee))
 	for index, key := range keys {
-		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		engine, err := NewEngineWithParams(state, committee, committee[index].ID, key, legacyCommitteeParams())
 		if err != nil {
 			t.Fatal(err)
 		}
 		engines[index] = engine
 	}
 
-	points := make([]fr.Element, CommitteeSize)
+	points := make([]fr.Element, len(committee))
 	for index := range points {
 		points[index] = bls.PointForIdentity(committee[index].ID)
 	}
-	results := runPedersenDKG(t, QuorumSize, points)
+	results := runPedersenDKG(t, legacyCommitteeParams().QuorumSize, points)
 	for index, engine := range engines {
-		keySet, err := results[index].KeySet(QuorumSize, CommitteeSize, index, points)
+		keySet, err := results[index].KeySet(legacyCommitteeParams().QuorumSize, len(committee), index, points)
 		if err != nil {
 			t.Fatalf("key set %d: %v", index, err)
 		}
@@ -131,7 +131,7 @@ func TestDKGKeyRotation(t *testing.T) {
 	// A snapshot claiming epoch 0 under the DKG key configuration is invalid.
 	stale := next
 	stale.QC.CommitteeEpoch = 0
-	stale.CommitteeConfig = model.CommitteeConfig{Threshold: QuorumSize, Size: CommitteeSize, GroupPublicKey: results[0].GroupPublicKey, CommitteeEpoch: 1}
+	stale.CommitteeConfig = legacyCommitteeParams().CommitteeConfig(1, results[0].GroupPublicKey)
 	if err := ValidateSnapshot(stale); err == nil {
 		t.Fatal("epoch-0 QC accepted under a DKG epoch-1 configuration")
 	}

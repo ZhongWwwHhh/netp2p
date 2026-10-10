@@ -3,12 +3,14 @@ package web
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ import (
 type oidcProxy struct {
 	issuer       string
 	clientID     string
+	audience     string
 	scopes       []string
 	authURL      string
 	tokenURL     string
@@ -34,9 +37,10 @@ type oidcProxy struct {
 }
 
 type pendingAuth struct {
-	verifier string
-	redirect string
-	created  time.Time
+	verifier  string
+	redirect  string
+	stateHash []byte
+	created   time.Time
 }
 
 func newOIDCProxy(config *BootstrapOIDC) *oidcProxy {
@@ -46,6 +50,7 @@ func newOIDCProxy(config *BootstrapOIDC) *oidcProxy {
 	return &oidcProxy{
 		issuer:   config.Issuer,
 		clientID: config.ClientID,
+		audience: strings.TrimSpace(config.Audience),
 		scopes:   config.Scopes,
 		authURL:  config.AuthorizationEndpoint,
 		tokenURL: config.TokenEndpoint,
@@ -82,8 +87,16 @@ func (proxy *oidcProxy) login(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	redirect := request.URL.Query().Get("redirect")
+	redirect = safeRedirect(redirect)
+	http.SetCookie(writer, &http.Cookie{
+		Name: "netp2p_oidc_state", Value: state, Path: "/auth/callback",
+		MaxAge: 600, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
+	stateDigest := sha256.Sum256([]byte(state))
 	proxy.mu.Lock()
-	proxy.requests[state] = pendingAuth{verifier: verifier, redirect: redirect, created: time.Now()}
+	proxy.requests[state] = pendingAuth{
+		verifier: verifier, redirect: redirect, stateHash: stateDigest[:], created: time.Now(),
+	}
 	proxy.pruneLocked()
 	proxy.mu.Unlock()
 
@@ -105,6 +118,9 @@ func (proxy *oidcProxy) login(writer http.ResponseWriter, request *http.Request)
 	query.Set("state", state)
 	query.Set("code_challenge", challenge)
 	query.Set("code_challenge_method", "S256")
+	if proxy.audience != "" {
+		query.Set("audience", proxy.audience)
+	}
 	authorize.RawQuery = query.Encode()
 	http.Redirect(writer, request, authorize.String(), http.StatusFound)
 }
@@ -112,7 +128,9 @@ func (proxy *oidcProxy) login(writer http.ResponseWriter, request *http.Request)
 func (proxy *oidcProxy) callback(writer http.ResponseWriter, request *http.Request) {
 	state := request.URL.Query().Get("state")
 	code := request.URL.Query().Get("code")
-	if code == "" {
+	stateCookie, cookieErr := request.Cookie("netp2p_oidc_state")
+	if code == "" || cookieErr != nil || stateCookie.Value == "" ||
+		subtle.ConstantTimeCompare([]byte(stateCookie.Value), []byte(state)) != 1 {
 		http.Error(writer, "missing authorization code", http.StatusBadRequest)
 		return
 	}
@@ -124,18 +142,27 @@ func (proxy *oidcProxy) callback(writer http.ResponseWriter, request *http.Reque
 		http.Error(writer, "unknown or expired login attempt", http.StatusBadRequest)
 		return
 	}
+	stateDigest := sha256.Sum256([]byte(state))
+	if subtle.ConstantTimeCompare(pending.stateHash, stateDigest[:]) != 1 {
+		http.Error(writer, "invalid login state", http.StatusBadRequest)
+		return
+	}
 	idToken, err := proxy.exchange(request, code, pending.verifier)
 	if err != nil {
 		http.Error(writer, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadGateway)
 		return
 	}
-	// Hand the token to the SPA in the URL fragment: fragments are never sent
-	// to the server, so the token does not land in manager access logs.
-	redirect := pending.redirect
-	if redirect == "" || !strings.HasPrefix(redirect, "/") {
-		redirect = "/"
-	}
-	http.Redirect(writer, request, redirect+"#id_token="+url.QueryEscape(idToken), http.StatusFound)
+	// Keep the browser session in an HttpOnly cookie. The ID token never
+	// appears in a URL, referrer, browser history, or manager access log.
+	http.SetCookie(writer, &http.Cookie{
+		Name: "netp2p_session", Value: idToken, Path: "/",
+		MaxAge: 3600, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
+	http.SetCookie(writer, &http.Cookie{
+		Name: "netp2p_oidc_state", Value: "", Path: "/auth/callback",
+		MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
+	http.Redirect(writer, request, safeRedirect(pending.redirect), http.StatusFound)
 }
 
 func (proxy *oidcProxy) exchange(request *http.Request, code, verifier string) (string, error) {
@@ -217,6 +244,27 @@ func (proxy *oidcProxy) callbackURL(request *http.Request) string {
 	return scheme + "://" + request.Host + "/auth/callback"
 }
 
+func safeRedirect(raw string) string {
+	if raw == "" || strings.ContainsAny(raw, "\r\n\\") {
+		return "/"
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" ||
+		parsed.User != nil || parsed.Opaque != "" {
+		return "/"
+	}
+	if !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
+		return "/"
+	}
+	parsed.Path = path.Clean(parsed.Path)
+	if parsed.Path == "." || parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+	return parsed.String()
+}
+
 func (proxy *oidcProxy) pruneLocked() {
 	cutoff := time.Now().Add(-10 * time.Minute)
 	for state, pending := range proxy.requests {
@@ -237,7 +285,7 @@ func pkcePair() (verifier, challenge string, err error) {
 }
 
 func randomState() (string, error) {
-	buffer := make([]byte, 16)
+	buffer := make([]byte, 32)
 	if _, err := rand.Read(buffer); err != nil {
 		return "", err
 	}

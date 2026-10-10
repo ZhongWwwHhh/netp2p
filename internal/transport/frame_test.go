@@ -2,9 +2,12 @@ package transport
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/netp2p/netp2p/internal/forward"
 )
 
 func TestWriteReadFrameRoundTrip(t *testing.T) {
@@ -43,16 +46,78 @@ func TestWriteFrameRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
-func TestReadFrameRejectsInvalidLength(t *testing.T) {
+func TestProtocolFrameRoundTrip(t *testing.T) {
+	var buffer bytes.Buffer
+	if err := WriteProtocolFrame(&buffer, ProtocolEnvelope, []byte("forwarded")); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := ReadProtocolFrame(&buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Protocol != ProtocolEnvelope || string(frame.Payload) != "forwarded" {
+		t.Fatalf("frame = %+v", frame)
+	}
+	if _, err := ReadEnvelopeFrame(bytes.NewReader(nil)); !errors.Is(err, io.EOF) {
+		t.Fatalf("empty reader error = %v, want EOF", err)
+	}
+}
+
+func TestReadProtocolFrameRejectsInvalidInput(t *testing.T) {
 	cases := map[string][]byte{
-		"zero length":    {0, 0, 0, 0},
-		"beyond maximum": {0, 0xff, 0xff, 0xff},
-		"truncated body": {0, 0, 0, 10, 1, 2, 3},
-		"truncated head": {0, 0},
+		"zero protocol":      append(u32(0), 'p'),
+		"protocol too large": append(u32(MaxProtocolIDLength+1), 'p'),
+		"truncated protocol": append(u32(2), 'p'),
+		"zero payload":       typedFrame(ProtocolPacket, nil),
+		"payload too large":  append(append(append(u32(len(ProtocolPacket)), []byte(ProtocolPacket)...), u32(MaxProtocolFramePayloadSize+1)...), 'x'),
+		"truncated payload":  append(append(append(u32(len(ProtocolPacket)), []byte(ProtocolPacket)...), u32(10)...), 'x'),
 	}
 	for name, data := range cases {
-		if _, err := ReadFrame(bytes.NewReader(data)); err == nil {
+		if _, err := ReadProtocolFrame(bytes.NewReader(data)); err == nil {
 			t.Fatalf("%s: expected error", name)
 		}
+	}
+	if _, err := ReadFrame(bytes.NewReader(typedFrame(ProtocolEnvelope, []byte("x")))); err == nil {
+		t.Fatal("ReadFrame must reject envelope frames")
+	}
+	if _, err := ReadEnvelopeFrame(bytes.NewReader(typedFrame(ProtocolPacket, []byte("x")))); err == nil {
+		t.Fatal("ReadEnvelopeFrame must reject packet frames")
+	}
+}
+
+func u32(value int) []byte {
+	var buffer [4]byte
+	binary.BigEndian.PutUint32(buffer[:], uint32(value))
+	return buffer[:]
+}
+
+func typedFrame(protocol string, payload []byte) []byte {
+	var buffer bytes.Buffer
+	buffer.Write(u32(len(protocol)))
+	buffer.WriteString(protocol)
+	buffer.Write(u32(len(payload)))
+	buffer.Write(payload)
+	return buffer.Bytes()
+}
+
+func TestFrameProtocolForClassifiesLegacySend(t *testing.T) {
+	envelope, err := forward.EncodeEnvelope(forward.Envelope{
+		Header: forward.Header{
+			SourcePeerID: "source", DestinationPeerID: "destination",
+			AssignmentID: "assignment", PathID: "path", TTL: 3,
+		},
+		Payload: []byte("forwarded"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := frameProtocolFor(envelope); got != ProtocolEnvelope {
+		t.Fatalf("envelope protocol = %q", got)
+	}
+	if got := frameProtocolFor([]byte{0x45, 0x00, 0x00, 0x14}); got != ProtocolPacket {
+		t.Fatalf("IPv4 protocol = %q", got)
+	}
+	if got := frameProtocolFor([]byte{forward.MagicByte, 0x00, 0x00}); got != ProtocolPacket {
+		t.Fatalf("malformed envelope protocol = %q", got)
 	}
 }

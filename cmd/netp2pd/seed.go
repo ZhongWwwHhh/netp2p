@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,7 +13,7 @@ import (
 )
 
 func defaultSeed() config.Seed {
-	managers := make([]model.CommitteeMember, 4)
+	managers := make([]model.CommitteeMember, 3)
 	for index := range managers {
 		managers[index] = model.CommitteeMember{
 			ID:         fmt.Sprintf("manager-%d", index+1),
@@ -21,10 +23,12 @@ func defaultSeed() config.Seed {
 		}
 	}
 	return config.Seed{
-		NetworkID:   "netp2p-test",
-		OverlayCIDR: "100.64.0.0/24",
-		AdminToken:  "netp2p-admin-v0",
-		Managers:    managers,
+		Development:     true,
+		NetworkID:       "netp2p-test",
+		OverlayCIDR:     "100.64.0.0/24",
+		CommitteeParams: model.DefaultCommitteeParams(),
+		AdminToken:      "netp2p-admin-v0",
+		Managers:        managers,
 		SetupKeys: []model.SetupKey{
 			{ID: "setup-key-a", Name: "Bootstrap A", Token: "setup-key-a", TokenPrefix: "setup-key-a"[:8], Type: model.SetupKeyReusable, Groups: []string{"clients-a"}},
 			{ID: "setup-key-b", Name: "Bootstrap B", Token: "setup-key-b", TokenPrefix: "setup-key-b"[:8], Type: model.SetupKeyReusable, Groups: []string{"clients-b"}},
@@ -78,7 +82,12 @@ func writeSeed(path string) error {
 		return fmt.Errorf("--config is required for seedgen")
 	}
 	seed := defaultSeed()
-	seed.Finalize()
+	sessionSecret := make([]byte, 32)
+	if _, err := rand.Read(sessionSecret); err != nil {
+		return fmt.Errorf("generate session secret: %w", err)
+	}
+	seed.SessionSecret = base64.RawStdEncoding.EncodeToString(sessionSecret)
+	seed.FinalizeDev()
 	encoded, err := json.MarshalIndent(seed, "", "  ")
 	if err != nil {
 		return err

@@ -92,7 +92,10 @@ func deviceToken(t *testing.T, issuer, clientID string) string {
 func newTokenClient(t *testing.T, seed int64, managerAddr, token string) *client.Client {
 	t.Helper()
 	ctx := t.Context()
-	node, err := p2p.New(ctx, p2p.Config{IdentitySeed: seed})
+	node, err := p2p.New(ctx, p2p.Config{
+		IdentitySeed: seed,
+		Listen:       []string{"/ip4/127.0.0.1/udp/0/quic-v1"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

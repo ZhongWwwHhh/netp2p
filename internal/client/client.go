@@ -33,13 +33,18 @@ import (
 )
 
 type Client struct {
-	node       *p2p.Node
-	manager    peer.AddrInfo
-	sink       packet.PacketSink
-	snapshot   model.SignedSnapshot
-	self       model.PeerRecord
-	networkMap policy.NetworkMap
-	mu         sync.RWMutex
+	node             *p2p.Node
+	manager          peer.AddrInfo
+	managers         []peer.AddrInfo
+	managerAddresses []string
+	activeManager    int
+	connectionState  ClientState
+	lastManagerError string
+	sink             packet.PacketSink
+	snapshot         model.SignedSnapshot
+	self             model.PeerRecord
+	networkMap       policy.NetworkMap
+	mu               sync.RWMutex
 
 	flows           *conntrack.Table
 	frames          *transport.Transport
@@ -50,6 +55,7 @@ type Client struct {
 	admissionQueue  []netproto.AdmissionReport
 	admissionWaiter *admissionWaiter
 	pathStore       *pathStore
+	stateStore      *clientStateStore
 	synthesizeICMP  bool
 	routesReady     bool
 	posture         []string
@@ -60,12 +66,12 @@ type Client struct {
 }
 
 func New(node *p2p.Node, managerAddr string, sink packet.PacketSink, options ...Option) (*Client, error) {
-	info, err := peer.AddrInfoFromString(managerAddr)
-	if err != nil {
+	if _, err := peer.AddrInfoFromString(managerAddr); err != nil {
 		return nil, fmt.Errorf("invalid manager address: %w", err)
 	}
 	client := &Client{
-		node: node, manager: *info, sink: sink, flows: conntrack.NewTable(),
+		node: node, sink: sink, flows: conntrack.NewTable(),
+		managerAddresses: []string{managerAddr},
 	}
 	client.forwarding = forward.NewTable(model.NetworkState{}, node.Host.ID().String(), func(remote peer.ID, envelope forward.Envelope) error {
 		frames := client.frameTransport()
@@ -76,11 +82,15 @@ func New(node *p2p.Node, managerAddr string, sink packet.PacketSink, options ...
 		if err != nil {
 			return err
 		}
-		return frames.Send(remote, wire)
+		return frames.SendEnvelope(remote, wire)
 	})
 	for _, option := range options {
 		option(client)
 	}
+	if err := client.setManagers(); err != nil {
+		return nil, err
+	}
+	client.restorePersistedState()
 	client.paths = newPathSelector(client.forwarding, client.pathStore)
 	if marker, ok := sink.(packet.UserspaceICMP); ok {
 		client.synthesizeICMP = marker.SynthesizeICMP()
@@ -119,16 +129,19 @@ func (client *Client) Login(ctx context.Context, networkID, setupKey, jwtToken s
 	request.Posture = append([]string(nil), client.posture...)
 	var loginReply pb.LoginResponse
 	if err := client.request(ctx, p2p.LoginProtocol, wire.LoginRequestToProto(request), &loginReply); err != nil {
+		client.markManagerRequestFailure(err)
 		return err
 	}
 	response := wire.LoginResponseFromProto(&loginReply)
 	if response.Error != "" {
+		client.setClientState(ClientStateNeedsLogin)
 		if response.Code != "" {
 			return &LoginError{Code: response.Code, Message: response.Error}
 		}
 		return fmt.Errorf("login failed: %s", response.Error)
 	}
-	if err := bft.ValidateSnapshot(response.Snapshot); err != nil {
+	if err := bft.ValidateClientSnapshot(response.Snapshot); err != nil {
+		client.setClientState(ClientStateFailed)
 		return fmt.Errorf("invalid certified snapshot: %w", err)
 	}
 	client.applySnapshot(response.Snapshot, response.Peer)
@@ -156,10 +169,16 @@ func (client *Client) Sync(ctx context.Context) error {
 	var syncReply pb.SignedSnapshot
 	if err := client.request(ctx, p2p.SyncProtocol, wire.SyncRequestToProto(syncRequest), &syncReply); err != nil {
 		client.queueAdmissions(admissions)
+		client.markManagerRequestFailure(err)
 		return err
 	}
 	snapshot := wire.SignedSnapshotFromProto(&syncReply)
-	if err := bft.ValidateSnapshot(snapshot); err != nil {
+	if err := bft.ValidateClientSnapshot(snapshot); err != nil {
+		if client.SnapshotHeight() > 0 {
+			client.setClientState(ClientStateDegraded)
+		} else {
+			client.setClientState(ClientStateFailed)
+		}
 		return err
 	}
 	if snapshot.Height <= height {
@@ -194,7 +213,45 @@ func (client *Client) SyncLoop(ctx context.Context) {
 }
 
 func (client *Client) connect(ctx context.Context) error {
-	return client.node.Host.Connect(ctx, client.manager)
+	client.mu.RLock()
+	candidates := append([]peer.AddrInfo(nil), client.managers...)
+	start := client.activeManager
+	client.mu.RUnlock()
+	if len(candidates) == 0 {
+		return fmt.Errorf("no manager endpoints configured")
+	}
+	var lastErr error
+	for offset := range candidates {
+		index := (start + offset) % len(candidates)
+		candidate := candidates[index]
+		if err := client.node.Host.Connect(ctx, candidate); err != nil {
+			lastErr = err
+			continue
+		}
+		client.mu.Lock()
+		client.manager = candidate
+		client.activeManager = index
+		client.lastManagerError = ""
+		if client.snapshot.Height > 0 {
+			client.connectionState = ClientStateReady
+		} else {
+			client.connectionState = ClientStateNeedsLogin
+		}
+		client.mu.Unlock()
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no manager endpoint was reachable")
+	}
+	client.mu.Lock()
+	client.lastManagerError = lastErr.Error()
+	if client.snapshot.Height > 0 {
+		client.connectionState = ClientStateDegraded
+	} else {
+		client.connectionState = ClientStateFailed
+	}
+	client.mu.Unlock()
+	return lastErr
 }
 
 func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.PeerRecord) {
@@ -211,6 +268,8 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 		client.self = self
 	}
 	client.networkMap = networkMap
+	client.connectionState = ClientStateReady
+	client.lastManagerError = ""
 	if client.quota == nil {
 		client.quota = quota.NewEnforcer(snapshot.State.Budgets)
 	} else {
@@ -219,6 +278,7 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	localPeerID := client.node.Host.ID()
 	overlayIPs := client.peerOverlayIPsLocked()
 	client.mu.Unlock()
+	client.persistSnapshot(snapshot, self)
 	client.rememberPeers(snapshot, localPeerID)
 	client.reconcileRoutesWhenReady(overlayIPs)
 	client.reconcileNetworks()

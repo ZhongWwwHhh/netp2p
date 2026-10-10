@@ -33,11 +33,25 @@ func (runner *recordingRunner) lines() []string {
 // linkDevice builds a Device around one end of an in-memory full-duplex pipe so
 // packet IO can be tested without creating a real interface. The returned
 // connection is the far end a peer would appear on.
-func linkDevice(t *testing.T, runner Runner) (*Device, net.Conn) {
-	t.Helper()
+func linkDevice(tb testing.TB, runner Runner) (*Device, net.Conn) {
+	tb.Helper()
 	deviceSide, peerSide := net.Pipe()
-	device := &Device{file: deviceSide, name: "netp2p0", run: runner, routes: make(map[string]struct{})}
-	t.Cleanup(func() { _ = peerSide.Close() })
+	var device *Device
+	device = &Device{
+		file: deviceSide, name: "netp2p0", run: runner,
+		routes: make(map[string]struct{}), networks: make(map[string]struct{}),
+		pinned: make(map[string]struct{}), hostRoutes: make(map[string]string),
+		config: ipConfigurator{
+			run: runner,
+			output: func(name string, args ...string) (string, error) {
+				if device == nil || device.output == nil {
+					return "", nil
+				}
+				return device.output(name, args...)
+			},
+		},
+	}
+	tb.Cleanup(func() { _ = peerSide.Close() })
 	return device, peerSide
 }
 
@@ -115,7 +129,10 @@ func TestReconcileNetworksPinsUnderlayForDefaultRoute(t *testing.T) {
 	runner := &recordingRunner{fail: map[string]error{}}
 	device, _ := linkDevice(t, runner.run)
 	device.output = func(name string, args ...string) (string, error) {
-		return "default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.10 metric 100\n", nil
+		if len(args) >= 3 && args[0] == "route" && args[1] == "show" && args[2] == "default" {
+			return "default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.10 metric 100\n", nil
+		}
+		return "", nil
 	}
 	device.SetUnderlayHosts([]string{"198.51.100.7"})
 
@@ -123,7 +140,7 @@ func TestReconcileNetworksPinsUnderlayForDefaultRoute(t *testing.T) {
 		t.Fatalf("reconcile networks: %v", err)
 	}
 	lines := runner.lines()
-	wantPin := "ip route replace 198.51.100.7/32 via 192.0.2.1"
+	wantPin := "ip route replace 198.51.100.7/32 via 192.0.2.1 table 20048"
 	found := false
 	for _, line := range lines {
 		if line == wantPin {
@@ -139,10 +156,29 @@ func TestReconcileNetworksPinsUnderlayForDefaultRoute(t *testing.T) {
 		t.Fatalf("reconcile networks: %v", err)
 	}
 	lines = runner.lines()
-	last := lines[len(lines)-1]
-	if last != "ip route del 198.51.100.7/32" {
-		t.Fatalf("last command = %q, want underlay pin removal", last)
+	for _, want := range []string{
+		"ip route flush table 20048",
+		"ip route replace default dev netp2p0 table 20048",
+		"ip rule add pref 20048 lookup 20048",
+		"ip route del default dev netp2p0 table 20048",
+		"ip rule del pref 20048 lookup 20048",
+		"ip route del 198.51.100.7/32 table 20048",
+		"ip route replace default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.10 metric 100",
+		"ip route del 198.51.100.7/32",
+	} {
+		if !containsCommand(lines, want) {
+			t.Fatalf("missing %q in commands = %v", want, lines)
+		}
 	}
+}
+
+func containsCommand(commands []string, want string) bool {
+	for _, command := range commands {
+		if command == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReconcileRoutesAddsAndRemoves(t *testing.T) {

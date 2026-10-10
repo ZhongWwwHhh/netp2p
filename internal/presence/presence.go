@@ -55,8 +55,12 @@ func (table *Table) Disconnect(peerID, remoteAddr, observer string) Observation 
 	previous, ok := table.entries[peerID]
 	table.mu.RUnlock()
 	lastSeen := time.Now().UTC()
+	updatedAt := time.Now().UTC()
 	if ok && !previous.LastSeen.IsZero() {
 		lastSeen = previous.LastSeen
+	}
+	if ok && !updatedAt.After(previous.UpdatedAt) {
+		updatedAt = previous.UpdatedAt.Add(time.Nanosecond)
 	}
 	return table.Record(Observation{
 		PeerID:     peerID,
@@ -64,7 +68,7 @@ func (table *Table) Disconnect(peerID, remoteAddr, observer string) Observation 
 		LastSeen:   lastSeen,
 		RemoteAddr: remoteAddr,
 		Observer:   observer,
-		UpdatedAt:  time.Now().UTC(),
+		UpdatedAt:  updatedAt,
 	})
 }
 

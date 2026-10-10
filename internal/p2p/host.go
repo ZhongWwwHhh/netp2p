@@ -29,6 +29,14 @@ const Version = version.ProtocolVersion
 
 const ProtocolPrefix = "/netp2p"
 
+const (
+	// MaxProtocolIDLength bounds the protocol identifier in a framed envelope.
+	MaxProtocolIDLength = 256
+	// MaxEnvelopePayloadLength bounds every control-plane payload before it is
+	// allocated or read from an untrusted stream.
+	MaxEnvelopePayloadLength = 4 << 20
+)
+
 var (
 	LoginProtocol       = protocol.ID(ProtocolPrefix + "/control/login/" + Version)
 	SyncProtocol        = protocol.ID(ProtocolPrefix + "/control/sync/" + Version)
@@ -51,6 +59,9 @@ type Config struct {
 	EnableRelayService bool            `json:"enableRelayService,omitempty"`
 	Bootstraps         []string        `json:"bootstraps"`
 	IdentitySeed       int64           `json:"identitySeed,omitempty"`
+	// Identity is an explicit in-memory private key. It takes precedence over
+	// DataDir and IdentitySeed and is never written back to disk.
+	Identity crypto.PrivKey `json:"-"`
 }
 
 type Node struct {
@@ -81,7 +92,9 @@ func (node *Node) SetSendHook(hook SendHook) {
 func New(ctx context.Context, config Config) (*Node, error) {
 	var privateKey crypto.PrivKey
 	var err error
-	if config.IdentitySeed != 0 {
+	if config.Identity != nil {
+		privateKey = config.Identity
+	} else if config.IdentitySeed != 0 {
 		privateKey, err = LoadOrCreateSeededIdentity(config.DataDir, config.IdentitySeed)
 	} else {
 		privateKey, err = LoadOrCreateIdentity(config.DataDir)
@@ -233,6 +246,12 @@ type Envelope struct {
 // request/response exchanges on a single stream working. Control-plane payloads
 // are protobuf messages; data-plane framing lives in internal/transport.
 func EncodeEnvelope(writer io.Writer, id protocol.ID, payload []byte) error {
+	if len(id) > MaxProtocolIDLength {
+		return fmt.Errorf("protocol id too long: %d", len(id))
+	}
+	if len(payload) > MaxEnvelopePayloadLength {
+		return fmt.Errorf("payload too large: %d", len(payload))
+	}
 	header := make([]byte, 4)
 	binary.BigEndian.PutUint32(header, uint32(len(id)))
 	if _, err := writer.Write(header); err != nil {
@@ -284,13 +303,13 @@ func (node *Node) sendDirect(ctx context.Context, peerID peer.ID, id protocol.ID
 }
 
 func DecodeEnvelope(stream network.Stream) (Envelope, error) {
-	reader := io.LimitReader(stream, 8<<20)
+	reader := io.LimitReader(stream, int64(MaxEnvelopePayloadLength+MaxProtocolIDLength+8))
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return Envelope{}, err
 	}
 	length := binary.BigEndian.Uint32(header)
-	if length > 256 {
+	if length > MaxProtocolIDLength {
 		return Envelope{}, fmt.Errorf("protocol id too long: %d", length)
 	}
 	identifier := make([]byte, length)
@@ -300,7 +319,11 @@ func DecodeEnvelope(stream network.Stream) (Envelope, error) {
 	if _, err := io.ReadFull(reader, header); err != nil {
 		return Envelope{}, err
 	}
-	payload := make([]byte, binary.BigEndian.Uint32(header))
+	payloadLength := binary.BigEndian.Uint32(header)
+	if payloadLength > MaxEnvelopePayloadLength {
+		return Envelope{}, fmt.Errorf("payload too large: %d", payloadLength)
+	}
+	payload := make([]byte, payloadLength)
 	if _, err := io.ReadFull(reader, payload); err != nil {
 		return Envelope{}, err
 	}

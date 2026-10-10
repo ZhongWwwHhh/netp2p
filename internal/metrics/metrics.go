@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -14,16 +15,18 @@ import (
 type Metrics struct {
 	registry *prometheus.Registry
 
-	BFTHeight      prometheus.Gauge
-	BFTCommits     prometheus.Counter
-	BFTRejected    prometheus.Counter
-	Forwarded      prometheus.Counter
-	ForwardDrops   prometheus.Counter
-	SyncRequests   prometheus.Counter
-	QuotaBlocked   prometheus.Counter
-	CertifiedPeers prometheus.Gauge
-	LinkSegments   prometheus.Gauge
-	LinkConfidence prometheus.Gauge
+	BFTHeight         prometheus.Gauge
+	BFTCommits        prometheus.Counter
+	BFTRejected       prometheus.Counter
+	Forwarded         prometheus.Counter
+	ForwardDrops      prometheus.Counter
+	ForwardQueueDepth prometheus.Gauge
+	SyncRequests      prometheus.Counter
+	QuotaBlocked      prometheus.Counter
+	DNSFailures       prometheus.Counter
+	CertifiedPeers    prometheus.Gauge
+	LinkSegments      prometheus.Gauge
+	LinkConfidence    prometheus.Gauge
 }
 
 // New builds an isolated registry so tests and multiple managers do not share
@@ -47,11 +50,17 @@ func New() *Metrics {
 		ForwardDrops: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_forward_dropped_total", Help: "Forwarded frames dropped by validation or backpressure.",
 		}),
+		ForwardQueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "netp2p_forward_queue_depth", Help: "Frames currently being handed to the forwarding transport.",
+		}),
 		SyncRequests: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_sync_requests_total", Help: "Client sync requests served.",
 		}),
 		QuotaBlocked: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_quota_blocked_packets_total", Help: "Packets dropped because a budget was exhausted.",
+		}),
+		DNSFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "netp2p_dns_failures_total", Help: "DNS queries that could not be resolved.",
 		}),
 		CertifiedPeers: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "netp2p_certified_peers", Help: "Peers present in certified state.",
@@ -67,7 +76,9 @@ func New() *Metrics {
 		metrics.BFTHeight, metrics.BFTCommits, metrics.BFTRejected,
 		metrics.Forwarded, metrics.ForwardDrops, metrics.SyncRequests,
 		metrics.QuotaBlocked, metrics.CertifiedPeers, metrics.LinkSegments,
-		metrics.LinkConfidence,
+		metrics.LinkConfidence, metrics.ForwardQueueDepth, metrics.DNSFailures,
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return metrics
 }

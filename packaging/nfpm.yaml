@@ -1,9 +1,3 @@
-# nfpm builds the DEB and RPM packages:
-#
-#   make package VERSION=1.0.0
-#
-# The binaries are produced by `make build`; the runtime config example is
-# installed as a config file so upgrades never overwrite operator changes.
 name: netp2p
 arch: amd64
 platform: linux
@@ -13,22 +7,25 @@ priority: optional
 maintainer: NetP2P <maintainers@netp2p.example>
 description: |
   Decentralized overlay VPN with a BFT committee control plane.
-  The netp2pd binary runs as a manager or a client; netp2p-probe drives the
-  userspace data plane in tests.
+  This package installs the netp2pd daemon, netp2p CLI, and systemd unit.
+vendor: NetP2P
+homepage: https://github.com/ZhongWwwHhh/netp2p
 license: Apache-2.0
 contents:
   - src: bin/netp2pd
     dst: /usr/bin/netp2pd
     file_info:
       mode: 0755
-  - src: bin/netp2p-probe
-    dst: /usr/bin/netp2p-probe
+  - src: bin/netp2p
+    dst: /usr/bin/netp2p
     file_info:
       mode: 0755
-  - src: packaging/netp2pd.service
-    dst: /lib/systemd/system/netp2pd.service
+  - src: packaging/netp2p-client.service
+    dst: /lib/systemd/system/netp2p-client.service
   - src: packaging/runtime.example.yaml
     dst: /etc/netp2p/runtime.yaml
     type: config|noreplace
 scripts:
   postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+  postremove: packaging/postremove.sh

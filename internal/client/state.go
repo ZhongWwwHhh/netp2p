@@ -2,10 +2,16 @@ package client
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/bft"
+	"github.com/netp2p/netp2p/internal/model"
 )
 
 // defaultPathTTL bounds how long a persisted path decision is trusted. The
@@ -36,6 +42,40 @@ type persistedDestination struct {
 type persistedAdmission struct {
 	OK        bool      `json:"ok"`
 	ChangedAt time.Time `json:"changedAt"`
+}
+
+// ClientState is the persistence and manager-connectivity state exposed to
+// operators. It is deliberately independent of packet-forwarding health.
+type ClientState string
+
+const (
+	ClientStateReady      ClientState = "ready"
+	ClientStateDegraded   ClientState = "degraded"
+	ClientStateNeedsLogin ClientState = "needs-login"
+	ClientStateFailed     ClientState = "failed"
+)
+
+// ClientManagerStatus describes the current manager endpoint and the last
+// connectivity failure, if any.
+type ClientManagerStatus struct {
+	State           ClientState
+	ActiveManager   peer.ID
+	ManagerEndpoint string
+	LastError       string
+	SnapshotHeight  uint64
+}
+
+// persistedClientState is the local recovery record. The snapshot was fully
+// validated before it was written, so a restart can use it read-only while
+// manager connectivity is re-established.
+type persistedClientState struct {
+	Version          int                  `json:"version"`
+	UpdatedAt        time.Time            `json:"updatedAt"`
+	LocalPeerID      string               `json:"localPeerId"`
+	ManagerEndpoints []string             `json:"managerEndpoints,omitempty"`
+	ActiveManager    string               `json:"activeManager,omitempty"`
+	Snapshot         model.SignedSnapshot `json:"snapshot"`
+	Self             model.PeerRecord     `json:"self"`
 }
 
 // pathStore persists the last-known-good path per destination and the local
@@ -205,26 +245,7 @@ func (store *pathStore) writeLocked() {
 	if err != nil {
 		return
 	}
-	directory := filepath.Dir(store.path)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return
-	}
-	temp, err := os.CreateTemp(directory, ".paths-*.tmp")
-	if err != nil {
-		return
-	}
-	tempName := temp.Name()
-	if _, err := temp.Write(encoded); err != nil {
-		temp.Close()
-		os.Remove(tempName)
-		return
-	}
-	if err := temp.Close(); err != nil {
-		os.Remove(tempName)
-		return
-	}
-	if err := os.Rename(tempName, store.path); err != nil {
-		os.Remove(tempName)
+	if err := atomicWrite(store.path, encoded); err != nil {
 		return
 	}
 	store.dirty = false
@@ -245,5 +266,242 @@ func (store *pathStore) close() {
 	}
 	if store.dirty {
 		store.writeLocked()
+	}
+}
+
+// clientStateStore persists the last validated certified snapshot and the
+// identity it belongs to. It is separate from the path cache because its
+// lifetime and failure semantics are different.
+type clientStateStore struct {
+	path string
+	mu   sync.Mutex
+	data persistedClientState
+}
+
+func loadClientStateStore(path string) *clientStateStore {
+	store := &clientStateStore{path: path}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return store
+	}
+	var loaded persistedClientState
+	if err := json.Unmarshal(raw, &loaded); err != nil {
+		return store
+	}
+	if loaded.Version != 1 {
+		return store
+	}
+	store.data = loaded
+	return store
+}
+
+func (store *clientStateStore) save(state persistedClientState) error {
+	if store == nil || store.path == "" {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	state.Version = 1
+	state.UpdatedAt = time.Now().UTC()
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encode client state: %w", err)
+	}
+	if err := atomicWrite(store.path, encoded); err != nil {
+		return fmt.Errorf("write client state: %w", err)
+	}
+	store.data = state
+	return nil
+}
+
+// atomicWrite writes a complete file before replacing the destination and
+// fsyncs the file before rename. Directory syncing is best effort because some
+// platforms do not support it, but the file itself is always synced first.
+func atomicWrite(path string, encoded []byte) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create state directory: %w", err)
+	}
+	temp, err := os.CreateTemp(directory, ".state-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary state file: %w", err)
+	}
+	tempName := temp.Name()
+	if _, err := temp.Write(encoded); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempName)
+		return fmt.Errorf("write temporary state file: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		_ = os.Remove(tempName)
+		return fmt.Errorf("sync temporary state file: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(tempName)
+		return fmt.Errorf("close temporary state file: %w", err)
+	}
+	if err := os.Rename(tempName, path); err != nil {
+		_ = os.Remove(tempName)
+		return fmt.Errorf("replace state file: %w", err)
+	}
+	syncDirectory(directory)
+	return nil
+}
+
+func syncDirectory(path string) {
+	directory, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer directory.Close()
+	_ = directory.Sync()
+}
+
+// setManagers validates and deduplicates the configured manager endpoints.
+func (client *Client) setManagers() error {
+	addresses := make([]string, 0, len(client.managerAddresses))
+	seen := make(map[string]struct{}, len(client.managerAddresses))
+	for _, address := range client.managerAddresses {
+		if address == "" {
+			continue
+		}
+		if _, duplicate := seen[address]; duplicate {
+			continue
+		}
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+	if len(addresses) == 0 {
+		return fmt.Errorf("no manager endpoints configured")
+	}
+	managers := make([]peer.AddrInfo, 0, len(addresses))
+	seenIDs := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		info, err := peer.AddrInfoFromString(address)
+		if err != nil {
+			return fmt.Errorf("invalid manager address %q: %w", address, err)
+		}
+		key := info.ID.String()
+		if _, duplicate := seenIDs[key]; duplicate {
+			continue
+		}
+		seenIDs[key] = struct{}{}
+		managers = append(managers, *info)
+	}
+	if len(managers) == 0 {
+		return fmt.Errorf("no distinct manager endpoints configured")
+	}
+	client.managers = managers
+	client.manager = managers[0]
+	client.activeManager = 0
+	return nil
+}
+
+// restorePersistedState applies the last validated snapshot only when it
+// belongs to the current local identity. A mismatch is discarded rather than
+// mixing one peer's certified state with another peer's private identity.
+func (client *Client) restorePersistedState() {
+	if client.stateStore == nil {
+		client.connectionState = ClientStateNeedsLogin
+		return
+	}
+	state := client.stateStore.data
+	localPeerID := client.node.Host.ID().String()
+	if state.LocalPeerID == "" || state.LocalPeerID != localPeerID {
+		client.connectionState = ClientStateNeedsLogin
+		return
+	}
+	if err := bft.ValidateClientSnapshot(state.Snapshot); err != nil {
+		client.connectionState = ClientStateNeedsLogin
+		return
+	}
+	client.mu.Lock()
+	for index, manager := range client.managers {
+		if manager.ID.String() == state.ActiveManager {
+			client.manager = manager
+			client.activeManager = index
+			break
+		}
+	}
+	client.snapshot = state.Snapshot
+	if state.Self.PeerID != "" {
+		client.self = state.Self
+	}
+	client.connectionState = ClientStateDegraded
+	client.mu.Unlock()
+}
+
+func (client *Client) persistSnapshot(snapshot model.SignedSnapshot, self model.PeerRecord) {
+	if client.stateStore == nil {
+		return
+	}
+	client.mu.RLock()
+	activeManager := client.manager.ID.String()
+	client.mu.RUnlock()
+	state := persistedClientState{
+		LocalPeerID: client.node.Host.ID().String(), ManagerEndpoints: client.managerAddresses,
+		ActiveManager: activeManager, Snapshot: snapshot, Self: self,
+	}
+	if err := client.stateStore.save(state); err != nil {
+		log.Printf("persist client state: %v", err)
+	}
+}
+
+// State returns the client's persistence and manager-connectivity state.
+func (client *Client) State() ClientState {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	if client.connectionState == "" {
+		return ClientStateNeedsLogin
+	}
+	return client.connectionState
+}
+
+// ManagerStatus returns the operator-facing manager failover view.
+func (client *Client) ManagerStatus() ClientManagerStatus {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	return ClientManagerStatus{
+		State: client.connectionState, ActiveManager: client.manager.ID,
+		ManagerEndpoint: client.managerAddress(), LastError: client.lastManagerError,
+		SnapshotHeight: client.snapshot.Height,
+	}
+}
+
+func (client *Client) managerAddress() string {
+	if client.manager.ID == "" || len(client.manager.Addrs) == 0 {
+		return ""
+	}
+	return client.manager.Addrs[0].String()
+}
+
+func (client *Client) setClientState(state ClientState) {
+	client.mu.Lock()
+	client.connectionState = state
+	client.mu.Unlock()
+}
+
+func (client *Client) markManagerRequestFailure(err error) {
+	message := "manager request failed"
+	if err != nil {
+		message = err.Error()
+	}
+	client.mu.Lock()
+	client.lastManagerError = message
+	if client.snapshot.Height > 0 {
+		client.connectionState = ClientStateDegraded
+	} else {
+		client.connectionState = ClientStateFailed
+	}
+	client.mu.Unlock()
+}
+
+func (client *Client) persistedStateForClose() persistedClientState {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	return persistedClientState{
+		LocalPeerID: client.node.Host.ID().String(), ManagerEndpoints: client.managerAddresses,
+		ActiveManager: client.manager.ID.String(), Snapshot: client.snapshot, Self: client.self,
 	}
 }

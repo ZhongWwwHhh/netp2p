@@ -339,6 +339,18 @@ export interface SessionInfo {
   permissions: Record<string, Operation[]>;
 }
 
+export interface AuthStatus {
+  needsOwner: boolean;
+  localLogin: boolean;
+}
+
+export interface LoginResponse {
+  identity: Identity;
+  permissions: Record<string, Operation[]>;
+  sessionToken: string;
+  expiresAt?: string;
+}
+
 export interface BootstrapOIDC {
   issuer: string;
   clientId: string;

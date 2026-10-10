@@ -284,6 +284,7 @@ message QuorumCertificate {
   bytes aggregate_signature = 5;
   bytes signer_bitmap = 6;
   uint64 committee_epoch = 7;
+  bytes client_view_hash = 8;
 }
 
 message SignedSnapshot {
@@ -316,6 +317,12 @@ message Vote {
   string voter_id = 6;
   bytes signature = 7;
   uint64 committee_epoch = 8;
+  bytes client_view_hash = 9;
+}
+
+message ClientView {
+  NetworkState state = 1;
+  StateTransition transition = 2;
 }
 
 // committeeEnvelope multiplexed over /netp2p/control/state-update/2.0.0.

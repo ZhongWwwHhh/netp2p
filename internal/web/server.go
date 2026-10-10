@@ -21,6 +21,7 @@ import (
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/store"
 	"github.com/netp2p/netp2p/internal/version"
 )
 
@@ -32,6 +33,7 @@ type BootstrapResponse struct {
 	APIBase         string                  `json:"apiBase"`
 	NetworkID       string                  `json:"networkId"`
 	Version         string                  `json:"version"`
+	ProtocolVersion string                  `json:"protocolVersion"`
 	Committee       []model.CommitteeMember `json:"committee"`
 	OIDC            *BootstrapOIDC          `json:"oidc,omitempty"`
 }
@@ -41,6 +43,7 @@ type BootstrapResponse struct {
 type BootstrapOIDC struct {
 	Issuer                string   `json:"issuer"`
 	ClientID              string   `json:"clientId"`
+	Audience              string   `json:"audience,omitempty"`
 	Scopes                []string `json:"scopes"`
 	AuthorizationEndpoint string   `json:"authorizationEndpoint,omitempty"`
 	TokenEndpoint         string   `json:"tokenEndpoint,omitempty"`
@@ -64,6 +67,11 @@ type CommitteeStatus struct {
 
 type Config struct {
 	AdminToken string
+	// SessionSecret is shared by every manager so local web sessions remain
+	// valid across the round-robin console hostname.
+	SessionSecret string
+	// AuthStore persists local login audit and lockout state.
+	AuthStore *store.Store
 	// Authenticator, when set, resolves an SSO bearer token to an identity.
 	// The static admin token always works as break-glass.
 	Authenticator Authenticator
@@ -78,15 +86,19 @@ type Authenticator interface {
 }
 
 type Server struct {
-	manager    *manager.Manager
-	node       *p2p.Node
-	config     Config
-	httpHost   *libp2phttp.Host
-	publicKey  []byte
-	addresses  []string
-	bootstrap  []byte
-	httpServer *http.Server
-	oidcProxy  *oidcProxy
+	manager               *manager.Manager
+	node                  *p2p.Node
+	config                Config
+	httpHost              *libp2phttp.Host
+	publicKey             []byte
+	addresses             []string
+	bootstrap             []byte
+	httpServer            *http.Server
+	oidcProxy             *oidcProxy
+	accounts              accountDirectory
+	authStore             *store.Store
+	sessions              *auth.SessionManager
+	dummyPasswordVerifier []byte
 }
 
 func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server, error) {
@@ -101,14 +113,25 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("manager has no WebRTC addresses")
 	}
+	sessions, err := auth.NewSessionManager(config.SessionSecret, time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	if config.AuthStore == nil {
+		return nil, fmt.Errorf("auth store is required")
+	}
 	server := &Server{
-		manager:   manager,
-		node:      node,
-		config:    config,
-		httpHost:  &libp2phttp.Host{StreamHost: node.Host},
-		publicKey: publicKey,
-		addresses: addresses,
-		oidcProxy: newOIDCProxy(config.OIDC),
+		manager:               manager,
+		node:                  node,
+		config:                config,
+		httpHost:              &libp2phttp.Host{StreamHost: node.Host},
+		publicKey:             publicKey,
+		addresses:             addresses,
+		oidcProxy:             newOIDCProxy(config.OIDC),
+		accounts:              manager,
+		authStore:             config.AuthStore,
+		sessions:              sessions,
+		dummyPasswordVerifier: model.HashPassword("netp2p-dummy-verifier"),
 	}
 	server.httpHost.SetHTTPHandler(p2p.WebAPIProtocol, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		server.handleAPI(writer, request)
@@ -121,6 +144,7 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 		APIBase:         "/api/v1",
 		NetworkID:       manager.NetworkID(),
 		Version:         version.Version,
+		ProtocolVersion: version.ProtocolVersion,
 		Committee:       manager.Committee(),
 		OIDC:            config.OIDC,
 	})
@@ -162,6 +186,9 @@ func (server *Server) HTTPHost() *libp2phttp.Host {
 }
 
 func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Request) {
+	if server.handlePublicAuth(writer, request) {
+		return
+	}
 	identity, ok := server.authenticate(request)
 	if !ok {
 		writeError(writer, http.StatusUnauthorized, "unauthorized")
@@ -183,7 +210,30 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, http.StatusForbidden, "forbidden")
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"users": server.manager.Users()})
+		writeJSON(writer, http.StatusOK, map[string]any{"users": publicUsers(server.accounts.Users())})
+	case request.Method == http.MethodGet && path == "/api/v1/auth/events":
+		if !identity.Allows(auth.ModuleEvents, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		limit := 200
+		if raw := request.URL.Query().Get("limit"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed <= 0 {
+				writeError(writer, http.StatusBadRequest, "invalid limit")
+				return
+			}
+			if parsed > 1000 {
+				parsed = 1000
+			}
+			limit = parsed
+		}
+		events, err := server.authStore.AuthEvents(limit)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "cannot read auth events")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"events": events})
 	case request.Method == http.MethodGet && path == "/api/v1/activity":
 		server.handleActivity(writer, request)
 	case request.Method == http.MethodGet && path == "/api/v1/events":
@@ -267,7 +317,7 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, http.StatusBadGateway, err.Error())
 			return
 		}
-		writeJSON(writer, http.StatusOK, snapshot)
+		writeJSON(writer, http.StatusOK, model.ClientSnapshot(snapshot))
 	default:
 		writeError(writer, http.StatusNotFound, "not found")
 	}
@@ -288,7 +338,7 @@ func (server *Server) handleSnapshot(writer http.ResponseWriter, request *http.R
 			writeError(writer, http.StatusNotFound, "unknown height")
 			return
 		}
-		writeJSON(writer, http.StatusOK, snapshot)
+		writeJSON(writer, http.StatusOK, model.ClientSnapshot(snapshot))
 		return
 	}
 	snapshot, ok := server.manager.LatestSnapshot()
@@ -296,7 +346,7 @@ func (server *Server) handleSnapshot(writer http.ResponseWriter, request *http.R
 		writeError(writer, http.StatusServiceUnavailable, "no certified snapshot")
 		return
 	}
-	writeJSON(writer, http.StatusOK, snapshot)
+	writeJSON(writer, http.StatusOK, model.ClientSnapshot(snapshot))
 }
 
 func (server *Server) handleActivity(writer http.ResponseWriter, request *http.Request) {
@@ -321,7 +371,11 @@ func (server *Server) handleActivity(writer http.ResponseWriter, request *http.R
 		}
 		before = parsed
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"entries": server.manager.Activity(limit, before)})
+	entries := server.manager.Activity(limit, before)
+	for index := range entries {
+		entries[index] = model.ClientSnapshot(entries[index])
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"entries": entries})
 }
 
 // AuditEvent is the authenticated decision-log entry exposed to the console.
@@ -484,6 +538,10 @@ func (server *Server) BootstrapHandler() http.Handler {
 			return
 		}
 		if strings.HasPrefix(request.URL.Path, "/api/") {
+			if isPublicAuthPath(strings.TrimSuffix(request.URL.Path, "/")) {
+				server.handleAPI(writer, request)
+				return
+			}
 			writeError(writer, http.StatusNotFound, "not found")
 			return
 		}
@@ -512,11 +570,30 @@ func hasFileExtension(path string) bool {
 func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) {
 	token, ok := bearerToken(request)
 	if !ok {
+		token, ok = sessionToken(request)
+	}
+	if !ok {
 		return auth.Identity{}, false
 	}
 	if adminToken := server.config.AdminToken; adminToken != "" &&
 		subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1 {
 		return auth.BreakGlass(), true
+	}
+	if strings.HasPrefix(token, auth.LocalSessionPrefix) {
+		identity, err := server.sessions.Verify(token, time.Now())
+		if err != nil {
+			return auth.Identity{}, false
+		}
+		for _, user := range server.accounts.Users() {
+			if user.ID != identity.UserID || user.Blocked {
+				continue
+			}
+			identity.Email = user.Email
+			identity.Name = user.Name
+			identity.Role = user.Role
+			return identity, true
+		}
+		return auth.Identity{}, false
 	}
 	if server.config.Authenticator != nil {
 		identity, err := server.config.Authenticator.Authenticate(request.Context(), token)
@@ -525,6 +602,14 @@ func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) 
 		}
 	}
 	return auth.Identity{}, false
+}
+
+func sessionToken(request *http.Request) (string, bool) {
+	cookie, err := request.Cookie("netp2p_session")
+	if err != nil || cookie.Value == "" {
+		return "", false
+	}
+	return cookie.Value, true
 }
 
 func bearerToken(request *http.Request) (string, bool) {

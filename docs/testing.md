@@ -7,12 +7,21 @@ go test ./...                # 单元测试 + 进程内 E2E
 go test -race ./internal/... # 并发敏感包
 ```
 
-进程内 E2E（`internal/e2e`）在单进程内启动 4 个 manager + 2 个 client，走完整的
+Windows 上，进程内 E2E harness 已把所有 `p2p.New` 的 QUIC 和 WebRTC listener
+显式绑定到 `127.0.0.1`。正常情况下 `go test ./internal/e2e` 不应再触发
+Windows 防火墙弹窗。
+
+如果仍然弹窗，先确认运行的是当前源码，并检查是否有测试新增了非 loopback
+listener。WSL/Linux 里的 Docker E2E 仍是隔离性更好的首选。旧的“固定
+`bin\e2e.test.exe` 并添加一次性防火墙例外”只作为历史 fallback，不应作为
+首选处理方式。
+
+进程内 E2E（`internal/e2e`）在单进程内启动 3 个 manager + 2 个 client，走完整的
 genesis → login → sync → frame 数据面，覆盖：
 
 - policy 允许的 `A -> B` ICMP probe 收到 echo reply；
 - `deny B -> A` 方向超时；
-- 停掉 1 个 manager 后剩余 3 个仍能认证新 peer（quorum）；
+- 停掉 1 个 manager 后写入被阻塞，恢复后继续认证新 peer；
 - 篡改 state 或删减 QC 签名的 snapshot 被拒绝。
 - SSO device flow：mock IdP 签发 ID token → `register_user` → `upsert_group`（JWT 组）→ peer 绑定 user 且 groups 含 `jwt-eng`。
 - BLS 阈值 QC：3 个分片可聚合验证、2 个失败、篡改 `stateHash`/`transitionHash` 或错群公钥失败。
@@ -31,7 +40,7 @@ genesis → login → sync → frame 数据面，覆盖：
 - `Fault{Protocol, Loss, Duplicate, Delay}` 按协议过滤做丢包 / 重放 / 延迟。
 - `Stats()` 暴露 dropped / duplicated / delayed 计数，供断言。
 
-`internal/e2e/chaos_test.go` 覆盖：隔离 1 个 manager 后剩余 3 个仍认证新高度且被隔离者落后；恢复后经单步 `sync_request` catch-up 追平且 state hash 一致；重放全部 committee 消息不破坏共识；隔离下一高度 leader 后 committee 轮换到存活 leader 继续出块。
+`internal/e2e/chaos_test.go` 覆盖：隔离 1 个 manager 后写入被阻塞且被隔离者落后；恢复后经单步 `sync_request` catch-up 追平且 state hash 一致；重放全部 committee 消息不破坏共识；隔离下一高度 leader 后 committee 轮换到存活 leader 继续出块。
 
 ```bash
 go test ./internal/chaos/...

@@ -10,16 +10,30 @@ import (
 // Option customizes the client at construction time.
 type Option func(*Client)
 
-// WithStateDir enables path hot-standby persistence, storing the last-known-good
-// path and admission conclusions in <dir>/paths.json so a restart resumes from
-// the previous decision instead of re-probing from scratch. An empty directory
-// disables persistence, which is the default when no option is passed.
+// WithStateDir enables local persistence. It stores the last validated snapshot
+// and local identity in state.json, and the last-known-good path/admission
+// conclusions in paths.json. An empty directory disables persistence, which is
+// the default when no option is passed.
 func WithStateDir(dir string) Option {
 	return func(client *Client) {
 		if dir == "" {
 			return
 		}
 		client.pathStore = loadPathStore(filepath.Join(dir, "paths.json"), defaultPathTTL)
+		client.stateStore = loadClientStateStore(filepath.Join(dir, "state.json"))
+	}
+}
+
+// WithManagerFailover adds additional manager endpoints. The endpoint passed
+// to New remains the first candidate; this option appends the seed committee's
+// addresses so a client can continue after one manager becomes unavailable.
+func WithManagerFailover(addresses ...string) Option {
+	return func(client *Client) {
+		for _, address := range addresses {
+			if address != "" {
+				client.managerAddresses = append(client.managerAddresses, address)
+			}
+		}
 	}
 }
 
@@ -75,6 +89,13 @@ func (client *Client) EnableExitForwarding(overlayCIDR string, run tun.Runner) {
 func (client *Client) Close() {
 	if client.pathStore != nil {
 		client.pathStore.close()
+	}
+	if client.stateStore != nil {
+		state := client.persistedStateForClose()
+		// Do not overwrite another local identity's state with an empty record.
+		if state.LocalPeerID == client.stateStore.data.LocalPeerID || state.Snapshot.Height > 0 {
+			_ = client.stateStore.save(state)
+		}
 	}
 	if client.exitReconciler != nil {
 		_ = client.exitReconciler.Close()

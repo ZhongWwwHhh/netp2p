@@ -23,6 +23,11 @@ var ErrUnsupported = errors.New("exit nodes are supported on Linux only")
 // defaultForwardingPath is the Linux sysctl file toggled to enable routing.
 const defaultForwardingPath = "/proc/sys/net/ipv4/ip_forward"
 
+const (
+	forwardChain = "NETP2P_FORWARD"
+	snatChain    = "NETP2P_SNAT"
+)
+
 // Route is one certified destination this node forwards for.
 type Route struct {
 	ID          string
@@ -43,6 +48,7 @@ type Reconciler struct {
 
 	mu       sync.Mutex
 	closed   bool
+	chains   bool
 	current  map[string]Route
 	commands []string // audit trail for diagnostics and tests
 }
@@ -88,6 +94,9 @@ func (reconciler *Reconciler) Reconcile(routes []Route) error {
 	reconciler.mu.Unlock()
 
 	if len(desired) > 0 {
+		if err := reconciler.ensureChains(); err != nil {
+			return err
+		}
 		if err := reconciler.forwarding.enable(reconciler); err != nil {
 			return err
 		}
@@ -133,6 +142,10 @@ func (reconciler *Reconciler) Reconcile(routes []Route) error {
 	}
 
 	if len(desired) == 0 {
+		record(reconciler.removeChains())
+		reconciler.mu.Lock()
+		reconciler.chains = false
+		reconciler.mu.Unlock()
 		record(reconciler.forwarding.disable(reconciler))
 	}
 	return firstError
@@ -145,26 +158,47 @@ func (reconciler *Reconciler) Close() error {
 		reconciler.mu.Unlock()
 		return nil
 	}
+	reconciler.closed = true
+	routes := reconciler.current
+	reconciler.current = make(map[string]Route)
 	reconciler.mu.Unlock()
-	return reconciler.Reconcile(nil)
+	var firstError error
+	record := func(err error) {
+		if err != nil && firstError == nil {
+			firstError = err
+		}
+	}
+	for _, route := range routes {
+		record(reconciler.remove(route))
+	}
+	record(reconciler.removeChains())
+	record(reconciler.forwarding.disable(reconciler))
+	return firstError
 }
 
 func (reconciler *Reconciler) install(route Route) error {
 	if route.Masquerade {
-		if err := reconciler.exec("iptables", "-t", "nat", "-C", "POSTROUTING",
+		if err := reconciler.exec("iptables", "-t", "nat", "-C", snatChain,
 			"-s", reconciler.overlayCIDR, "-d", route.Destination, "-j", "MASQUERADE"); err != nil {
-			if err := reconciler.exec("iptables", "-t", "nat", "-A", "POSTROUTING",
+			if err := reconciler.exec("iptables", "-t", "nat", "-A", snatChain,
 				"-s", reconciler.overlayCIDR, "-d", route.Destination, "-j", "MASQUERADE"); err != nil {
 				return err
 			}
 		}
 	}
-	if err := reconciler.exec("iptables", "-C", "FORWARD",
+	if err := reconciler.exec("iptables", "-C", forwardChain,
 		"-s", reconciler.overlayCIDR, "-d", route.Destination, "-j", "ACCEPT"); err != nil {
-		if err := reconciler.exec("iptables", "-A", "FORWARD",
+		if err := reconciler.exec("iptables", "-A", forwardChain,
 			"-s", reconciler.overlayCIDR, "-d", route.Destination, "-j", "ACCEPT"); err != nil {
 			return err
 		}
+	}
+	if err := reconciler.exec("iptables", "-C", forwardChain,
+		"-d", reconciler.overlayCIDR, "-s", route.Destination,
+		"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
+		return reconciler.exec("iptables", "-A", forwardChain,
+			"-d", reconciler.overlayCIDR, "-s", route.Destination,
+			"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 	}
 	return nil
 }
@@ -172,15 +206,74 @@ func (reconciler *Reconciler) install(route Route) error {
 func (reconciler *Reconciler) remove(route Route) error {
 	var firstError error
 	if route.Masquerade {
-		if err := reconciler.exec("iptables", "-t", "nat", "-D", "POSTROUTING",
+		if err := reconciler.exec("iptables", "-t", "nat", "-D", snatChain,
 			"-s", reconciler.overlayCIDR, "-d", route.Destination, "-j", "MASQUERADE"); err != nil {
 			firstError = err
 		}
 	}
-	if err := reconciler.exec("iptables", "-D", "FORWARD",
+	if err := reconciler.exec("iptables", "-D", forwardChain,
 		"-s", reconciler.overlayCIDR, "-d", route.Destination, "-j", "ACCEPT"); err != nil && firstError == nil {
 		firstError = err
 	}
+	if err := reconciler.exec("iptables", "-D", forwardChain,
+		"-d", reconciler.overlayCIDR, "-s", route.Destination,
+		"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil && firstError == nil {
+		firstError = err
+	}
+	return firstError
+}
+
+func (reconciler *Reconciler) ensureChains() error {
+	reconciler.mu.Lock()
+	initialized := reconciler.chains
+	reconciler.chains = true
+	reconciler.mu.Unlock()
+	if initialized {
+		return nil
+	}
+	// A previous process may have crashed after creating the chains. Removing
+	// only named NetP2P chains recovers without touching operator rules.
+	_ = reconciler.removeChains()
+	if err := reconciler.exec("iptables", "-N", forwardChain); err != nil {
+		return err
+	}
+	if err := reconciler.exec("iptables", "-N", snatChain); err != nil {
+		return err
+	}
+	if err := reconciler.exec("iptables", "-C", "FORWARD", "-s", reconciler.overlayCIDR,
+		"-j", forwardChain); err != nil {
+		if err := reconciler.exec("iptables", "-I", "FORWARD", "1", "-s", reconciler.overlayCIDR,
+			"-j", forwardChain); err != nil {
+			return err
+		}
+	}
+	if err := reconciler.exec("iptables", "-t", "nat", "-C", "POSTROUTING",
+		"-s", reconciler.overlayCIDR, "-j", snatChain); err != nil {
+		if err := reconciler.exec("iptables", "-t", "nat", "-I", "POSTROUTING", "1",
+			"-s", reconciler.overlayCIDR, "-j", snatChain); err != nil {
+			return err
+		}
+	}
+	reconciler.mu.Lock()
+	reconciler.chains = true
+	reconciler.mu.Unlock()
+	return nil
+}
+
+func (reconciler *Reconciler) removeChains() error {
+	var firstError error
+	record := func(err error) {
+		if err != nil && firstError == nil {
+			firstError = err
+		}
+	}
+	record(reconciler.exec("iptables", "-D", "FORWARD", "-s", reconciler.overlayCIDR, "-j", forwardChain))
+	record(reconciler.exec("iptables", "-F", forwardChain))
+	record(reconciler.exec("iptables", "-X", forwardChain))
+	record(reconciler.exec("iptables", "-t", "nat", "-D", "POSTROUTING",
+		"-s", reconciler.overlayCIDR, "-j", snatChain))
+	record(reconciler.exec("iptables", "-t", "nat", "-F", snatChain))
+	record(reconciler.exec("iptables", "-t", "nat", "-X", snatChain))
 	return firstError
 }
 

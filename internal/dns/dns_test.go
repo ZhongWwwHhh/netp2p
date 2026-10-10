@@ -5,11 +5,32 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/miekg/dns"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+func counterValue(t *testing.T, collector prometheus.Collector) float64 {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metric: %v", err)
+	}
+	if len(families) == 0 || len(families[0].Metric) == 0 {
+		t.Fatal("metric produced no samples")
+	}
+	if counter := families[0].Metric[0].GetCounter(); counter != nil {
+		return counter.GetValue()
+	}
+	t.Fatalf("metric is not a counter: %v", families[0].GetType())
+	return 0
+}
 
 func testConfig() Config {
 	return Config{
@@ -75,15 +96,14 @@ func TestResolvesCertifiedZoneRecords(t *testing.T) {
 	}
 }
 
-func TestUnknownOverlayNameIsNotAnsweredAuthoritatively(t *testing.T) {
+func TestUnknownOverlayNameReturnsNXDOMAIN(t *testing.T) {
 	_, address := startResolver(t, testConfig())
 	reply := query(t, address, "missing.netp2p.internal", dns.TypeA)
 	if len(reply.Answer) != 0 {
 		t.Fatalf("answers = %v, want none", reply.Answer)
 	}
-	// With no upstream reachable the resolver must fail, not fabricate.
-	if reply.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("rcode = %s, want SERVFAIL", dns.RcodeToString[reply.Rcode])
+	if reply.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[reply.Rcode])
 	}
 }
 
@@ -96,6 +116,47 @@ func TestDisabledSkipsOverlayAnswers(t *testing.T) {
 		t.Fatalf("answers = %v, want none when disabled", reply.Answer)
 	}
 }
+
+func TestDNSFailuresAreCounted(t *testing.T) {
+	collector := metrics.New()
+	resolver := NewResolverWithMetrics("127.0.0.1:0", collector)
+	resolver.Update(Config{})
+
+	request := message("example.com")
+	response := new(dns.Msg)
+	response.SetReply(request)
+	writer := &captureDNSWriter{}
+	resolver.forwardOrFail(writer, request, response, resolver.snapshot())
+
+	if writer.reply == nil {
+		t.Fatal("resolver did not write a reply")
+	}
+	if writer.reply.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %s, want SERVFAIL", dns.RcodeToString[writer.reply.Rcode])
+	}
+	if resolver.Failures() != 1 {
+		t.Fatalf("failures = %d, want 1", resolver.Failures())
+	}
+	if got := counterValue(t, collector.DNSFailures); got != 1 {
+		t.Fatalf("dns failure metric = %v, want 1", got)
+	}
+}
+
+type captureDNSWriter struct {
+	reply *dns.Msg
+}
+
+func (writer *captureDNSWriter) LocalAddr() net.Addr  { return &net.UDPAddr{} }
+func (writer *captureDNSWriter) RemoteAddr() net.Addr { return &net.UDPAddr{} }
+func (writer *captureDNSWriter) WriteMsg(reply *dns.Msg) error {
+	writer.reply = reply
+	return nil
+}
+func (writer *captureDNSWriter) Write([]byte) (int, error) { return 0, nil }
+func (writer *captureDNSWriter) Close() error              { return nil }
+func (writer *captureDNSWriter) TsigStatus() error         { return nil }
+func (writer *captureDNSWriter) TsigTimersOnly(bool)       {}
+func (writer *captureDNSWriter) Hijack()                   {}
 
 func TestForwardsToCertifiedNameserver(t *testing.T) {
 	upstream := startUpstream(t, "192.0.2.55")
@@ -112,6 +173,69 @@ func TestForwardsToCertifiedNameserver(t *testing.T) {
 	}
 	if record, ok := reply.Answer[0].(*dns.A); !ok || record.A.String() != "192.0.2.55" {
 		t.Fatalf("answer = %v, want 192.0.2.55", reply.Answer[0])
+	}
+}
+
+func TestResolverServesTCPClients(t *testing.T) {
+	_, address := startResolver(t, testConfig())
+	client := &dns.Client{Net: "tcp"}
+	request := message("alpha.netp2p.internal")
+	reply, _, err := client.Exchange(request, address)
+	if err != nil {
+		t.Fatalf("tcp query: %v", err)
+	}
+	if len(reply.Answer) != 1 {
+		t.Fatalf("tcp answers = %v, want one A record", reply.Answer)
+	}
+}
+
+func TestDNSTCPFallbackForTruncatedUpstream(t *testing.T) {
+	upstream := startTruncatingUpstream(t, "192.0.2.88")
+	config := testConfig()
+	config.Nameservers = []model.Nameserver{{
+		ID: "ns-1", Enabled: true, Servers: []string{upstream},
+	}}
+	_, address := startResolver(t, config)
+
+	reply := query(t, address, "large.corp.example", dns.TypeA)
+	if reply.Truncated {
+		t.Fatal("resolver returned a truncated reply instead of using TCP")
+	}
+	if len(reply.Answer) != 1 {
+		t.Fatalf("answers = %v, want the TCP upstream record", reply.Answer)
+	}
+	if record, ok := reply.Answer[0].(*dns.A); !ok || record.A.String() != "192.0.2.88" {
+		t.Fatalf("answer = %v, want 192.0.2.88", reply.Answer[0])
+	}
+}
+
+func TestDNSUsesEDNSAndCache(t *testing.T) {
+	upstream := startCountingUpstream(t, "192.0.2.99")
+	config := testConfig()
+	config.Nameservers = []model.Nameserver{{
+		ID: "ns-1", Enabled: true, Servers: []string{upstream.address},
+	}}
+	_, address := startResolver(t, config)
+
+	request := message("cached.corp.example")
+	request.SetEdns0(4096, false)
+	client := &dns.Client{Net: "udp"}
+	first, _, err := client.Exchange(request, address)
+	if err != nil {
+		t.Fatalf("first query: %v", err)
+	}
+	if opt := first.IsEdns0(); opt == nil || opt.UDPSize() != ednsUDPSize {
+		t.Fatalf("first reply EDNS = %v, want UDP size %d", first.IsEdns0(), ednsUDPSize)
+	}
+	second, _, err := client.Exchange(request, address)
+	if err != nil {
+		t.Fatalf("second query: %v", err)
+	}
+	if len(second.Answer) != 1 {
+		t.Fatalf("cached answers = %v", second.Answer)
+	}
+	if upstream.queries.Load() != 1 {
+		t.Fatalf("upstream queries = %d, want one cache miss", upstream.queries.Load())
 	}
 }
 
@@ -296,5 +420,76 @@ func startUpstream(t *testing.T, answer string) string {
 	server := &dns.Server{PacketConn: packetConn, Handler: mux}
 	go func() { _ = server.ActivateAndServe() }()
 	t.Cleanup(func() { _ = server.Shutdown() })
+	return packetConn.LocalAddr().String()
+}
+
+type countingUpstream struct {
+	address string
+	queries atomic.Uint64
+}
+
+func startCountingUpstream(t *testing.T, answer string) *countingUpstream {
+	t.Helper()
+	upstream := &countingUpstream{}
+	upstream.address = startUpstreamHandler(t, answer, func(_ *dns.Msg, viaTCP bool) {
+		if viaTCP {
+			upstream.queries.Add(1)
+		}
+	})
+	return upstream
+}
+
+func startTruncatingUpstream(t *testing.T, answer string) string {
+	t.Helper()
+	return startUpstreamHandler(t, answer, func(request *dns.Msg, _ bool) {
+		if request.IsEdns0() == nil {
+			t.Error("upstream request did not use EDNS0")
+		}
+	})
+}
+
+func startUpstreamHandler(t *testing.T, answer string, onRequest func(*dns.Msg, bool)) string {
+	t.Helper()
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream udp: %v", err)
+	}
+	tcpListener, err := net.Listen("tcp", packetConn.LocalAddr().String())
+	if err != nil {
+		_ = packetConn.Close()
+		t.Fatalf("listen upstream tcp: %v", err)
+	}
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(writer dns.ResponseWriter, request *dns.Msg) {
+		_, viaTCP := writer.RemoteAddr().(*net.TCPAddr)
+		onRequest(request, viaTCP)
+		response := new(dns.Msg)
+		response.SetReply(request)
+		if _, isTCP := writer.RemoteAddr().(*net.TCPAddr); !isTCP {
+			response.Truncated = true
+			_ = writer.WriteMsg(response)
+			return
+		}
+		if request.IsEdns0() != nil {
+			response.SetEdns0(ednsUDPSize, false)
+		}
+		for _, question := range request.Question {
+			if question.Qtype == dns.TypeA {
+				response.Answer = append(response.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+					A:   net.ParseIP(answer).To4(),
+				})
+			}
+		}
+		_ = writer.WriteMsg(response)
+	})
+	udpServer := &dns.Server{PacketConn: packetConn, Handler: mux}
+	tcpServer := &dns.Server{Listener: tcpListener, Handler: mux}
+	go func() { _ = udpServer.ActivateAndServe() }()
+	go func() { _ = tcpServer.ActivateAndServe() }()
+	t.Cleanup(func() {
+		_ = udpServer.Shutdown()
+		_ = tcpServer.Shutdown()
+	})
 	return packetConn.LocalAddr().String()
 }

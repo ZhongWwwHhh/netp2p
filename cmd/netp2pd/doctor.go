@@ -30,6 +30,11 @@ type doctorCheck struct {
 func runDoctor(ctx context.Context, options doctorOptions) error {
 	checks := make([]doctorCheck, 0, 6)
 	checks = append(checks, doctorCheck{
+		name:   "version",
+		ok:     true,
+		detail: fmt.Sprintf("netp2pd %s", version.Version),
+	})
+	checks = append(checks, doctorCheck{
 		name:   "protocol",
 		ok:     true,
 		detail: fmt.Sprintf("wire protocol %s (manager and client must match)", version.ProtocolVersion),

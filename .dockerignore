@@ -1,6 +1,9 @@
 .git
 .netp2p
+bin
+dist
 deploy/run
 tools
-../../ui/node_modules
-!internal/web/dist
+tmp
+ui/node_modules
+internal/web/dist

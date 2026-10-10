@@ -180,6 +180,7 @@ func QuorumCertificateToProto(qc model.QuorumCertificate) *pb.QuorumCertificate 
 		AggregateSignature: cloneBytes(qc.AggregateSignature),
 		SignerBitmap:       cloneBytes(qc.SignerBitmap),
 		CommitteeEpoch:     qc.CommitteeEpoch,
+		ClientViewHash:     cloneBytes(qc.ClientViewHash),
 	}
 }
 
@@ -195,6 +196,7 @@ func QuorumCertificateFromProto(message *pb.QuorumCertificate) model.QuorumCerti
 		AggregateSignature: cloneBytes(message.GetAggregateSignature()),
 		SignerBitmap:       cloneBytes(message.GetSignerBitmap()),
 		CommitteeEpoch:     message.GetCommitteeEpoch(),
+		ClientViewHash:     cloneBytes(message.GetClientViewHash()),
 	}
 }
 
@@ -311,6 +313,7 @@ func VoteToProto(vote *model.Vote) *pb.Vote {
 		VoterId:        vote.VoterID,
 		Signature:      cloneBytes(vote.Signature),
 		CommitteeEpoch: vote.CommitteeEpoch,
+		ClientViewHash: cloneBytes(vote.ClientViewHash),
 	}
 }
 
@@ -327,5 +330,6 @@ func VoteFromProto(message *pb.Vote) *model.Vote {
 		VoterID:        message.GetVoterId(),
 		Signature:      cloneBytes(message.GetSignature()),
 		CommitteeEpoch: message.GetCommitteeEpoch(),
+		ClientViewHash: cloneBytes(message.GetClientViewHash()),
 	}
 }

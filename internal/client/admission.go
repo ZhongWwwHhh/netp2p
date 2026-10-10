@@ -29,14 +29,17 @@ func (client *Client) selfPeerID() string {
 func (client *Client) sendViaAssignment(sourceID, destinationID string, raw []byte) bool {
 	source, err := peer.Decode(sourceID)
 	if err != nil {
-		return true
+		return false
 	}
 	destination, err := peer.Decode(destinationID)
 	if err != nil {
-		return true
+		return false
 	}
-	assignment, path, ok := client.paths.selectFor(source, destination)
-	if !ok {
+	if err := client.syncPathSelector(); err != nil {
+		return false
+	}
+	assignment, path, status := client.paths.selectWithStatus(source, destination)
+	if !status.OK {
 		return false
 	}
 	if path.Kind == model.PathKindDirect {
@@ -46,6 +49,9 @@ func (client *Client) sendViaAssignment(sourceID, destinationID string, raw []by
 }
 
 func (client *Client) runAdmissionProbe(snapshot model.SignedSnapshot, selfID string) {
+	if err := client.paths.syncSnapshot(snapshot); err != nil {
+		return
+	}
 	source, err := peer.Decode(selfID)
 	if err != nil {
 		return
@@ -56,6 +62,17 @@ func (client *Client) runAdmissionProbe(snapshot model.SignedSnapshot, selfID st
 		}
 		destination, err := peer.Decode(assignment.DestinationPeerID)
 		if err != nil {
+			continue
+		}
+		destinationRecord, err := client.peerByPeerID(destination.String())
+		if err != nil {
+			continue
+		}
+		// Admission probes are ordinary ICMP traffic. If policy denies that
+		// direction, a timeout is expected and must not disable the path for
+		// conntrack-permitted return traffic.
+		allowed, err := client.authorize(destinationRecord, "icmp", 0)
+		if err != nil || !allowed {
 			continue
 		}
 		for _, path := range assignment.Paths() {
@@ -76,6 +93,9 @@ func (client *Client) runAdmissionProbe(snapshot model.SignedSnapshot, selfID st
 func (client *Client) probePath(source, destination peer.ID, assignment model.RouteAssignment, path model.PathSpec) bool {
 	destinationRecord, err := client.peerByPeerID(destination.String())
 	if err != nil || path.ID == "" {
+		return false
+	}
+	if path.Kind == model.PathKindDirect && !client.directPathsEnabled() {
 		return false
 	}
 	sourceIP := net.ParseIP(client.selfOverlayIP())

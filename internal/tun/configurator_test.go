@@ -37,8 +37,8 @@ func TestIPConfiguratorCommandSequence(t *testing.T) {
 		"ip link set dev netp2p0 mtu 1280",
 		"ip route replace 10.10.0.0/16 dev netp2p0",
 		"ip route del 10.10.0.0/16 dev netp2p0",
-		"ip route replace 198.51.100.7/32 via 192.0.2.1",
-		"ip route del 198.51.100.7/32",
+		"ip route replace 198.51.100.7/32 via 192.0.2.1 table 20048",
+		"ip route del 198.51.100.7/32 table 20048",
 	}
 	got := runner.lines()
 	if len(got) != len(want) {

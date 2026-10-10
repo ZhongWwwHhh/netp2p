@@ -8,6 +8,7 @@ import (
 
 func TestFinalizeHashesSetupKeys(t *testing.T) {
 	seed := Seed{
+		Development: true,
 		NetworkID:   "net",
 		OverlayCIDR: "100.64.0.0/24",
 		Managers: []model.CommitteeMember{
@@ -18,7 +19,7 @@ func TestFinalizeHashesSetupKeys(t *testing.T) {
 		},
 		SetupKeys: []model.SetupKey{{ID: "k", Token: "secret", Groups: []string{"g"}}},
 	}
-	seed.Finalize()
+	seed.FinalizeDev()
 	if len(seed.SetupKeys[0].TokenHash) == 0 {
 		t.Fatal("token hash not computed")
 	}

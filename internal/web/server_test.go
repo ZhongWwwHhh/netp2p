@@ -1,17 +1,74 @@
 package web
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/netp2p/netp2p/internal/auth"
+	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/store"
 )
 
 func newTestServer() *Server {
-	return &Server{
-		bootstrap: []byte(`{"networkId":"net-test","version":"0.1.0"}`),
-		config:    Config{AdminToken: "secret"},
+	sessions, err := auth.NewSessionManager("0123456789abcdef0123456789abcdef", time.Hour)
+	if err != nil {
+		panic(err)
 	}
+	return &Server{
+		bootstrap:             []byte(`{"networkId":"net-test","version":"0.1.0","protocolVersion":"3.0.0"}`),
+		config:                Config{AdminToken: "secret"},
+		sessions:              sessions,
+		dummyPasswordVerifier: model.HashPassword("dummy-verifier"),
+	}
+}
+
+type fakeAccountDirectory struct {
+	users  []model.User
+	groups []model.Group
+}
+
+func (fake *fakeAccountDirectory) Users() []model.User { return fake.users }
+
+func (fake *fakeAccountDirectory) Snapshot() model.SignedSnapshot {
+	return model.SignedSnapshot{State: model.NetworkState{Users: fake.users, Groups: fake.groups}}
+}
+
+func (fake *fakeAccountDirectory) SubmitAs(
+	transition model.StateTransition, _ model.Actor,
+) (model.SignedSnapshot, error) {
+	if transition.Group != nil {
+		fake.groups = append(fake.groups, *transition.Group)
+	}
+	if transition.User != nil {
+		fake.users = append(fake.users, *transition.User)
+	}
+	return fake.Snapshot(), nil
+}
+
+func newLocalAuthTestServer(t *testing.T) (*Server, *fakeAccountDirectory, *store.Store) {
+	t.Helper()
+	authStore, err := store.Open(filepath.Join(t.TempDir(), "auth.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authStore.Close() })
+	sessions, err := auth.NewSessionManager("0123456789abcdef0123456789abcdef", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts := &fakeAccountDirectory{}
+	return &Server{
+		bootstrap: []byte(`{"networkId":"net-test","version":"0.1.0","protocolVersion":"3.0.0"}`),
+		config:    Config{AdminToken: "secret"},
+		accounts:  accounts, authStore: authStore, sessions: sessions,
+		dummyPasswordVerifier: model.HashPassword("dummy-verifier"),
+	}, accounts, authStore
 }
 
 func TestBootstrapHandlerServesBootstrapJSON(t *testing.T) {
@@ -23,6 +80,9 @@ func TestBootstrapHandlerServesBootstrapJSON(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"networkId":"net-test"`) {
 		t.Fatalf("body %q missing network id", recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"protocolVersion":"`) {
+		t.Fatalf("body %q missing protocol version", recorder.Body.String())
 	}
 }
 
@@ -87,6 +147,19 @@ func TestAuthenticate(t *testing.T) {
 	}
 }
 
+func TestAuthenticateAcceptsSessionCookie(t *testing.T) {
+	server := newTestServer()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	request.AddCookie(&http.Cookie{Name: "netp2p_session", Value: "secret"})
+	identity, ok := server.authenticate(request)
+	if !ok {
+		t.Fatal("session cookie should authorize")
+	}
+	if identity.Role != "owner" || !identity.Static {
+		t.Fatalf("session cookie identity = %+v", identity)
+	}
+}
+
 func TestSessionReportsIdentityAndPermissions(t *testing.T) {
 	server := newTestServer()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
@@ -111,5 +184,125 @@ func TestHandleAPIRejectsMissingToken(t *testing.T) {
 	server.handleAPI(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/session", nil))
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status %d, want 401", recorder.Code)
+	}
+}
+
+func TestOwnerBootstrapCreatesLocalOwnerSession(t *testing.T) {
+	server, accounts, _ := newLocalAuthTestServer(t)
+	status := httptest.NewRecorder()
+	server.handleAPI(status, httptest.NewRequest(http.MethodGet, "/api/v1/auth/status", nil))
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"needsOwner":true`) {
+		t.Fatalf("status = %d body %q", status.Code, status.Body.String())
+	}
+
+	body := bytes.NewBufferString(`{"email":"owner@example.com","name":"Owner","password":"correct horse battery"}`)
+	recorder := httptest.NewRecorder()
+	server.handleAPI(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/bootstrap/owner", body))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d body %q", recorder.Code, recorder.Body.String())
+	}
+	responseBody := recorder.Body.String()
+	for _, forbidden := range []string{"correct horse battery", "passwordVerifier", "argon2id"} {
+		if strings.Contains(responseBody, forbidden) {
+			t.Fatalf("bootstrap response leaked %q: %s", forbidden, responseBody)
+		}
+	}
+	var response struct {
+		SessionToken string `json:"sessionToken"`
+		Identity     auth.Identity
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(response.SessionToken, auth.LocalSessionPrefix) || response.Identity.Role != model.RoleOwner {
+		t.Fatalf("response = %+v", response)
+	}
+	if len(accounts.users) != 1 || !model.VerifyPassword("correct horse battery", accounts.users[0].PasswordVerifier) {
+		t.Fatalf("owner verifier missing or invalid: %+v", accounts.users)
+	}
+
+	var sessionCookie *http.Cookie
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == "netp2p_session" {
+			sessionCookie = cookie
+		}
+	}
+	if sessionCookie == nil || !sessionCookie.HttpOnly || !sessionCookie.Secure || sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("session cookie = %+v", sessionCookie)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	request.Header.Set("Authorization", "Bearer "+response.SessionToken)
+	identity, ok := server.authenticate(request)
+	if !ok || identity.Role != model.RoleOwner || identity.UserID != accounts.users[0].ID {
+		t.Fatalf("local identity = %+v ok=%v", identity, ok)
+	}
+
+	cookieRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	cookieRequest.AddCookie(sessionCookie)
+	cookieRecorder := httptest.NewRecorder()
+	server.handleAPI(cookieRecorder, cookieRequest)
+	if cookieRecorder.Code != http.StatusOK || !strings.Contains(cookieRecorder.Body.String(), `"role":"owner"`) {
+		t.Fatalf("cookie session status = %d body %q", cookieRecorder.Code, cookieRecorder.Body.String())
+	}
+}
+
+func TestLocalLoginLocksAfterFiveFailures(t *testing.T) {
+	server, accounts, authStore := newLocalAuthTestServer(t)
+	accounts.users = []model.User{{
+		ID: "user-1", Email: "user@example.com", Role: model.RoleUser,
+		PasswordVerifier: model.HashPassword("correct horse battery"),
+	}}
+	for attempt := 0; attempt < 5; attempt++ {
+		body := bytes.NewBufferString(`{"email":"user@example.com","password":"wrong password"}`)
+		recorder := httptest.NewRecorder()
+		server.handleAPI(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", body))
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status = %d body %q", attempt, recorder.Code, recorder.Body.String())
+		}
+	}
+	body := bytes.NewBufferString(`{"email":"user@example.com","password":"wrong password"}`)
+	recorder := httptest.NewRecorder()
+	server.handleAPI(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", body))
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked status = %d body %q", recorder.Code, recorder.Body.String())
+	}
+	events, err := authStore.AuthEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 6 {
+		t.Fatalf("auth events = %+v", events)
+	}
+	if err := authStore.ClearAuthFailures("user-1"); err != nil {
+		t.Fatal(err)
+	}
+	body = bytes.NewBufferString(`{"email":"USER@example.com","password":"correct horse battery"}`)
+	recorder = httptest.NewRecorder()
+	server.handleAPI(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", body))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"role":"user"`) {
+		t.Fatalf("login status = %d body %q", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "correct horse battery") || strings.Contains(recorder.Body.String(), "argon2id") {
+		t.Fatalf("login response leaked credentials: %s", recorder.Body.String())
+	}
+}
+
+func TestUsersEndpointDoesNotReturnPasswordVerifier(t *testing.T) {
+	server, accounts, _ := newLocalAuthTestServer(t)
+	accounts.users = []model.User{{
+		ID: "user-1", Email: "user@example.com", Role: model.RoleUser,
+		PasswordVerifier: model.HashPassword("correct horse battery"),
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	recorder := httptest.NewRecorder()
+	server.handleAPI(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body %q", recorder.Code, recorder.Body.String())
+	}
+	for _, forbidden := range []string{"passwordVerifier", "argon2id", "correct horse battery"} {
+		if strings.Contains(recorder.Body.String(), forbidden) {
+			t.Fatalf("users response leaked %q: %s", forbidden, recorder.Body.String())
+		}
 	}
 }

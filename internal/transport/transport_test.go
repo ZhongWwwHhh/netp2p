@@ -60,7 +60,7 @@ func TestTransportDispatchesBothHandlers(t *testing.T) {
 	defer sender.Close()
 
 	payload := []byte{0x45, 0x00, 0x00, 0x14, 'd', 'i', 'r', 'e', 'c', 't'}
-	if err := sender.Send(right.Host.ID(), payload); err != nil {
+	if err := sender.SendPacket(right.Host.ID(), payload); err != nil {
 		t.Fatal(err)
 	}
 	envelope, err := forward.EncodeEnvelope(forward.Envelope{
@@ -73,7 +73,7 @@ func TestTransportDispatchesBothHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sender.Send(right.Host.ID(), envelope); err != nil {
+	if err := sender.SendEnvelope(right.Host.ID(), envelope); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -91,6 +91,11 @@ func TestTransportDispatchesBothHandlers(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("envelope handler was not called")
+	}
+	select {
+	case got := <-packets:
+		t.Fatalf("envelope was also delivered to packet handler: %s", got)
+	default:
 	}
 }
 
@@ -125,7 +130,7 @@ func TestTransportDeliversEnvelopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sender.Send(right.Host.ID(), envelope); err != nil {
+	if err := sender.SendEnvelope(right.Host.ID(), envelope); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -178,10 +183,10 @@ func TestTransportDeliversFramesBetweenHosts(t *testing.T) {
 		bytes.Repeat([]byte{0x03}, 8192),
 	}
 	for _, payload := range payloads {
-		if err := leftTransport.Send(right.Host.ID(), payload); err != nil {
+		if err := leftTransport.SendPacket(right.Host.ID(), payload); err != nil {
 			t.Fatalf("send right: %v", err)
 		}
-		if err := rightTransport.Send(left.Host.ID(), payload); err != nil {
+		if err := rightTransport.SendPacket(left.Host.ID(), payload); err != nil {
 			t.Fatalf("send left: %v", err)
 		}
 	}
@@ -241,7 +246,7 @@ func TestTransportReusesOneStream(t *testing.T) {
 
 	const count = 64
 	for index := 0; index < count; index++ {
-		if err := leftTransport.Send(right.Host.ID(), []byte{byte(index), 0xff}); err != nil {
+		if err := leftTransport.SendPacket(right.Host.ID(), []byte{byte(index), 0xff}); err != nil {
 			t.Fatalf("send %d: %v", index, err)
 		}
 	}
@@ -280,10 +285,10 @@ func TestSendRejectsInvalidFrameSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := transport.Send(remote, nil); err == nil {
+	if err := transport.SendPacket(remote, nil); err == nil {
 		t.Fatal("empty frame must be rejected")
 	}
-	if err := transport.Send(remote, make([]byte, MaxFrameSize+1)); err == nil {
+	if err := transport.SendPacket(remote, make([]byte, MaxFrameSize+1)); err == nil {
 		t.Fatal("oversized frame must be rejected")
 	}
 }
@@ -308,7 +313,7 @@ func TestSendDropsAndReportsBackpressure(t *testing.T) {
 	// The peer is unreachable, so the writer drains slowly and the queue fills.
 	var full bool
 	for index := 0; index < 512; index++ {
-		if err := transport.Send(remote, []byte{byte(index)}); err == ErrQueueFull {
+		if err := transport.SendPacket(remote, []byte{byte(index)}); err == ErrQueueFull {
 			full = true
 			break
 		}

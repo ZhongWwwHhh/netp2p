@@ -14,22 +14,28 @@ import (
 )
 
 type Seed struct {
-	NetworkID    string                  `json:"networkId"`
-	OverlayCIDR  string                  `json:"overlayCidr"`
-	AdminToken   string                  `json:"adminToken,omitempty"`
-	Managers     []model.CommitteeMember `json:"managers"`
-	Relays       []model.CommitteeMember `json:"relays,omitempty"`
-	Groups       []model.Group           `json:"groups"`
-	Policies     []model.Policy          `json:"policies"`
-	Routes       []model.Route           `json:"routes"`
-	Budgets      []model.TrafficBudget   `json:"budgets"`
-	SetupKeys    []model.SetupKey        `json:"setupKeys"`
-	Nameservers  []model.Nameserver      `json:"nameservers,omitempty"`
-	Zones        []model.DNSZone         `json:"zones,omitempty"`
-	DNSSettings  model.DNSSettings       `json:"dnsSettings,omitempty"`
-	Settings     model.NetworkSettings   `json:"settings,omitempty"`
-	OIDC         oidc.Config             `json:"oidc,omitempty"`
-	NextIPOffset uint32                  `json:"nextIpOffset"`
+	// Development marks the legacy all-in-one seed as an explicit test
+	// fixture. Production managers must use NetworkManifest and ManagerBundle.
+	Development     bool                    `json:"development,omitempty"`
+	NetworkID       string                  `json:"networkId"`
+	OverlayCIDR     string                  `json:"overlayCidr"`
+	CommitteeParams model.CommitteeParams   `json:"committeeParams,omitempty"`
+	AdminToken      string                  `json:"adminToken,omitempty"`
+	SessionSecret   string                  `json:"sessionSecret,omitempty"`
+	Users           []model.User            `json:"users,omitempty"`
+	Managers        []model.CommitteeMember `json:"managers"`
+	Relays          []model.CommitteeMember `json:"relays,omitempty"`
+	Groups          []model.Group           `json:"groups"`
+	Policies        []model.Policy          `json:"policies"`
+	Routes          []model.Route           `json:"routes"`
+	Budgets         []model.TrafficBudget   `json:"budgets"`
+	SetupKeys       []model.SetupKey        `json:"setupKeys"`
+	Nameservers     []model.Nameserver      `json:"nameservers,omitempty"`
+	Zones           []model.DNSZone         `json:"zones,omitempty"`
+	DNSSettings     model.DNSSettings       `json:"dnsSettings,omitempty"`
+	Settings        model.NetworkSettings   `json:"settings,omitempty"`
+	OIDC            oidc.Config             `json:"oidc,omitempty"`
+	NextIPOffset    uint32                  `json:"nextIpOffset"`
 }
 
 func Load(path string) (Seed, error) {
@@ -44,7 +50,7 @@ func Load(path string) (Seed, error) {
 	if err := seed.Validate(); err != nil {
 		return Seed{}, err
 	}
-	seed.Finalize()
+	seed.FinalizeDev()
 	return seed, nil
 }
 
@@ -52,8 +58,14 @@ func (seed Seed) Validate() error {
 	if seed.NetworkID == "" || seed.OverlayCIDR == "" {
 		return fmt.Errorf("networkId and overlayCidr are required")
 	}
-	if len(seed.Managers) != 4 {
-		return fmt.Errorf("v0 requires exactly 4 committee managers, got %d", len(seed.Managers))
+	if len(seed.Managers) != model.DefaultCommitteeSize {
+		return fmt.Errorf("requires exactly %d committee managers, got %d", model.DefaultCommitteeSize, len(seed.Managers))
+	}
+	if seed.CommitteeParams == (model.CommitteeParams{}) {
+		seed.CommitteeParams = model.DefaultCommitteeParams()
+	}
+	if seed.CommitteeParams != model.DefaultCommitteeParams() {
+		return fmt.Errorf("development fixture committee parameters must be 3/0/3, got %d/%d/%d", seed.CommitteeParams.Size, seed.CommitteeParams.FaultLimit, seed.CommitteeParams.QuorumSize)
 	}
 	for index := range seed.Managers {
 		seed.Managers[index].ForwardingEnabled = seed.Managers[index].ForwardingEnabled || true
@@ -85,8 +97,11 @@ func (seed Seed) Validate() error {
 		if manager.ID == "" || manager.Address == "" {
 			return fmt.Errorf("manager id and address are required")
 		}
+		if manager.KeySeed != 0 && !seed.Development {
+			return fmt.Errorf("manager %q uses deterministic keySeed outside a development fixture", manager.ID)
+		}
 		if manager.KeySeed == 0 && len(manager.PublicKey) == 0 {
-			return fmt.Errorf("manager %q needs keySeed or publicKey", manager.ID)
+			return fmt.Errorf("manager %q needs publicKey (or keySeed in a development fixture)", manager.ID)
 		}
 		if _, exists := seen[manager.ID]; exists {
 			return fmt.Errorf("duplicate manager id %q", manager.ID)
@@ -99,7 +114,16 @@ func (seed Seed) Validate() error {
 	return nil
 }
 
-func (seed *Seed) Finalize() {
+// FinalizeDev derives deterministic identities and setup-key hashes only for
+// an explicitly marked development fixture. Production configuration never
+// calls this path.
+func (seed *Seed) FinalizeDev() {
+	if !seed.Development {
+		return
+	}
+	if seed.CommitteeParams == (model.CommitteeParams{}) {
+		seed.CommitteeParams = model.DefaultCommitteeParams()
+	}
 	if seed.NextIPOffset == 0 {
 		seed.NextIPOffset = 11
 	}
@@ -130,18 +154,20 @@ func (seed *Seed) Finalize() {
 
 func (seed Seed) NetworkState() model.NetworkState {
 	return model.NetworkState{
-		NetworkID:    seed.NetworkID,
-		OverlayCIDR:  seed.OverlayCIDR,
-		Groups:       append([]model.Group(nil), seed.Groups...),
-		Policies:     append([]model.Policy(nil), seed.Policies...),
-		Routes:       append([]model.Route(nil), seed.Routes...),
-		Budgets:      append([]model.TrafficBudget(nil), seed.Budgets...),
-		SetupKeys:    append([]model.SetupKey(nil), seed.SetupKeys...),
-		Nameservers:  append([]model.Nameserver(nil), seed.Nameservers...),
-		Zones:        append([]model.DNSZone(nil), seed.Zones...),
-		DNSSettings:  seed.DNSSettings,
-		Settings:     seed.Settings,
-		NextIPOffset: seed.NextIPOffset,
+		NetworkID:       seed.NetworkID,
+		OverlayCIDR:     seed.OverlayCIDR,
+		Users:           append([]model.User(nil), seed.Users...),
+		Groups:          append([]model.Group(nil), seed.Groups...),
+		Policies:        append([]model.Policy(nil), seed.Policies...),
+		Routes:          append([]model.Route(nil), seed.Routes...),
+		Budgets:         append([]model.TrafficBudget(nil), seed.Budgets...),
+		SetupKeys:       append([]model.SetupKey(nil), seed.SetupKeys...),
+		Nameservers:     append([]model.Nameserver(nil), seed.Nameservers...),
+		Zones:           append([]model.DNSZone(nil), seed.Zones...),
+		DNSSettings:     seed.DNSSettings,
+		Settings:        seed.Settings,
+		NextIPOffset:    seed.NextIPOffset,
+		CommitteeConfig: seed.CommitteeParams.CommitteeConfig(0, nil),
 	}
 }
 

@@ -76,18 +76,23 @@ func TestOIDCProxyCompletesPKCEFlow(t *testing.T) {
 	// Step 3: the browser returns to the manager with the code.
 	callback := httptest.NewRequest(http.MethodGet, callbackLocation, nil)
 	callback.Host = "manager.test"
+	callback.AddCookie(&http.Cookie{
+		Name: "netp2p_oidc_state", Value: callbackURL.Query().Get("state"),
+	})
 	recorder = httptest.NewRecorder()
 	proxy.handle(recorder, callback)
 	if recorder.Code != http.StatusFound {
 		t.Fatalf("callback status %d body %q", recorder.Code, recorder.Body.String())
 	}
-	target, err := url.Parse(recorder.Header().Get("Location"))
-	if err != nil {
-		t.Fatal(err)
+	var token string
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == "netp2p_session" {
+			token = cookie.Value
+			break
+		}
 	}
-	token := strings.TrimPrefix(target.Fragment, "id_token=")
 	if token == "" {
-		t.Fatalf("no id token in redirect %q", recorder.Header().Get("Location"))
+		t.Fatal("no id token in session cookie")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -102,5 +107,107 @@ func TestOIDCProxyCompletesPKCEFlow(t *testing.T) {
 	}
 	if claims.Subject != "browser-user" {
 		t.Fatalf("subject = %q", claims.Subject)
+	}
+}
+
+func TestOIDCProxyRejectsUnsafeRedirects(t *testing.T) {
+	unsafe := []string{
+		"//evil.example", "/\\evil.example", "https://evil.example",
+		"http://evil.example", "javascript:alert(1)", "mailto:user@example.com",
+	}
+	for _, redirect := range unsafe {
+		if got := safeRedirect(redirect); got != "/" {
+			t.Fatalf("safeRedirect(%q) = %q, want /", redirect, got)
+		}
+	}
+	if got := safeRedirect("/dashboard?next=%2Fpeers"); got != "/dashboard?next=%2Fpeers" {
+		t.Fatalf("safeRedirect changed a same-origin path: %q", got)
+	}
+}
+
+func TestOIDCProxyUsesSecureStateCookieAndSessionCookie(t *testing.T) {
+	provider, err := oidctest.New("127.0.0.1:0", oidctest.Options{
+		AutoApprove: true,
+		Default:     &oidctest.User{Subject: "browser-user"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer provider.Close()
+
+	proxy := newOIDCProxy(&BootstrapOIDC{
+		Issuer: provider.Issuer, ClientID: "netp2p-web", Audience: "netp2p-web-audience",
+		Scopes:                []string{"openid", "profile", "email"},
+		AuthorizationEndpoint: provider.Issuer + "/authorize",
+		TokenEndpoint:         provider.Issuer + "/token",
+	})
+	if proxy == nil {
+		t.Fatal("proxy should be configured")
+	}
+
+	login := httptest.NewRequest(http.MethodGet, "http://manager.test/auth/login?redirect=/dashboard", nil)
+	login.Host = "manager.test"
+	recorder := httptest.NewRecorder()
+	if !proxy.handle(recorder, login) {
+		t.Fatal("login path not handled")
+	}
+	authorizeLocation := recorder.Header().Get("Location")
+	authorizeURL, err := url.Parse(authorizeLocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authorizeURL.Query().Get("client_id") != "netp2p-web" {
+		t.Fatalf("authorize client_id = %q", authorizeURL.Query().Get("client_id"))
+	}
+	if authorizeURL.Query().Get("audience") != "netp2p-web-audience" {
+		t.Fatalf("authorize audience = %q", authorizeURL.Query().Get("audience"))
+	}
+
+	authorize := httptest.NewRequest(http.MethodGet, "http://manager.test"+authorizeLocation, nil)
+	authorize.Host = "manager.test"
+	recorder = httptest.NewRecorder()
+	proxy.handle(recorder, authorize)
+	callbackLocation := recorder.Header().Get("Location")
+	callbackURL, err := url.Parse(callbackLocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	callback := httptest.NewRequest(http.MethodGet, callbackLocation, nil)
+	callback.Host = "manager.test"
+	callback.AddCookie(&http.Cookie{Name: "netp2p_oidc_state", Value: callbackURL.Query().Get("state")})
+	recorder = httptest.NewRecorder()
+	proxy.handle(recorder, callback)
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body %q", recorder.Code, recorder.Body.String())
+	}
+	if location := recorder.Header().Get("Location"); location != "/dashboard" || strings.Contains(location, "id_token") {
+		t.Fatalf("callback location = %q", location)
+	}
+
+	var session *http.Cookie
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == "netp2p_session" {
+			session = cookie
+			break
+		}
+	}
+	if session == nil || !session.HttpOnly || !session.Secure || session.Path != "/" || session.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("session cookie = %+v", session)
+	}
+	if session.Value == "" {
+		t.Fatal("session cookie is empty")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	verifier, err := oidc.NewVerifier(ctx, oidc.Config{
+		Issuer: provider.Issuer, ClientID: "netp2p", WebClientID: "netp2p-web",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(ctx, session.Value); err != nil {
+		t.Fatalf("web audience token should verify: %v", err)
 	}
 }

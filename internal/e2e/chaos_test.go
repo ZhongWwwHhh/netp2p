@@ -12,6 +12,8 @@ import (
 	"github.com/netp2p/netp2p/internal/chaos"
 	"github.com/netp2p/netp2p/internal/manager"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/wire"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -41,28 +43,26 @@ func waitForCommitteeHeight(t *testing.T, group *cluster, want uint64) {
 	t.Fatalf("committee did not reach height %d", want)
 }
 
-// TestChaosPartitionAndCatchUp isolates the last committee member, proves the
-// remaining three still certify a new height, then reconnects the isolated
-// manager and proves it catches up from certified state. This is the failure
-// mode of a manager restarting after a network split.
+// TestChaosPartitionAndCatchUp isolates one committee member, proves a 3-of-3
+// committee blocks writes while it is unavailable, then reconnects it and
+// proves the committee commits and the isolated manager catches up.
 func TestChaosPartitionAndCatchUp(t *testing.T) {
 	controller := chaos.New()
 	group := newClusterWithHook(t, testState(), manager.Config{}, controller.HookFor)
 	waitForCommitteeHeight(t, group, 1)
 
-	isolated := group.members[3]
+	isolatedIndex := len(group.members) - 1
+	isolated := group.members[isolatedIndex]
 	controller.Isolate(isolated.PeerID)
 
 	transition := model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "chaos-group"}}
-	snapshot, err := group.meshes[0].Submit(transition)
-	if err != nil {
-		t.Fatalf("submit with one member isolated: %v", err)
+	if _, err := group.meshes[0].Submit(transition); err == nil {
+		t.Fatal("submit with one member isolated unexpectedly reached quorum")
 	}
-	if snapshot.Height < 2 {
-		t.Fatalf("committed height %d, want >= 2", snapshot.Height)
-	}
-	if got := group.engines[3].Height(); got >= snapshot.Height {
-		t.Fatalf("isolated manager advanced to %d, want less than %d", got, snapshot.Height)
+	for index, engine := range group.engines {
+		if got := engine.Height(); got != 1 {
+			t.Fatalf("manager %d advanced to height %d while quorum was unavailable", index, got)
+		}
 	}
 	if dropped := controller.Stats().Dropped; dropped == 0 {
 		t.Fatal("chaos controller dropped nothing during the partition")
@@ -71,13 +71,22 @@ func TestChaosPartitionAndCatchUp(t *testing.T) {
 	controller.Reconnect(isolated.PeerID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := group.meshes[3].CatchUp(ctx); err != nil {
-		t.Fatalf("catch up after reconnect: %v", err)
+	snapshot, err := group.meshes[0].Submit(transition)
+	if err != nil {
+		t.Fatalf("submit after reconnect: %v", err)
 	}
-	if got := group.engines[3].Height(); got != snapshot.Height {
+	if snapshot.Height < 2 {
+		t.Fatalf("committed height %d, want >= 2", snapshot.Height)
+	}
+	if group.engines[isolatedIndex].Height() < snapshot.Height {
+		if err := group.meshes[isolatedIndex].CatchUp(ctx); err != nil {
+			t.Fatalf("catch up after reconnect: %v", err)
+		}
+	}
+	if got := group.engines[isolatedIndex].Height(); got != snapshot.Height {
 		t.Fatalf("reconnected manager height %d, want %d", got, snapshot.Height)
 	}
-	if !bytes.Equal(bft.StateHash(group.engines[3].CurrentState()), bft.StateHash(group.engines[0].CurrentState())) {
+	if !bytes.Equal(bft.StateHash(group.engines[isolatedIndex].CurrentState()), bft.StateHash(group.engines[0].CurrentState())) {
 		t.Fatal("reconnected manager state hash diverged after catch-up")
 	}
 }
@@ -124,9 +133,10 @@ func TestChaosDuplicateMessagesDoNotBreakConsensus(t *testing.T) {
 	}
 }
 
-// TestChaosLeaderChurn isolates whoever leads the next height, proving the
-// committee rotates to a live leader and still commits rather than stalling.
-func TestChaosLeaderChurn(t *testing.T) {
+// TestChaosLeaderIsolationBlocksWrites isolates whoever leads the next height.
+// With a 3-of-3 committee, leader isolation must block the write rather than
+// allowing a smaller set of managers to certify state.
+func TestChaosLeaderIsolationBlocksWrites(t *testing.T) {
 	controller := chaos.New()
 	group := newClusterWithHook(t, testState(), manager.Config{}, controller.HookFor)
 	waitForCommitteeHeight(t, group, 1)
@@ -147,12 +157,71 @@ func TestChaosLeaderChurn(t *testing.T) {
 	// rotated leader once it moves past the isolated round 0.
 	submitter := (leaderIndex + 1) % len(group.meshes)
 	transition := model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "churn-group"}}
-	snapshot, err := group.meshes[submitter].Submit(transition)
-	if err != nil {
-		t.Fatalf("submit after isolating the next leader: %v", err)
+	if _, err := group.meshes[submitter].Submit(transition); err == nil {
+		t.Fatal("write unexpectedly certified after isolating the next leader")
 	}
-	if snapshot.Height < 2 {
-		t.Fatalf("committed height %d, want >= 2", snapshot.Height)
+	if got := group.engines[submitter].Height(); got != 1 {
+		t.Fatalf("height advanced to %d while the leader was isolated", got)
+	}
+}
+
+// TestChaosDegradedInboundForwardIsReadOnly bypasses Submit and sends a
+// forwarded transition directly to a healthy leader. While one member of a
+// 3-of-3 committee is isolated, the inbound state-change path must stay
+// read-only instead of starting a proposal that cannot reach quorum.
+func TestChaosDegradedInboundForwardIsReadOnly(t *testing.T) {
+	controller := chaos.New()
+	group := newClusterWithHook(t, testState(), manager.Config{}, controller.HookFor)
+	waitForCommitteeHeight(t, group, 1)
+
+	isolatedIndex := len(group.members) - 1
+	controller.Isolate(group.members[isolatedIndex].PeerID)
+
+	leaderIndex := -1
+	round := uint64(0)
+	for candidateRound := uint64(0); candidateRound < uint64(len(group.members)); candidateRound++ {
+		leader := group.engines[0].Leader(2, candidateRound)
+		for index, member := range group.members {
+			if member.ID == leader.ID && index != isolatedIndex {
+				leaderIndex = index
+				round = candidateRound
+			}
+		}
+		if leaderIndex >= 0 {
+			break
+		}
+	}
+	if leaderIndex < 0 {
+		t.Fatal("no healthy leader exists for height 2")
+	}
+	senderIndex := (leaderIndex + 1) % len(group.members)
+	if senderIndex == isolatedIndex {
+		senderIndex = (senderIndex + 1) % len(group.members)
+	}
+
+	leaderPeer, err := peer.Decode(group.members[leaderIndex].PeerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition := model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "degraded-group"}}
+	message := model.CommitteeEnvelope{Type: "forward", Transition: &transition, Round: round}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := group.nodes[senderIndex].Send(ctx, leaderPeer, p2p.StateUpdateProtocol, wire.CommitteeEnvelopeToProto(message)); err != nil {
+		t.Fatalf("send degraded forward: %v", err)
+	}
+
+	deadline := time.Now().Add(750 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, ok := group.engines[leaderIndex].Proposal(2); ok {
+			t.Fatal("degraded committee accepted an inbound state-changing forward")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for index, engine := range group.engines {
+		if got := engine.Height(); got != 1 {
+			t.Fatalf("manager %d advanced to height %d while degraded", index, got)
+		}
 	}
 }
 
@@ -201,7 +270,7 @@ func TestChaosQuorumDegradedAlertFires(t *testing.T) {
 
 	// The alert rule reads transport connectivity, so the test must actually
 	// drop the connection rather than only dropping application messages.
-	member := group.members[3]
+	member := group.members[len(group.members)-1]
 	memberPeer, err := peer.Decode(member.PeerID)
 	if err != nil {
 		t.Fatal(err)

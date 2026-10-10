@@ -33,7 +33,18 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: unit tests
-        run: go test ./internal/...
+        run: go test ./cmd/... ./internal/...
+
+  race:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: race tests
+        run: go test -race ./cmd/... ./internal/...
 
   e2e:
     runs-on: ubuntu-latest
@@ -61,8 +72,60 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - run: npm ci
-      - run: npm run build
+      - run: VITE_NETP2P_VERSION=0.0.0-dev npm run build
       - run: npx vitest run
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build UI
+        run: cd ui && npm ci --no-audit --no-fund && VITE_NETP2P_VERSION=0.0.0-dev npm run build
+      - name: Build Linux artifacts
+        run: make package-linux package-tarball VERSION=0.0.0-dev SKIP_UI=1
+      - name: Install and smoke-test the DEB
+        run: |
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            debian:bookworm-slim \
+            /bin/sh -c 'dpkg -i /dist/netp2p_0.0.0-dev_amd64.deb && /usr/bin/netp2p version && test -f /lib/systemd/system/netp2p-client.service'
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build UI
+        shell: pwsh
+        run: |
+          cd ui
+          npm ci --no-audit --no-fund
+          $env:VITE_NETP2P_VERSION = '0.0.0-dev'
+          npm run build
+      - name: Windows tests
+        run: go test ./cmd/... ./internal/e2e
+      - name: Install WiX
+        run: dotnet tool install --global wix
+      - name: Build Windows MSI
+        shell: pwsh
+        run: packaging/windows/build.ps1 -Version 0.0.0-dev -BinDir dist/windows -OutDir dist
 
   build-other:
     runs-on: ubuntu-latest
