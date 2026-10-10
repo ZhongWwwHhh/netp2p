@@ -5,6 +5,7 @@ package exitnode
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -37,25 +38,39 @@ func (runner *recordingRunner) run(name string, args ...string) error {
 		runner.rules = make(map[string]struct{})
 	}
 	runner.commands = append(runner.commands, line)
-	// Find the rule verb (-C/-A/-D); the spec is everything around it, keyed by
+	// Find the rule verb (-C/-A/-D/-I); the spec is everything around it, keyed by
 	// table+chain+verb-less arguments so a later -D removes the -A'd rule.
 	for index, arg := range args {
-		if arg != "-C" && arg != "-A" && arg != "-D" {
+		if arg != "-C" && arg != "-A" && arg != "-D" && arg != "-I" {
 			continue
 		}
 		spec := strings.Join(append(append([]string{}, args[:index]...), args[index+1:]...), " ")
+		// iptables treats -I CHAIN 1 and -D CHAIN as the same rule spec.
+		if arg == "-I" && index+2 < len(args) {
+			if _, parseErr := strconv.Atoi(args[index+2]); parseErr == nil {
+				after := append(append([]string{}, args[index+1:index+2]...), args[index+3:]...)
+				spec = strings.Join(append(append([]string{}, args[:index]...), after...), " ")
+			}
+		}
+		var ruleErr error
 		switch arg {
 		case "-C":
 			if _, ok := runner.rules[spec]; !ok {
-				return fmt.Errorf("rule does not exist")
+				ruleErr = fmt.Errorf("rule does not exist")
 			}
 		case "-A":
 			runner.rules[spec] = struct{}{}
+		case "-I":
+			runner.rules[spec] = struct{}{}
 		case "-D":
 			if _, ok := runner.rules[spec]; !ok {
-				return fmt.Errorf("rule does not exist")
+				ruleErr = fmt.Errorf("rule does not exist")
 			}
 			delete(runner.rules, spec)
+		}
+		if ruleErr != nil {
+			runner.commands = append(runner.commands, "FAILED "+line)
+			return ruleErr
 		}
 		break
 	}
@@ -79,8 +94,8 @@ func TestReconcileInstallsMasqueradeForwardingRules(t *testing.T) {
 	joined := strings.Join(reconciler.Commands(), "\n")
 	for _, want := range []string{
 		"net.ipv4.ip_forward=1",
-		"iptables -t nat -A POSTROUTING -s 100.64.0.0/24 -d 10.10.0.0/16 -j MASQUERADE",
-		"iptables -A FORWARD -s 100.64.0.0/24 -d 10.10.0.0/16 -j ACCEPT",
+		"iptables -t nat -A NETP2P_SNAT -s 100.64.0.0/24 -d 10.10.0.0/16 -j MASQUERADE",
+		"iptables -A NETP2P_FORWARD -s 100.64.0.0/24 -d 10.10.0.0/16 -j ACCEPT",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in commands:\n%s", want, joined)
@@ -113,12 +128,12 @@ func TestReconcileRemovesRulesAndRestoresForwarding(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	if err := reconciler.Reconcile(nil); err != nil {
-		t.Fatalf("reconcile empty: %v", err)
+		t.Fatalf("reconcile empty: %v\ncommands:\n%s", err, strings.Join(reconciler.Commands(), "\n"))
 	}
 	joined := strings.Join(reconciler.Commands(), "\n")
 	for _, want := range []string{
-		"iptables -t nat -D POSTROUTING -s 100.64.0.0/24 -d 10.10.0.0/16 -j MASQUERADE",
-		"iptables -D FORWARD -s 100.64.0.0/24 -d 10.10.0.0/16 -j ACCEPT",
+		"iptables -t nat -D NETP2P_SNAT -s 100.64.0.0/24 -d 10.10.0.0/16 -j MASQUERADE",
+		"iptables -D NETP2P_FORWARD -s 100.64.0.0/24 -d 10.10.0.0/16 -j ACCEPT",
 		"net.ipv4.ip_forward=",
 	} {
 		if !strings.Contains(joined, want) {

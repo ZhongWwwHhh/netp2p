@@ -281,15 +281,21 @@ JSON
   echo "OK: gateway installed a MASQUERADE rule"
 fi
 
-log "quorum must certify a new peer with one manager down"
-"${COMPOSE[@]}" stop manager-4 >/dev/null
+log "3-of-3 writes must block while one manager is down"
+"${COMPOSE[@]}" stop manager-3 >/dev/null
 "${COMPOSE[@]}" --profile quorum up -d client-c
+sleep 8
+if [ -s "$RUN_DIR/client-c.json" ]; then
+  fail "client-c registered despite an unavailable 3-of-3 manager"
+fi
+echo "OK: registration remained blocked without quorum"
+"${COMPOSE[@]}" start manager-3 >/dev/null
 wait_status "$RUN_DIR/client-c.json" client-c
 C_IP="$(status_field "$RUN_DIR/client-c.json" overlayIP)"
 C_HEIGHT="$(status_field "$RUN_DIR/client-c.json" height)"
 echo "client-c overlayIP=$C_IP certified height=$C_HEIGHT"
-[ "$C_HEIGHT" -ge 4 ] || fail "client-c certified height $C_HEIGHT, want >= 4"
-echo "OK: three managers certified a new registration"
+[ "$C_HEIGHT" -ge 2 ] || fail "client-c certified height $C_HEIGHT, want >= 2"
+echo "OK: the restored committee certified the pending registration"
 
 log "client status must report certified assignments and a live height"
 python3 - "$RUN_DIR/client-a.json" <<'PY' || fail "client-a status missing assignment fields"
@@ -408,13 +414,19 @@ else:
 fi
 
 if [ "$WITH_CHAOS" = "1" ]; then
-  log "CHAOS: restart the failed manager and confirm the committee recovers"
-  "${COMPOSE[@]}" start manager-4 >/dev/null
+  log "CHAOS: stop one manager, prove writes block, then recover"
+  "${COMPOSE[@]}" stop manager-3 >/dev/null
+  sleep 5
+  if admin_transition update-settings /config/chaos-settings.json; then
+    fail "committee certified while a 3-of-3 manager was down"
+  fi
+  echo "OK: committee writes blocked while degraded"
+  "${COMPOSE[@]}" start manager-3 >/dev/null
   sleep 5
   fetch_settings '{"loginExpirationDays": 30}' > deploy/chaos-settings.json
   admin_transition update-settings /config/chaos-settings.json \
-    || fail "committee could not certify after manager-4 restarted"
-  echo "OK: four managers certified again after the restart"
+    || fail "committee could not certify after manager-3 restarted"
+  echo "OK: all three managers certified again after the restart"
 fi
 
 log "e2e passed"

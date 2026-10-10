@@ -1,12 +1,12 @@
 FROM --platform=$BUILDPLATFORM node:24-bookworm AS ui
 ARG VERSION=0.0.0-dev
 WORKDIR /src/ui
-COPY ui/package.json ui/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+ COPY ui/package.json ui/package-lock.json ui/.npmrc ./
+ RUN npm ci --no-audit --no-fund
 COPY ui/ ./
 RUN VITE_NETP2P_VERSION=${VERSION} npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.25.7-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm AS build
 ARG VERSION=0.0.0-dev
 ARG TARGETOS
 ARG TARGETARCH
