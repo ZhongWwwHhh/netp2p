@@ -1,6 +1,5 @@
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="NetP2P" Language="1033" Version="$(var.ProductVersion)" Manufacturer="NetP2P" UpgradeCode="D6F5CF30-D0C0-4F2C-9E7B-8B1C3F5E6E4E">
-    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="NetP2P" Language="1033" Version="$(var.ProductVersion)" Manufacturer="NetP2P" UpgradeCode="D6F5CF30-D0C0-4F2C-9E7B-8B1C3F5E6E4E" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of NetP2P is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
@@ -40,7 +39,5 @@
       <ComponentRef Id="ConfigFiles" />
       <ComponentRef Id="TrayShortcut" />
     </Feature>
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLDIR" />
-    <UIRef Id="WixUI_InstallDir" />
-  </Product>
+  </Package>
 </Wix>
