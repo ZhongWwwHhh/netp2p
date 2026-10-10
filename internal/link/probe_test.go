@@ -45,7 +45,8 @@ func TestProbeResponderAndProberOverLibp2p(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ping: %v", err)
 	}
-	if elapsed <= 0 {
+	// Fast local stream round-trips can resolve to zero on low-resolution clocks.
+	if elapsed < 0 {
 		t.Fatalf("ping elapsed = %v", elapsed)
 	}
 	total, received, err := prober.bandwidth(ctx, responderID, 5*time.Second, 64*1024)

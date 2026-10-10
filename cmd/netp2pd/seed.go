@@ -60,6 +60,9 @@ func defaultSeed() config.Seed {
 			},
 		},
 		Settings: model.NetworkSettings{
+			DirectPathEnabled:   true,
+			ViaManagerEnabled:   true,
+			MaxManagerHops:      2,
 			DNSDomain:           "netp2p.internal",
 			LoginExpirationDays: 30,
 			JWTGroupsEnabled:    true,

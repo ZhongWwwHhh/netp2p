@@ -122,7 +122,8 @@ jobs:
       - name: Windows tests
         run: go test ./cmd/... ./internal/e2e
       - name: Install WiX
-        run: dotnet tool install --global wix
+        # WiX v7 requires accepting a separate OSMF EULA; CI must stay noninteractive.
+        run: dotnet tool install --global wix --version 6.0.2
       - name: Build Windows MSI
         shell: pwsh
         # WiX requires a numeric ProductVersion even for CI smoke builds.
