@@ -48,8 +48,6 @@ type Manager struct {
 	quotaSettledAt time.Time
 	metrics        *metrics.Metrics
 	alerts         *alerts.Alerter
-	lastForwarded  float64
-	lastDropped    float64
 	sso            *oidc.Verifier
 	mu             sync.RWMutex
 	snapshot       model.SignedSnapshot
@@ -81,7 +79,7 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 	if config.Forwarding {
 		// The forwarding table keys hops by libp2p PeerID, so the local
 		// identity must be the host peer ID rather than the committee label.
-		manager.forwarding = forward.NewTable(engine.CurrentState(), node.Host.ID().String(), func(remote peer.ID, envelope forward.Envelope) error {
+		manager.forwarding = forward.NewTableWithMetrics(engine.CurrentState(), node.Host.ID().String(), func(remote peer.ID, envelope forward.Envelope) error {
 			wire, err := forward.EncodeEnvelope(envelope)
 			if err != nil {
 				return err
@@ -90,7 +88,7 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 				return fmt.Errorf("frame transport not started")
 			}
 			return manager.dataTransport.Send(remote, wire)
-		})
+		}, config.Metrics)
 	}
 	if config.Links != nil {
 		manager.prober = link.NewProber(node, engine.CurrentState, engine.CommitteeMembers, config.Links)
@@ -197,7 +195,7 @@ func (manager *Manager) AlertInput() alerts.Input {
 	return alerts.Input{
 		Manager:           manager.LocalID(),
 		Height:            manager.Height(),
-		QuorumSize:        bft.QuorumSize,
+		QuorumSize:        manager.engine.CommitteeParams().QuorumSize,
 		CommitteeSize:     len(manager.engine.CommitteeMembers()),
 		DisconnectedPeers: manager.DisconnectedMembers(),
 		PeerCount:         len(state.Peers),
@@ -382,7 +380,10 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Error: err.Error(), Code: protocol.CodeRegistrationRequired, ProtocolVersion: version.ProtocolVersion})
 		return
 	}
-	manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Snapshot: snapshot, Peer: peerRecord, ProtocolVersion: version.ProtocolVersion, Capabilities: version.Capabilities()})
+	manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{
+		Snapshot: model.ClientSnapshot(snapshot), Peer: peerRecord,
+		ProtocolVersion: version.ProtocolVersion, Capabilities: version.Capabilities(),
+	})
 }
 
 func (manager *Manager) rememberAddrs(peerID string, addresses []string) {
@@ -616,7 +617,8 @@ func (manager *Manager) onCommit(snapshot model.SignedSnapshot) {
 }
 
 // publishMetrics refreshes the Prometheus gauges derived from certified state
-// and forwarding counters. It is a no-op unless metrics are enabled.
+// and the forwarding table. Counters are updated at their instrumentation
+// points. It is a no-op unless metrics are enabled.
 func (manager *Manager) publishMetrics(snapshot model.SignedSnapshot) {
 	if manager.metrics == nil {
 		return
@@ -625,11 +627,7 @@ func (manager *Manager) publishMetrics(snapshot model.SignedSnapshot) {
 	manager.metrics.BFTCommits.Inc()
 	manager.metrics.CertifiedPeers.Set(float64(len(snapshot.State.Peers)))
 	if manager.forwarding != nil {
-		forwarded, dropped := manager.forwarding.Stats()
-		manager.metrics.Forwarded.Add(float64(forwarded) - manager.lastForwarded)
-		manager.metrics.ForwardDrops.Add(float64(dropped) - manager.lastDropped)
-		manager.lastForwarded = float64(forwarded)
-		manager.lastDropped = float64(dropped)
+		manager.metrics.ForwardQueueDepth.Set(float64(manager.forwarding.QueueDepth()))
 	}
 	view := manager.LinkView()
 	manager.metrics.LinkSegments.Set(float64(len(view.Segments) + len(view.AccessSegments)))
@@ -661,6 +659,7 @@ func (manager *Manager) respond(stream network.Stream, id libprotocol.ID, respon
 }
 
 func writeSnapshot(stream network.Stream, snapshot model.SignedSnapshot) {
+	snapshot = model.ClientSnapshot(snapshot)
 	if err := p2p.WriteMessage(stream, p2p.SyncProtocol, wire.SignedSnapshotToProto(snapshot)); err != nil {
 		stream.Reset()
 	}

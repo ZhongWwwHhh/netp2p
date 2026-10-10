@@ -3,6 +3,7 @@ package quota
 
 import (
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/netp2p/netp2p/internal/model"
@@ -158,6 +159,7 @@ func max64(a, b uint64) uint64 {
 // limiter. It is the single admission point for both the client's outbound
 // path and the manager's forwarding path.
 type Enforcer struct {
+	mu      sync.Mutex
 	budgets map[string]model.TrafficBudget
 	order   []string
 	buckets map[string]*TokenBucket
@@ -183,10 +185,23 @@ func NewEnforcer(budgets []model.TrafficBudget) *Enforcer {
 // Replace updates the budget set as certified state changes. Usage counters are
 // preserved so the reset is driven by the manager, not by a local heuristic.
 func (enforcer *Enforcer) Replace(budgets []model.TrafficBudget) {
+	enforcer.mu.Lock()
+	defer enforcer.mu.Unlock()
+
 	now := enforcer.now()
+	pending := make(map[string]uint64, len(enforcer.deltas))
+	for id, bytes := range enforcer.deltas {
+		pending[id] = bytes
+	}
 	known := make(map[string]struct{}, len(budgets))
 	for _, budget := range budgets {
 		known[budget.ID] = struct{}{}
+		// Keep locally admitted but not yet settled bytes. A snapshot refresh
+		// must never turn an exhausted budget into an empty one.
+		if bytes := pending[budget.ID]; bytes > 0 {
+			budget.UsedDailyBytes += bytes
+			budget.UsedMonthlyBytes += bytes
+		}
 		enforcer.budgets[budget.ID] = budget
 		if existing, ok := enforcer.buckets[budget.ID]; !ok || !existing.ready {
 			burst := budget.PeakBurstBytes
@@ -218,6 +233,12 @@ func (enforcer *Enforcer) Replace(budgets []model.TrafficBudget) {
 // route → group → peer so a narrow route budget always wins over a broad peer
 // budget.
 func (enforcer *Enforcer) Resolve(peerID string, groups []string, routeID string) (model.TrafficBudget, bool) {
+	enforcer.mu.Lock()
+	defer enforcer.mu.Unlock()
+	return enforcer.resolveLocked(peerID, groups, routeID)
+}
+
+func (enforcer *Enforcer) resolveLocked(peerID string, groups []string, routeID string) (model.TrafficBudget, bool) {
 	group := make(map[string]struct{}, len(groups))
 	for _, id := range groups {
 		group[id] = struct{}{}
@@ -250,7 +271,9 @@ func (enforcer *Enforcer) Resolve(peerID string, groups []string, routeID string
 // Check admits bytes against the matching budget and records the usage delta
 // for later settlement. A nil budget (no match) always allows.
 func (enforcer *Enforcer) Check(peerID string, groups []string, routeID string, bytes uint64) Decision {
-	budget, ok := enforcer.Resolve(peerID, groups, routeID)
+	enforcer.mu.Lock()
+	defer enforcer.mu.Unlock()
+	budget, ok := enforcer.resolveLocked(peerID, groups, routeID)
 	if !ok {
 		return Decision{Allowed: true, Action: ActionAllow}
 	}
@@ -299,6 +322,8 @@ func (enforcer *Enforcer) record(budgetID string, bytes uint64) {
 // DrainDeltas returns and clears the accumulated per-budget byte deltas since
 // the last drain, for reporting to the manager.
 func (enforcer *Enforcer) DrainDeltas() map[string]uint64 {
+	enforcer.mu.Lock()
+	defer enforcer.mu.Unlock()
 	result := make(map[string]uint64, len(enforcer.deltas))
 	for id, bytes := range enforcer.deltas {
 		if bytes == 0 {
@@ -312,6 +337,8 @@ func (enforcer *Enforcer) DrainDeltas() map[string]uint64 {
 
 // Usage returns a copy of the locally tracked usage, for the console.
 func (enforcer *Enforcer) Usage() map[string]model.TrafficBudget {
+	enforcer.mu.Lock()
+	defer enforcer.mu.Unlock()
 	result := make(map[string]model.TrafficBudget, len(enforcer.budgets))
 	for id, budget := range enforcer.budgets {
 		result[id] = budget
@@ -325,6 +352,8 @@ func (enforcer *Enforcer) RestoreDelta(budgetID string, bytes uint64) {
 	if bytes == 0 {
 		return
 	}
+	enforcer.mu.Lock()
+	defer enforcer.mu.Unlock()
 	enforcer.deltas[budgetID] += bytes
 }
 

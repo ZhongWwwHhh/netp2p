@@ -18,10 +18,11 @@ func TestFourManagerMeshRegistersPeer(t *testing.T) {
 	defer cancel()
 
 	state := model.NetworkState{
-		NetworkID:    "net-test",
-		OverlayCIDR:  "100.64.0.0/24",
-		NextIPOffset: 1,
-		Groups:       []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
+		NetworkID:       "net-test",
+		OverlayCIDR:     "100.64.0.0/24",
+		CommitteeConfig: model.CommitteeConfig{Threshold: 3, Size: 4},
+		NextIPOffset:    1,
+		Groups:          []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
 		SetupKeys: []model.SetupKey{
 			{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}},
 			{ID: "key-b", Token: "key-b", TokenHash: model.SetupKeyHash("key-b"), Groups: []string{"clients-b"}},
@@ -146,11 +147,12 @@ func TestQuorumSurvivesSingleManagerFailure(t *testing.T) {
 	defer cancel()
 
 	state := model.NetworkState{
-		NetworkID:    "net-test",
-		OverlayCIDR:  "100.64.0.0/24",
-		NextIPOffset: 1,
-		Groups:       []model.Group{{ID: "clients-a"}},
-		SetupKeys:    []model.SetupKey{{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}}},
+		NetworkID:       "net-test",
+		OverlayCIDR:     "100.64.0.0/24",
+		CommitteeConfig: model.CommitteeConfig{Threshold: 3, Size: 4},
+		NextIPOffset:    1,
+		Groups:          []model.Group{{ID: "clients-a"}},
+		SetupKeys:       []model.SetupKey{{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}}},
 	}
 
 	const count = 4
@@ -225,11 +227,12 @@ func TestSubmitWithLeaderDown(t *testing.T) {
 	defer cancel()
 
 	state := model.NetworkState{
-		NetworkID:    "net-test",
-		OverlayCIDR:  "100.64.0.0/24",
-		NextIPOffset: 1,
-		Groups:       []model.Group{{ID: "clients-a"}},
-		SetupKeys:    []model.SetupKey{{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}}},
+		NetworkID:       "net-test",
+		OverlayCIDR:     "100.64.0.0/24",
+		CommitteeConfig: model.CommitteeConfig{Threshold: 3, Size: 4},
+		NextIPOffset:    1,
+		Groups:          []model.Group{{ID: "clients-a"}},
+		SetupKeys:       []model.SetupKey{{ID: "key-a", Token: "key-a", TokenHash: model.SetupKeyHash("key-a"), Groups: []string{"clients-a"}}},
 	}
 
 	const count = 4
@@ -322,10 +325,11 @@ func TestSubmitRejectsInvalidTransition(t *testing.T) {
 	defer cancel()
 
 	state := model.NetworkState{
-		NetworkID:    "net-test",
-		OverlayCIDR:  "100.64.0.0/24",
-		NextIPOffset: 1,
-		Groups:       []model.Group{{ID: "clients-a"}},
+		NetworkID:       "net-test",
+		OverlayCIDR:     "100.64.0.0/24",
+		CommitteeConfig: model.CommitteeConfig{Threshold: 3, Size: 4},
+		NextIPOffset:    1,
+		Groups:          []model.Group{{ID: "clients-a"}},
 	}
 
 	const count = 4
@@ -396,9 +400,10 @@ func TestAdminSubmitRoundTrip(t *testing.T) {
 	defer cancel()
 
 	state := model.NetworkState{
-		NetworkID:    "net-test",
-		OverlayCIDR:  "100.64.0.0/24",
-		NextIPOffset: 1,
+		NetworkID:       "net-test",
+		OverlayCIDR:     "100.64.0.0/24",
+		CommitteeConfig: model.CommitteeConfig{Threshold: 3, Size: 4},
+		NextIPOffset:    1,
 	}
 
 	const count = 4

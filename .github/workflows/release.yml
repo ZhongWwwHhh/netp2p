@@ -1,0 +1,148 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Strip tag prefix
+        shell: bash
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Install WiX
+        run: dotnet tool install --global wix
+      - name: Build UI
+        shell: pwsh
+        run: |
+          cd ui
+          npm ci --no-audit --no-fund
+          $env:VITE_NETP2P_VERSION = $env:VERSION
+          npm run build
+      - name: Build Windows MSI
+        run: make package-windows VERSION="$env:VERSION" SKIP_UI=1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netp2p-windows-msi
+          path: dist/*.msi
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    needs: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Strip tag prefix
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Build UI
+        run: cd ui && npm ci && VITE_NETP2P_VERSION="$VERSION" npm run build
+      - name: Build Linux artifacts
+        run: make package-linux package-tarball VERSION="$VERSION" SKIP_UI=1
+      - name: Download Windows MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: netp2p-windows-msi
+          path: dist
+      - name: Install Syft
+        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+      - name: Generate SBOM
+        run: make sbom VERSION="$VERSION"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push manager image
+        id: manager_image
+        run: |
+          IMAGE="ghcr.io/zhongwwwhhh/netp2p-manager"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$VERSION" \
+            --label org.opencontainers.image.title=NetP2P \
+            --label org.opencontainers.image.description="Decentralized overlay VPN with a BFT committee control plane" \
+            --label org.opencontainers.image.version="$VERSION" \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.licenses=Apache-2.0 \
+            -t "$IMAGE:$VERSION" \
+            -t "$IMAGE:latest" \
+            --push .
+          DIGEST="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          printf '%s\n' "$DIGEST" > "dist/netp2p-$VERSION-image-digest.txt"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Build and push Caddy image
+        id: caddy_image
+        run: |
+          IMAGE="ghcr.io/zhongwwwhhh/netp2p-caddy"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg VERSION="$VERSION" \
+            --label org.opencontainers.image.title=NetP2P-Caddy \
+            --label org.opencontainers.image.description="Caddy with the Cloudflare DNS module for NetP2P deployments" \
+            --label org.opencontainers.image.version="$VERSION" \
+            --label org.opencontainers.image.licenses=Apache-2.0 \
+            -f Dockerfile.caddy \
+            -t "$IMAGE:$VERSION" \
+            -t "$IMAGE:latest" \
+            --push .
+          DIGEST="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          printf '%s\n' "$DIGEST" > "dist/netp2p-caddy-$VERSION-image-digest.txt"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Generate checksums
+        run: |
+          sh packaging/checksums.sh \
+            "dist/netp2p-$VERSION-SHA256SUMS" \
+            "dist/netp2p-$VERSION-linux-amd64.tar.gz" \
+            dist/*.deb dist/*.rpm dist/*.msi \
+            "dist/netp2p-$VERSION-sbom.cdx.json" \
+            "dist/netp2p-$VERSION-image-digest.txt" \
+            "dist/netp2p-caddy-$VERSION-image-digest.txt"
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Manager image: ghcr.io/zhongwwwhhh/netp2p-manager:${{ env.VERSION }}
+            Manager digest: ${{ steps.manager_image.outputs.digest }}
+            Caddy image: ghcr.io/zhongwwwhhh/netp2p-caddy:${{ env.VERSION }}
+            Caddy digest: ${{ steps.caddy_image.outputs.digest }}
+
+            Use the manager and Caddy digest files when pinning Ansible deployments.
+          files: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
+            dist/*.msi
+            dist/*SHA256SUMS*
+            dist/*sbom*
+            dist/*image-digest.txt

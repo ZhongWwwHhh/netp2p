@@ -19,6 +19,10 @@ type Vote struct {
 	NetworkID      string `json:"networkId"`
 	StateHash      []byte `json:"stateHash"`
 	TransitionHash []byte `json:"transitionHash"`
+	// ClientViewHash covers the client-visible projection of the state and
+	// transition, allowing clients to validate redacted snapshots without
+	// receiving manager-only secrets.
+	ClientViewHash []byte `json:"clientViewHash,omitempty"`
 	VoterID        string `json:"voterId"`
 	Signature      []byte `json:"signature"`
 	// CommitteeEpoch binds the vote to the committee configuration that

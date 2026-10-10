@@ -10,7 +10,9 @@ import (
 	"sync/atomic"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/quota"
 	"github.com/netp2p/netp2p/internal/tracing"
 	"go.opentelemetry.io/otel"
 )
@@ -23,6 +25,7 @@ var (
 	ErrTTLExceeded       = errors.New("frame hop limit exceeded")
 	ErrQueueFull         = errors.New("forwarding queue full")
 	ErrDestinationHeader = errors.New("frame destination header mismatch")
+	ErrQuotaExceeded     = errors.New("frame exceeded a traffic budget")
 )
 
 type Header struct {
@@ -42,24 +45,46 @@ type Envelope struct {
 type Sender func(remote peer.ID, envelope Envelope) error
 
 type Table struct {
-	mu        sync.RWMutex
-	state     model.NetworkState
-	sender    Sender
-	localID   string
-	sequence  atomic.Uint64
-	forwarded atomic.Uint64
-	dropped   atomic.Uint64
+	mu           sync.RWMutex
+	state        model.NetworkState
+	sender       Sender
+	localID      string
+	quota        *quota.Enforcer
+	connections  map[string]struct{}
+	sequence     atomic.Uint64
+	forwarded    atomic.Uint64
+	dropped      atomic.Uint64
+	quotaBlocked atomic.Uint64
+	queueDepth   atomic.Int64
+	reservations atomic.Uint64
+	bytes        atomic.Uint64
+	metrics      *metrics.Metrics
 }
 
 func NewTable(state model.NetworkState, localID string, sender Sender) *Table {
-	return &Table{state: state, localID: localID, sender: sender}
+	return NewTableWithMetrics(state, localID, sender, nil)
+}
+
+func NewTableWithMetrics(state model.NetworkState, localID string, sender Sender, collector *metrics.Metrics) *Table {
+	return &Table{
+		state:       state,
+		localID:     localID,
+		sender:      sender,
+		quota:       quota.NewEnforcer(state.Budgets),
+		connections: make(map[string]struct{}),
+		metrics:     collector,
+	}
 }
 
 // Replace atomically applies a certified snapshot's assignment table.
 func (table *Table) Replace(state model.NetworkState) {
 	table.mu.Lock()
 	table.state = state
+	if table.connections == nil {
+		table.connections = make(map[string]struct{})
+	}
 	table.mu.Unlock()
+	table.quota.Replace(state.Budgets)
 }
 
 // Accept validates an inbound manager-forwarded frame from remote and sends it
@@ -75,7 +100,7 @@ func (table *Table) Accept(remote peer.ID, envelope Envelope) (bool, error) {
 		defer span.End()
 	}
 	if envelope.Header.TTL == 0 {
-		table.dropped.Add(1)
+		table.recordDrop()
 		return false, ErrTTLExceeded
 	}
 	table.mu.RLock()
@@ -83,18 +108,27 @@ func (table *Table) Accept(remote peer.ID, envelope Envelope) (bool, error) {
 	table.mu.RUnlock()
 	assignment, ok := findAssignment(state, envelope.Header.AssignmentID)
 	if !ok || !assignmentContains(assignment, envelope.Header.PathID) {
-		table.dropped.Add(1)
+		table.recordDrop()
 		return false, ErrNoAssignment
 	}
 	if envelope.Header.SourcePeerID != assignment.SourcePeerID ||
 		envelope.Header.DestinationPeerID != assignment.DestinationPeerID {
-		table.dropped.Add(1)
+		table.recordDrop()
 		return false, ErrInvalidSource
 	}
-	if pathContains(assignment.Paths(), envelope.Header.PathID, table.localID) {
+	path, _ := pathByID(assignment, envelope.Header.PathID)
+	isManagerHop := pathContains(assignment.Paths(), envelope.Header.PathID, table.localID)
+	if isManagerHop {
 		if !predecessorMatches(assignment, envelope.Header.PathID, table.localID, remote.String()) {
-			table.dropped.Add(1)
+			table.recordDrop()
 			return false, ErrInvalidSource
+		}
+		// Charge each envelope once, at the first certified manager hop.
+		if remote.String() == assignment.SourcePeerID && state.Settings.QuotaEnforcementEnabled &&
+			!table.admitQuotas(state, assignment, uint64(len(envelope.Payload))) {
+			table.recordQuotaBlocked()
+			table.recordDrop()
+			return false, ErrQuotaExceeded
 		}
 		next, ok := nextHop(assignment, envelope.Header.PathID, table.localID)
 		if !ok {
@@ -102,26 +136,36 @@ func (table *Table) Accept(remote peer.ID, envelope Envelope) (bool, error) {
 		}
 		nextPeer, err := peer.Decode(next)
 		if err != nil {
-			table.dropped.Add(1)
+			table.recordDrop()
 			return false, err
 		}
 		forwarded := envelope
 		forwarded.Header.TTL--
-		if err := table.sender(nextPeer, forwarded); err != nil {
-			table.dropped.Add(1)
+		if err := table.send(nextPeer, forwarded); err != nil {
+			table.recordDrop()
 			return false, err
 		}
-		table.forwarded.Add(1)
+		table.observeConnection(remote)
+		table.bytes.Add(uint64(len(envelope.Payload)))
+		table.recordForwarded()
 		return false, nil
 	}
 	if table.localID != assignment.DestinationPeerID {
-		table.dropped.Add(1)
+		table.recordDrop()
 		return false, ErrNoAssignment
 	}
 	if expected, ok := destinationPredecessor(assignment, envelope.Header.PathID); !ok || expected != remote.String() {
-		table.dropped.Add(1)
+		table.recordDrop()
 		return false, ErrInvalidSource
 	}
+	if len(path.ManagerHops) == 0 && state.Settings.QuotaEnforcementEnabled &&
+		!table.admitQuotas(state, assignment, uint64(len(envelope.Payload))) {
+		table.recordQuotaBlocked()
+		table.recordDrop()
+		return false, ErrQuotaExceeded
+	}
+	table.observeConnection(remote)
+	table.bytes.Add(uint64(len(envelope.Payload)))
 	return true, nil
 }
 
@@ -153,7 +197,12 @@ func (table *Table) Send(source, destination peer.ID, assignmentID, pathID strin
 		},
 		Payload: payload,
 	}
-	return table.sender(remote, envelope)
+	if err := table.send(remote, envelope); err != nil {
+		return err
+	}
+	table.reservations.Add(1)
+	table.bytes.Add(uint64(len(payload)))
+	return nil
 }
 
 func (table *Table) Dropped() uint64 { return table.dropped.Load() }
@@ -162,6 +211,118 @@ func (table *Table) Dropped() uint64 { return table.dropped.Load() }
 // dropped. It exists for tests and diagnostics.
 func (table *Table) Stats() (forwarded, dropped uint64) {
 	return table.forwarded.Load(), table.dropped.Load()
+}
+
+func (table *Table) QueueDepth() int64 {
+	return table.queueDepth.Load()
+}
+
+func (table *Table) QuotaBlocked() uint64 {
+	return table.quotaBlocked.Load()
+}
+
+func (table *Table) send(remote peer.ID, envelope Envelope) error {
+	table.enterSend()
+	defer table.exitSend()
+	return table.sender(remote, envelope)
+}
+
+func (table *Table) enterSend() {
+	table.queueDepth.Add(1)
+	table.publishQueueDepth()
+}
+
+func (table *Table) exitSend() {
+	table.queueDepth.Add(-1)
+	table.publishQueueDepth()
+}
+
+func (table *Table) publishQueueDepth() {
+	if table.metrics == nil {
+		return
+	}
+	table.metrics.ForwardQueueDepth.Set(float64(table.queueDepth.Load()))
+}
+
+func (table *Table) recordForwarded() {
+	table.forwarded.Add(1)
+	if table.metrics != nil {
+		table.metrics.Forwarded.Inc()
+	}
+}
+
+func (table *Table) recordDrop() {
+	table.dropped.Add(1)
+	if table.metrics != nil {
+		table.metrics.ForwardDrops.Inc()
+	}
+}
+
+func (table *Table) recordQuotaBlocked() {
+	table.quotaBlocked.Add(1)
+	if table.metrics != nil {
+		table.metrics.QuotaBlocked.Inc()
+	}
+}
+
+// RelayStats reports unique successful relay predecessors, certified path
+// reservations, and payload bytes. It complements Stats for capacity planning.
+func (table *Table) RelayStats() (connections, reservations, bytes uint64) {
+	table.mu.RLock()
+	connections = uint64(len(table.connections))
+	table.mu.RUnlock()
+	return connections, table.reservations.Load(), table.bytes.Load()
+}
+
+func (table *Table) observeConnection(remote peer.ID) {
+	table.mu.Lock()
+	if table.connections == nil {
+		table.connections = make(map[string]struct{})
+	}
+	table.connections[remote.String()] = struct{}{}
+	table.mu.Unlock()
+}
+
+func (table *Table) admitQuotas(state model.NetworkState, assignment model.RouteAssignment, bytes uint64) bool {
+	sourceGroups := peerGroups(state, assignment.SourcePeerID)
+	destinationGroups := peerGroups(state, assignment.DestinationPeerID)
+
+	sourceBudget, sourceMatched := table.quota.Resolve(assignment.SourcePeerID, sourceGroups, "")
+	destinationBudget, destinationMatched := table.quota.Resolve(assignment.DestinationPeerID, destinationGroups, "")
+	if sourceMatched && destinationMatched && sourceBudget.ID == destinationBudget.ID {
+		decision := table.quota.Check(assignment.SourcePeerID, sourceGroups, "", bytes)
+		return decision.Allowed && decision.Delay == 0
+	}
+	if sourceMatched {
+		decision := table.quota.Check(assignment.SourcePeerID, sourceGroups, "", bytes)
+		if !decision.Allowed || decision.Delay > 0 {
+			return false
+		}
+	}
+	if destinationMatched {
+		decision := table.quota.Check(assignment.DestinationPeerID, destinationGroups, "", bytes)
+		if !decision.Allowed || decision.Delay > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func peerGroups(state model.NetworkState, peerID string) []string {
+	groups := make([]string, 0, 4)
+	for _, peer := range state.Peers {
+		if peer.PeerID != peerID {
+			continue
+		}
+		groups = append(groups, peer.Groups...)
+		break
+	}
+	for _, group := range state.Groups {
+		if containsPeerID(group.PeerIDs, peerID) {
+			groups = append(groups, group.ID)
+		}
+	}
+	return groups
 }
 
 func findAssignment(state model.NetworkState, id string) (model.RouteAssignment, bool) {

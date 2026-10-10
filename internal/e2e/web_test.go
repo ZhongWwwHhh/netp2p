@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,12 +15,22 @@ import (
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/store"
 	"github.com/netp2p/netp2p/internal/web"
 )
 
+const webE2ESessionSecret = "e2e-session-secret-0123456789abcdef"
+
 func newWebServer(t *testing.T, group *cluster, index int) (*web.Server, *httptest.Server) {
 	t.Helper()
-	server, err := web.NewServer(group.nodes[index], group.managers[index], web.Config{AdminToken: "test-token"})
+	authStore, err := store.Open(filepath.Join(t.TempDir(), fmt.Sprintf("web-auth-%d.sqlite", index)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authStore.Close() })
+	server, err := web.NewServer(group.nodes[index], group.managers[index], web.Config{
+		AdminToken: "test-token", SessionSecret: webE2ESessionSecret, AuthStore: authStore,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +146,7 @@ func TestWebAPITransitionAndSnapshot(t *testing.T) {
 	if err := json.NewDecoder(snapshotResponse.Body).Decode(&snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if err := bft.ValidateSnapshot(snapshot); err != nil {
+	if err := bft.ValidateClientSnapshot(snapshot); err != nil {
 		t.Fatal(err)
 	}
 
@@ -258,7 +269,7 @@ func TestWebSPAFallbackAndActivity(t *testing.T) {
 		t.Fatal("activity log is empty")
 	}
 	for index, entry := range activity.Entries {
-		if err := bft.ValidateSnapshot(entry); err != nil {
+		if err := bft.ValidateClientSnapshot(entry); err != nil {
 			t.Fatalf("activity entry %d does not validate: %v", index, err)
 		}
 		if index > 0 && entry.Height >= activity.Entries[index-1].Height {

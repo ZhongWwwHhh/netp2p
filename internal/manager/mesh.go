@@ -1,7 +1,9 @@
 package manager
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -21,14 +23,26 @@ import (
 )
 
 type CommitteeMesh struct {
-	node        *p2p.Node
-	engine      *bft.Engine
-	members     []model.CommitteeMember
-	peers       map[string]peer.ID
-	mu          sync.Mutex
-	submitMu    sync.Mutex
-	subscribers map[chan model.SignedSnapshot]struct{}
+	node            *p2p.Node
+	engine          *bft.Engine
+	members         []model.CommitteeMember
+	peers           map[string]peer.ID
+	mu              sync.Mutex
+	submitMu        sync.Mutex
+	probeMu         sync.Mutex
+	subscribers     map[chan model.SignedSnapshot]struct{}
+	probeGeneration uint64
+	probeResponses  map[peer.ID]committeeProbe
 }
+
+type committeeProbe struct {
+	generation uint64
+	response   chan struct{}
+}
+
+const committeeProbeTimeout = 500 * time.Millisecond
+
+var ErrCommitteeUnavailable = errors.New("committee unavailable")
 
 func NewCommitteeMesh(node *p2p.Node, engine *bft.Engine, members []model.CommitteeMember) (*CommitteeMesh, error) {
 	peers := make(map[string]peer.ID)
@@ -45,7 +59,8 @@ func NewCommitteeMesh(node *p2p.Node, engine *bft.Engine, members []model.Commit
 	}
 	mesh := &CommitteeMesh{
 		node: node, engine: engine, members: members, peers: peers,
-		subscribers: make(map[chan model.SignedSnapshot]struct{}),
+		subscribers:    make(map[chan model.SignedSnapshot]struct{}),
+		probeResponses: make(map[peer.ID]committeeProbe),
 	}
 	node.Handle(p2p.StateUpdateProtocol, mesh.handleStateUpdate)
 	engine.OnCommit(mesh.onCommit)
@@ -69,6 +84,102 @@ func (mesh *CommitteeMesh) peerSnapshot() map[string]peer.ID {
 		result[memberID] = peerID
 	}
 	return result
+}
+
+// isCommitteePeer reports whether a remote libp2p identity belongs to the
+// configured committee. State-update streams are authenticated by this allow
+// list before any payload is decoded or applied.
+func (mesh *CommitteeMesh) isCommitteePeer(remote peer.ID) bool {
+	for _, peerID := range mesh.peerSnapshot() {
+		if peerID == remote {
+			return true
+		}
+	}
+	return false
+}
+
+func (mesh *CommitteeMesh) memberIDForPeer(remote peer.ID) (string, bool) {
+	mesh.mu.Lock()
+	defer mesh.mu.Unlock()
+	for memberID, peerID := range mesh.peers {
+		if peerID == remote {
+			return memberID, true
+		}
+	}
+	return "", false
+}
+
+// ensureCommitteeAvailable proves that enough remote members answer an
+// application-level handshake to combine their votes with this manager's vote.
+// Transport connectedness is not sufficient: a partitioned peer can remain
+// connected while every state-update message is dropped.
+func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
+	mesh.probeMu.Lock()
+	defer mesh.probeMu.Unlock()
+
+	peers := mesh.peerSnapshot()
+	params := mesh.engine.CommitteeParams()
+	required := params.QuorumSize - 1
+	if required > len(peers) {
+		required = len(peers)
+	}
+	if required <= 0 {
+		return nil
+	}
+
+	mesh.mu.Lock()
+	mesh.probeGeneration++
+	generation := mesh.probeGeneration
+	response := make(chan struct{}, len(peers))
+	for _, peerID := range peers {
+		mesh.probeResponses[peerID] = committeeProbe{generation: generation, response: response}
+	}
+	mesh.mu.Unlock()
+	defer func() {
+		mesh.mu.Lock()
+		for _, peerID := range peers {
+			if current := mesh.probeResponses[peerID]; current.response == response {
+				delete(mesh.probeResponses, peerID)
+			}
+		}
+		mesh.mu.Unlock()
+	}()
+
+	for _, peerID := range peers {
+		go func(peerID peer.ID) {
+			ctx, cancel := context.WithTimeout(context.Background(), committeeProbeTimeout)
+			defer cancel()
+			_ = mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, wire.CommitteeEnvelopeToProto(
+				model.CommitteeEnvelope{Type: "ready", Height: generation},
+			))
+		}(peerID)
+	}
+
+	timer := time.NewTimer(committeeProbeTimeout)
+	defer timer.Stop()
+	answered := 0
+	for answered < required {
+		select {
+		case <-response:
+			answered++
+		case <-timer.C:
+			return fmt.Errorf("%w: %d of %d remote committee members answered", ErrCommitteeUnavailable, answered, len(peers))
+		}
+	}
+	return nil
+}
+
+func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64) {
+	mesh.mu.Lock()
+	probe, ok := mesh.probeResponses[remote]
+	mesh.mu.Unlock()
+	if !ok || probe.generation != generation {
+		return
+	}
+	select {
+	case probe.response <- struct{}{}:
+	default:
+	}
 }
 
 // syncMembers rebuilds the member list from the engine's current committee and
@@ -168,6 +279,10 @@ func (mesh *CommitteeMesh) Connect(ctx context.Context) error {
 
 func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 	defer stream.Close()
+	remote := stream.Conn().RemotePeer()
+	if _, ok := mesh.memberIDForPeer(remote); !ok {
+		return
+	}
 	envelope, err := p2p.DecodeEnvelope(stream)
 	if err != nil {
 		return
@@ -182,12 +297,26 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if message.Proposal == nil {
 			return
 		}
+		senderID, ok := mesh.memberIDForPeer(remote)
+		if !ok || senderID != message.Proposal.LeaderID {
+			return
+		}
+		if err := mesh.ensureCommitteeAvailable(); err != nil {
+			return
+		}
 		vote, err := mesh.engine.ProcessProposal(*message.Proposal)
 		if err == nil {
 			_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "vote", Vote: &vote})
 		}
 	case "vote":
 		if message.Vote == nil {
+			return
+		}
+		senderID, ok := mesh.memberIDForPeer(remote)
+		if !ok || senderID != message.Vote.VoterID {
+			return
+		}
+		if err := mesh.ensureCommitteeAvailable(); err != nil {
 			return
 		}
 		qc, ready, err := mesh.engine.ProcessVote(*message.Vote)
@@ -212,6 +341,9 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if message.Transition == nil {
 			return
 		}
+		if err := mesh.ensureCommitteeAvailable(); err != nil {
+			return
+		}
 		mesh.proposeLocal(*message.Transition, message.Round)
 	case "sync_request":
 		// The requester asks for one specific height at a time, which keeps the
@@ -222,6 +354,10 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 			return
 		}
 		_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "sync_response", Snapshot: &snapshot})
+	case "ready":
+		_ = mesh.send(remote, model.CommitteeEnvelope{Type: "ready_ack", Height: message.Height})
+	case "ready_ack":
+		mesh.markProbeResponse(remote, message.Height)
 	}
 }
 
@@ -375,8 +511,13 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 	}()
 
 	startHeight := mesh.engine.Height()
+	transitionHash := bft.TransitionHash(transition)
 	totalTimeout := time.After(30 * time.Second)
-	for round := uint64(0); round < bft.CommitteeSize; round++ {
+	params := mesh.engine.CommitteeParams()
+	if err := mesh.ensureCommitteeAvailable(); err != nil {
+		return model.SignedSnapshot{}, err
+	}
+	for round := uint64(0); round < uint64(params.Size); round++ {
 		height := mesh.engine.Height() + 1
 		leader := mesh.engine.Leader(height, round)
 		if leader.ID == mesh.engine.LocalID() {
@@ -396,7 +537,7 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 		for rotating {
 			select {
 			case snapshot := <-subscriber:
-				if snapshot.Height > startHeight {
+				if snapshot.Height > startHeight && bytes.Equal(bft.TransitionHash(snapshot.Transition), transitionHash) {
 					return snapshot, nil
 				}
 			case <-roundDeadline:

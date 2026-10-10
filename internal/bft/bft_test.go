@@ -27,6 +27,27 @@ func testCommittee() ([]model.CommitteeMember, []ed25519.PrivateKey) {
 	return members, privateKeys
 }
 
+func legacyCommittee() ([]model.CommitteeMember, []ed25519.PrivateKey) {
+	members := make([]model.CommitteeMember, 4)
+	privateKeys := make([]ed25519.PrivateKey, 4)
+	for index := range members {
+		seed := int64(index + 1)
+		privateKeys[index] = SeededPrivateKey(seed)
+		members[index] = model.CommitteeMember{
+			ID:        string(rune('A' + index)),
+			KeySeed:   seed,
+			PeerID:    "",
+			Address:   "",
+			PublicKey: append([]byte(nil), SeededPublicKey(seed)...),
+		}
+	}
+	return members, privateKeys
+}
+
+func legacyCommitteeParams() model.CommitteeParams {
+	return model.CommitteeParams{Size: 4, FaultLimit: 1, QuorumSize: 3}
+}
+
 func testState() model.NetworkState {
 	return model.NetworkState{
 		NetworkID:    "net-1",
@@ -46,7 +67,7 @@ func testState() model.NetworkState {
 
 func advance(t *testing.T, privateKeys []ed25519.PrivateKey, engines []*Engine, transition model.StateTransition) model.SignedSnapshot {
 	t.Helper()
-	leaderIndex := int((engines[0].Height() + 1) % CommitteeSize)
+	leaderIndex := int((engines[0].Height() + 1) % uint64(len(engines)))
 	proposal, leaderVote, err := engines[leaderIndex].Propose(transition, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +152,7 @@ func TestRejectTamperedSnapshot(t *testing.T) {
 		engines[index] = engine
 	}
 	snapshot := advance(t, privateKeys, engines, model.StateTransition{
-		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "clients-c"},
 	})
 	snapshot.State.Policies[0].ID = "changed"
 	if err := ValidateSnapshot(snapshot); err == nil {
@@ -142,11 +163,11 @@ func TestRejectTamperedSnapshot(t *testing.T) {
 // TestQuorumToleratesOneOfflineManager verifies n=4, f=1: three live managers
 // (leader plus two voters) are enough to certify state without the fourth.
 func TestQuorumToleratesOneOfflineManager(t *testing.T) {
-	committee, privateKeys := testCommittee()
+	committee, privateKeys := legacyCommittee()
 	state := testState()
-	engines := make([]*Engine, CommitteeSize)
+	engines := make([]*Engine, len(committee))
 	for index, key := range privateKeys {
-		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		engine, err := NewEngineWithParams(state, committee, committee[index].ID, key, legacyCommitteeParams())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -216,7 +237,7 @@ func TestRejectInsufficientQuorum(t *testing.T) {
 	snapshot := advance(t, privateKeys, engines, model.StateTransition{
 		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
 	})
-	// Rebuild the certificate with only two partial signatures: below the 3-of-4
+	// Rebuild the certificate with only two partial signatures: below the
 	// threshold, so it must not verify against the group public key.
 	message := voteMessage(Vote{
 		Height: snapshot.QC.Height, Round: snapshot.QC.Round, NetworkID: snapshot.State.NetworkID,
@@ -327,11 +348,11 @@ func TestRegisterPeerAllocatesAddressesAndGroups(t *testing.T) {
 // TestCatchUpCommitsCertifiedSnapshot verifies that a manager which missed a
 // proposal can advance directly from a valid peer snapshot.
 func TestCatchUpCommitsCertifiedSnapshot(t *testing.T) {
-	committee, privateKeys := testCommittee()
+	committee, privateKeys := legacyCommittee()
 	state := testState()
-	engines := make([]*Engine, CommitteeSize)
+	engines := make([]*Engine, len(committee))
 	for index, key := range privateKeys {
-		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		engine, err := NewEngineWithParams(state, committee, committee[index].ID, key, legacyCommitteeParams())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -339,7 +360,7 @@ func TestCatchUpCommitsCertifiedSnapshot(t *testing.T) {
 	}
 	// Three engines commit height 1; the fourth misses it entirely.
 	snapshot := advanceSubset(t, privateKeys, engines, []int{0, 1, 2}, model.StateTransition{
-		Type: TransitionRegisterPeer, SetupKey: "key-a", Peer: model.PeerRecord{PeerID: "peer-a"},
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "clients-c"},
 	})
 	lagging := engines[3]
 	if lagging.Height() != 0 {
@@ -351,15 +372,15 @@ func TestCatchUpCommitsCertifiedSnapshot(t *testing.T) {
 	if lagging.Height() != 1 {
 		t.Fatalf("lagging engine height %d, want 1", lagging.Height())
 	}
-	if len(lagging.CurrentState().Peers) != 1 {
-		t.Fatalf("lagging engine did not adopt the peer: %+v", lagging.CurrentState().Peers)
+	if len(lagging.CurrentState().Groups) != 3 {
+		t.Fatalf("lagging engine did not adopt the group: %+v", lagging.CurrentState().Groups)
 	}
 	if err := lagging.CatchUp(snapshot); err == nil {
 		t.Fatal("stale catch-up accepted")
 	}
 	// Tampered snapshot must be rejected.
 	tampered := snapshot
-	tampered.State.Peers[0].OverlayIP = "1.2.3.4"
+	tampered.State.Groups[0].ID = "forged"
 	if err := lagging.CatchUp(tampered); err == nil {
 		t.Fatal("tampered snapshot accepted by CatchUp")
 	}
@@ -858,7 +879,7 @@ func TestApplyTransitionValidatesManagerHopsAgainstPeerIDs(t *testing.T) {
 // TestUpdateCommitteeValidation covers the size and churn limits on member
 // replacement.
 func TestUpdateCommitteeValidation(t *testing.T) {
-	committee, _ := testCommittee()
+	committee, _ := legacyCommittee()
 	for index := range committee {
 		committee[index].PeerID = "peer-" + committee[index].ID
 		committee[index].Address = "/ip4/10.0.0.1/udp/1/quic-v1"
@@ -866,6 +887,7 @@ func TestUpdateCommitteeValidation(t *testing.T) {
 	}
 	base := testState()
 	base.EngineCommittee = append([]model.CommitteeMember(nil), committee...)
+	base.CommitteeConfig = legacyCommitteeParams().CommitteeConfig(0, nil)
 
 	if err := ApplyTransition(&base, model.StateTransition{
 		Type: TransitionUpdateCommittee, Committee: committee,
@@ -918,7 +940,7 @@ func TestRotateCommitteeKeysBumpsEpoch(t *testing.T) {
 	state := testState()
 	state.EngineCommittee = append([]model.CommitteeMember(nil), committee...)
 	state.CommitteeConfig = model.CommitteeConfig{Threshold: QuorumSize, Size: CommitteeSize}
-	before, _, _, err := deriveCommitteeKeys(committee, state.NetworkID, 0)
+	before, _, _, err := deriveCommitteeKeys(committee, state.NetworkID, 0, model.DefaultCommitteeParams().QuorumSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -938,16 +960,16 @@ func TestRotateCommitteeKeysBumpsEpoch(t *testing.T) {
 // TestCommitteeReplacementKeepsQuorum replaces one member online and verifies
 // the committee keeps certifying with the new membership.
 func TestCommitteeReplacementKeepsQuorum(t *testing.T) {
-	committee, keys := testCommittee()
+	committee, keys := legacyCommittee()
 	for index := range committee {
 		committee[index].PeerID = "peer-" + committee[index].ID
 		committee[index].Address = "/ip4/10.0.0.1/udp/1/quic-v1"
 		committee[index].ForwardingEnabled = true
 	}
 	state := testState()
-	engines := make([]*Engine, CommitteeSize)
+	engines := make([]*Engine, len(committee))
 	for index, key := range keys {
-		engine, err := NewEngine(state, committee, committee[index].ID, key)
+		engine, err := NewEngineWithParams(state, committee, committee[index].ID, key, legacyCommitteeParams())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -969,15 +991,15 @@ func TestCommitteeReplacementKeepsQuorum(t *testing.T) {
 	if !members["D"] || members["E"] {
 		t.Fatalf("snapshot should carry the pre-transition committee: %v", members)
 	}
-	for index := 0; index < CommitteeSize-1; index++ {
+	for index := 0; index < len(committee)-1; index++ {
 		adopted := engines[index].CommitteeMembers()
-		if len(adopted) != CommitteeSize || adopted[CommitteeSize-1].ID != "E" {
+		if len(adopted) != len(committee) || adopted[len(committee)-1].ID != "E" {
 			t.Fatalf("engine %d did not adopt the new committee: %+v", index, adopted)
 		}
 	}
 
 	// Bring the replacement online and keep certifying.
-	engineE, err := NewEngine(snapshot.State, newCommittee, "E", SeededPrivateKey(99))
+	engineE, err := NewEngineWithParams(snapshot.State, newCommittee, "E", SeededPrivateKey(99), legacyCommitteeParams())
 	if err != nil {
 		t.Fatal(err)
 	}

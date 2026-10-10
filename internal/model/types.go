@@ -1,8 +1,17 @@
 package model
 
 import (
+	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
+
+	"golang.org/x/crypto/argon2"
 )
 
 type CommitteeMember struct {
@@ -25,6 +34,79 @@ type CommitteeConfig struct {
 	Size           uint32 `json:"size"`
 	GroupPublicKey []byte `json:"groupPublicKey,omitempty"`
 	CommitteeEpoch uint64 `json:"committeeEpoch"`
+}
+
+const (
+	DefaultCommitteeSize = 3
+	DefaultFaultLimit    = 0
+	DefaultQuorumSize    = DefaultCommitteeSize - DefaultFaultLimit
+)
+
+type CommitteeParams struct {
+	Size       int `json:"size"`
+	FaultLimit int `json:"faultLimit"`
+	QuorumSize int `json:"quorumSize"`
+}
+
+func DefaultCommitteeParams() CommitteeParams {
+	return CommitteeParams{
+		Size:       DefaultCommitteeSize,
+		FaultLimit: DefaultFaultLimit,
+		QuorumSize: DefaultQuorumSize,
+	}
+}
+
+func (params CommitteeParams) Validate() error {
+	if params.Size < 1 {
+		return fmt.Errorf("committee size must be at least 1")
+	}
+	if params.FaultLimit < 0 {
+		return fmt.Errorf("committee fault limit cannot be negative")
+	}
+	if params.QuorumSize < 1 {
+		return fmt.Errorf("committee quorum size must be at least 1")
+	}
+	if params.QuorumSize != params.Size-params.FaultLimit {
+		return fmt.Errorf("committee quorum size must equal size minus fault limit")
+	}
+	if params.Size < 3*params.FaultLimit+1 {
+		return fmt.Errorf("committee size must be at least 3f+1")
+	}
+	return nil
+}
+
+func (params CommitteeParams) CommitteeConfig(epoch uint64, groupPublicKey []byte) CommitteeConfig {
+	return CommitteeConfig{
+		Threshold:      uint32(params.QuorumSize),
+		Size:           uint32(params.Size),
+		GroupPublicKey: append([]byte(nil), groupPublicKey...),
+		CommitteeEpoch: epoch,
+	}
+}
+
+func CommitteeParamsFromConfig(config CommitteeConfig) (CommitteeParams, error) {
+	if config.Size == 0 && config.Threshold == 0 && config.CommitteeEpoch == 0 && len(config.GroupPublicKey) == 0 {
+		return DefaultCommitteeParams(), nil
+	}
+	if config.Size == 0 || config.Threshold == 0 {
+		return CommitteeParams{}, fmt.Errorf("committee size and threshold are required")
+	}
+	params := CommitteeParams{
+		Size:       int(config.Size),
+		FaultLimit: int(config.Size) - int(config.Threshold),
+		QuorumSize: int(config.Threshold),
+	}
+	if err := params.Validate(); err != nil {
+		return CommitteeParams{}, err
+	}
+	return params, nil
+}
+
+func (config CommitteeConfig) Equal(other CommitteeConfig) bool {
+	return config.Threshold == other.Threshold &&
+		config.Size == other.Size &&
+		config.CommitteeEpoch == other.CommitteeEpoch &&
+		bytes.Equal(config.GroupPublicKey, other.GroupPublicKey)
 }
 
 // BudgetUsage is a certified aggregate of client-reported traffic against one
@@ -179,14 +261,66 @@ func (assignment RouteAssignment) Paths() []PathSpec {
 
 // User is an authenticated human identity, mirrored from the IdP.
 type User struct {
-	ID         string   `json:"id"`
-	Email      string   `json:"email,omitempty"`
-	Name       string   `json:"name,omitempty"`
-	Role       string   `json:"role"`
-	AutoGroups []string `json:"autoGroups,omitempty"`
-	Blocked    bool     `json:"blocked,omitempty"`
-	Issued     string   `json:"issued,omitempty"`
-	LastLogin  string   `json:"lastLogin,omitempty"`
+	ID               string   `json:"id"`
+	Email            string   `json:"email,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	Role             string   `json:"role"`
+	AutoGroups       []string `json:"autoGroups,omitempty"`
+	Blocked          bool     `json:"blocked,omitempty"`
+	Issued           string   `json:"issued,omitempty"`
+	LastLogin        string   `json:"lastLogin,omitempty"`
+	PasswordVerifier []byte   `json:"passwordVerifier,omitempty"`
+}
+
+// HashPassword returns a PHC-style Argon2id verifier with a random salt.
+func HashPassword(password string) []byte {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		panic(fmt.Sprintf("netp2p: read password salt: %v", err))
+	}
+	digest := argon2.IDKey([]byte(password), salt, 1, 64*1024, 1, 32)
+	return []byte(fmt.Sprintf(
+		"$argon2id$v=19$m=65536,t=1,p=1$%s$%s",
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(digest),
+	))
+}
+
+// VerifyPassword checks an Argon2id verifier in constant time.
+func VerifyPassword(password string, verifier []byte) bool {
+	fields := strings.Split(string(verifier), "$")
+	if len(fields) != 6 || fields[0] != "" || fields[1] != "argon2id" || fields[2] != "v=19" {
+		return false
+	}
+	parts := strings.Split(fields[3], ",")
+	if len(parts) != 3 {
+		return false
+	}
+	memory, err := strconv.Atoi(strings.TrimPrefix(parts[0], "m="))
+	if err != nil {
+		return false
+	}
+	iterations, err := strconv.Atoi(strings.TrimPrefix(parts[1], "t="))
+	if err != nil {
+		return false
+	}
+	parallelism, err := strconv.Atoi(strings.TrimPrefix(parts[2], "p="))
+	if err != nil {
+		return false
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(fields[4])
+	if err != nil {
+		return false
+	}
+	expected, err := base64.RawStdEncoding.DecodeString(fields[5])
+	if err != nil {
+		return false
+	}
+	if memory <= 0 || iterations <= 0 || parallelism <= 0 || len(salt) < 8 || len(expected) == 0 {
+		return false
+	}
+	actual := argon2.IDKey([]byte(password), salt, uint32(iterations), uint32(memory), uint8(parallelism), uint32(len(expected)))
+	return subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
 type SetupKey struct {
@@ -229,10 +363,12 @@ func (key SetupKey) SetupKeyValid(now string) bool {
 	return true
 }
 
-// SetupKeyHash computes the stored hash for a plaintext token.
+// SetupKeyHash computes the stored Argon2id verifier for a plaintext token.
+// The salt is derived from the token so every verifier is unique while the
+// digest remains deterministic for committee-wide comparison.
 func SetupKeyHash(token string) []byte {
-	sum := sha256.Sum256([]byte(token))
-	return sum[:]
+	salt := sha256.Sum256([]byte("netp2p-setup-key:" + token))
+	return argon2.IDKey([]byte(token), salt[:], 1, 64*1024, 1, 32)
 }
 
 // Nameserver is a certified DNS resolver that applies to the groups listed in
@@ -318,6 +454,9 @@ type QuorumCertificate struct {
 	Round          uint64 `json:"round"`
 	StateHash      []byte `json:"stateHash"`
 	TransitionHash []byte `json:"transitionHash"`
+	// ClientViewHash is the committee-signed hash of the client-visible state
+	// and transition projection. It lets clients validate redacted snapshots.
+	ClientViewHash []byte `json:"clientViewHash,omitempty"`
 	// AggregateSignature is one BLS signature over the canonical vote message,
 	// produced by interpolating the collected share signatures at threshold.
 	AggregateSignature []byte `json:"aggregateSignature,omitempty"`
@@ -342,6 +481,76 @@ type SignedSnapshot struct {
 	CommitteeConfig CommitteeConfig `json:"committeeConfig"`
 	Transition      StateTransition `json:"transition"`
 	LeaderID        string          `json:"leaderId"`
+}
+
+// ClientSnapshot returns a copy safe for client-visible state. It removes
+// setup-key secrets and verifiers, committee key seeds, and the corresponding
+// secret-bearing transition fields.
+func ClientSnapshot(snapshot SignedSnapshot) SignedSnapshot {
+	snapshot.State = redactNetworkState(snapshot.State)
+	snapshot.Committee = redactCommittee(snapshot.Committee)
+	snapshot.Transition = redactTransition(snapshot.Transition)
+	return snapshot
+}
+
+func redactNetworkState(state NetworkState) NetworkState {
+	state.SetupKeys = redactSetupKeys(state.SetupKeys)
+	state.Users = redactUsers(state.Users)
+	state.EngineCommittee = redactCommittee(state.EngineCommittee)
+	return state
+}
+
+func redactUsers(users []User) []User {
+	if users == nil {
+		return nil
+	}
+	result := make([]User, len(users))
+	for index, user := range users {
+		result[index] = user
+		result[index].PasswordVerifier = nil
+	}
+	return result
+}
+
+func redactSetupKeys(keys []SetupKey) []SetupKey {
+	if keys == nil {
+		return nil
+	}
+	result := make([]SetupKey, len(keys))
+	for index, key := range keys {
+		result[index] = key
+		result[index].Token = ""
+		result[index].TokenPrefix = ""
+		result[index].TokenHash = nil
+	}
+	return result
+}
+
+func redactCommittee(members []CommitteeMember) []CommitteeMember {
+	if members == nil {
+		return nil
+	}
+	result := make([]CommitteeMember, len(members))
+	for index, member := range members {
+		result[index] = member
+		result[index].KeySeed = 0
+	}
+	return result
+}
+
+func redactTransition(transition StateTransition) StateTransition {
+	transition.SetupKey = ""
+	transition.Committee = redactCommittee(transition.Committee)
+	if transition.User != nil {
+		user := *transition.User
+		user.PasswordVerifier = nil
+		transition.User = &user
+	}
+	if transition.Record != nil {
+		record := redactSetupKeys([]SetupKey{*transition.Record})[0]
+		transition.Record = &record
+	}
+	return transition
 }
 
 type NetworkState struct {

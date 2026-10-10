@@ -14,11 +14,19 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/miekg/dns"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/tracing"
 	"go.opentelemetry.io/otel"
+)
+
+const (
+	ednsUDPSize        = 1232
+	maxDNSCacheEntries = 1024
 )
 
 // Config is the certified subset the resolver needs.
@@ -37,18 +45,41 @@ type Config struct {
 type Resolver struct {
 	mu       sync.RWMutex
 	config   Config
-	server   *dns.Server
-	client   *dns.Client
+	servers  []*dns.Server
+	udp      *dns.Client
+	tcp      *dns.Client
 	listen   string
 	bound    string
 	started  bool
 	localIPs map[string]struct{}
+	cache    map[dnsCacheKey]dnsCacheEntry
+	now      func() time.Time
+	metrics  *metrics.Metrics
+	failures atomic.Uint64
+}
+
+type dnsCacheKey struct {
+	question dns.Question
+	dnssec   bool
+}
+
+type dnsCacheEntry struct {
+	reply     *dns.Msg
+	expiresAt time.Time
 }
 
 func NewResolver(listen string) *Resolver {
+	return NewResolverWithMetrics(listen, nil)
+}
+
+func NewResolverWithMetrics(listen string, collector *metrics.Metrics) *Resolver {
 	return &Resolver{
-		listen: listen,
-		client: &dns.Client{Net: "udp", Timeout: dnsTimeout},
+		listen:  listen,
+		udp:     &dns.Client{Net: "udp", Timeout: dnsTimeout, UDPSize: ednsUDPSize},
+		tcp:     &dns.Client{Net: "tcp", Timeout: dnsTimeout},
+		cache:   make(map[dnsCacheKey]dnsCacheEntry),
+		now:     time.Now,
+		metrics: collector,
 	}
 }
 
@@ -56,6 +87,7 @@ func NewResolver(listen string) *Resolver {
 func (resolver *Resolver) Update(config Config) {
 	resolver.mu.Lock()
 	resolver.config = config
+	resolver.cache = make(map[dnsCacheKey]dnsCacheEntry)
 	resolver.mu.Unlock()
 }
 
@@ -88,16 +120,31 @@ func (resolver *Resolver) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("listen dns %s: %w", resolver.listen, err)
 	}
-	server := &dns.Server{PacketConn: packetConn, Handler: mux}
+	// UDP and TCP must use the same port so a truncated UDP reply can be
+	// retried by the stub resolver over TCP.
+	tcpListener, err := net.Listen("tcp", packetConn.LocalAddr().String())
+	if err != nil {
+		_ = packetConn.Close()
+		return fmt.Errorf("listen dns tcp %s: %w", packetConn.LocalAddr().String(), err)
+	}
+	udpServer := &dns.Server{PacketConn: packetConn, Handler: mux}
+	tcpServer := &dns.Server{Listener: tcpListener, Handler: mux}
 	resolver.mu.Lock()
-	resolver.server = server
+	resolver.servers = []*dns.Server{udpServer, tcpServer}
 	resolver.bound = packetConn.LocalAddr().String()
 	resolver.mu.Unlock()
 	go func() {
-		if serveErr := server.ActivateAndServe(); serveErr != nil {
+		if serveErr := udpServer.ActivateAndServe(); serveErr != nil {
 			// A closed listener during shutdown is not an error worth surfacing.
 			if !strings.Contains(serveErr.Error(), "closed") {
 				logf("dns server stopped: %v", serveErr)
+			}
+		}
+	}()
+	go func() {
+		if serveErr := tcpServer.ActivateAndServe(); serveErr != nil {
+			if !strings.Contains(serveErr.Error(), "closed") {
+				logf("dns tcp server stopped: %v", serveErr)
 			}
 		}
 	}()
@@ -106,12 +153,18 @@ func (resolver *Resolver) ListenAndServe() error {
 
 func (resolver *Resolver) Shutdown() error {
 	resolver.mu.Lock()
-	server := resolver.server
+	servers := append([]*dns.Server(nil), resolver.servers...)
 	resolver.mu.Unlock()
-	if server == nil {
+	if len(servers) == 0 {
 		return nil
 	}
-	return server.Shutdown()
+	var firstError error
+	for _, server := range servers {
+		if err := server.Shutdown(); err != nil && firstError == nil {
+			firstError = err
+		}
+	}
+	return firstError
 }
 
 func (resolver *Resolver) handle(writer dns.ResponseWriter, request *dns.Msg) {
@@ -122,6 +175,9 @@ func (resolver *Resolver) handle(writer dns.ResponseWriter, request *dns.Msg) {
 	response := new(dns.Msg)
 	response.SetReply(request)
 	response.Authoritative = true
+	if opt := request.IsEdns0(); opt != nil {
+		response.SetEdns0(ednsUDPSize, opt.Do())
+	}
 
 	config := resolver.snapshot()
 	if config.Disabled {
@@ -129,16 +185,24 @@ func (resolver *Resolver) handle(writer dns.ResponseWriter, request *dns.Msg) {
 		return
 	}
 
-	handled := false
+	overlayQuestion := false
+	handled := 0
 	for _, question := range request.Question {
 		if question.Qtype == dns.TypeA || question.Qtype == dns.TypeAAAA {
+			if isOverlayName(config, question.Name) {
+				overlayQuestion = true
+			}
 			if address, ok := resolver.lookupOverlay(config, question.Name); ok {
 				appendAddress(response, question, address)
-				handled = true
+				handled++
 			}
 		}
 	}
-	if handled {
+	if overlayQuestion {
+		if handled != len(request.Question) {
+			response.Rcode = dns.RcodeNameError
+			resolver.storeCached(request, response)
+		}
 		_ = writer.WriteMsg(response)
 		return
 	}
@@ -193,22 +257,164 @@ func (resolver *Resolver) lookupOverlay(config Config, name string) (string, boo
 // forwardOrFail relays the query to a certified nameserver, or to the original
 // upstream when none matches.
 func (resolver *Resolver) forwardOrFail(writer dns.ResponseWriter, request *dns.Msg, response *dns.Msg, config Config) {
+	if cached, ok := resolver.cachedReply(request); ok {
+		_ = writer.WriteMsg(cached)
+		return
+	}
 	upstreams := resolver.upstreamsFor(config, request)
 	for _, upstream := range upstreams {
-		reply, _, err := resolver.client.Exchange(request, upstream)
+		reply, err := resolver.exchange(request, upstream)
 		if err != nil {
 			logf("dns upstream %s failed: %v", upstream, err)
 			continue
 		}
 		reply.Id = request.Id
+		resolver.storeCached(request, reply)
 		_ = writer.WriteMsg(reply)
 		return
 	}
 	logf("dns query for %s had no usable upstream (tried %v)", questionName(request), upstreams)
+	resolver.recordFailure()
 	// SERVFAIL is the correct answer when nothing upstream could be reached, so
 	// the stub resolver retries rather than caching a negative result.
 	response.Rcode = dns.RcodeServerFailure
 	_ = writer.WriteMsg(response)
+}
+
+func (resolver *Resolver) recordFailure() {
+	resolver.failures.Add(1)
+	if resolver.metrics != nil {
+		resolver.metrics.DNSFailures.Inc()
+	}
+}
+
+func (resolver *Resolver) Failures() uint64 {
+	return resolver.failures.Load()
+}
+
+func (resolver *Resolver) exchange(request *dns.Msg, upstream string) (*dns.Msg, error) {
+	outgoing := request.Copy()
+	do := false
+	if opt := request.IsEdns0(); opt != nil {
+		do = opt.Do()
+	}
+	outgoing.SetEdns0(ednsUDPSize, do)
+
+	reply, _, udpErr := resolver.udp.Exchange(outgoing, upstream)
+	if udpErr == nil && !reply.Truncated {
+		return reply, nil
+	}
+	tcpReply, _, tcpErr := resolver.tcp.Exchange(outgoing, upstream)
+	if tcpErr == nil {
+		return tcpReply, nil
+	}
+	if udpErr == nil && reply.Truncated {
+		// Returning the truncated UDP reply lets a capable stub resolver retry
+		// this server over its TCP listener when the upstream TCP path also
+		// failed.
+		return reply, nil
+	}
+	return nil, tcpErr
+}
+
+func (resolver *Resolver) cachedReply(request *dns.Msg) (*dns.Msg, bool) {
+	key, ok := cacheKey(request)
+	if !ok {
+		return nil, false
+	}
+	now := resolver.now()
+	resolver.mu.RLock()
+	entry, exists := resolver.cache[key]
+	resolver.mu.RUnlock()
+	if !exists || !now.Before(entry.expiresAt) {
+		if exists {
+			resolver.mu.Lock()
+			delete(resolver.cache, key)
+			resolver.mu.Unlock()
+		}
+		return nil, false
+	}
+	reply := entry.reply.Copy()
+	reply.Id = request.Id
+	return reply, true
+}
+
+func (resolver *Resolver) storeCached(request *dns.Msg, reply *dns.Msg) {
+	key, ok := cacheKey(request)
+	if !ok || len(request.Question) != 1 {
+		return
+	}
+	if reply.Rcode != dns.RcodeSuccess && reply.Rcode != dns.RcodeNameError {
+		return
+	}
+	ttl := replyTTL(reply)
+	if ttl <= 0 {
+		return
+	}
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	if resolver.cache == nil {
+		resolver.cache = make(map[dnsCacheKey]dnsCacheEntry)
+	}
+	if _, exists := resolver.cache[key]; !exists && len(resolver.cache) >= maxDNSCacheEntries {
+		return
+	}
+	resolver.cache[key] = dnsCacheEntry{
+		reply:     reply.Copy(),
+		expiresAt: resolver.now().Add(ttl),
+	}
+}
+
+func cacheKey(request *dns.Msg) (dnsCacheKey, bool) {
+	if len(request.Question) != 1 {
+		return dnsCacheKey{}, false
+	}
+	return dnsCacheKey{
+		question: request.Question[0],
+		dnssec:   func() bool { opt := request.IsEdns0(); return opt != nil && opt.Do() }(),
+	}, true
+}
+
+func replyTTL(reply *dns.Msg) time.Duration {
+	minimum := uint32(0)
+	for _, section := range [][]dns.RR{reply.Answer, reply.Ns, reply.Extra} {
+		for _, record := range section {
+			if _, isOpt := record.(*dns.OPT); isOpt {
+				continue
+			}
+			if minimum == 0 || record.Header().Ttl < minimum {
+				minimum = record.Header().Ttl
+			}
+		}
+	}
+	if minimum == 0 && reply.Rcode == dns.RcodeNameError {
+		// Negative answers without SOA should not be cached indefinitely.
+		minimum = defaultTTL
+	}
+	return time.Duration(minimum) * time.Second
+}
+
+func isOverlayName(config Config, name string) bool {
+	trimmed := strings.TrimSuffix(strings.ToLower(name), ".")
+	if trimmed == "" {
+		return false
+	}
+	if config.Domain != "" {
+		domain := strings.TrimSuffix(strings.ToLower(config.Domain), ".")
+		if trimmed == domain || strings.HasSuffix(trimmed, "."+domain) {
+			return true
+		}
+	}
+	for _, zone := range config.Zones {
+		if !zone.Enabled || zone.Domain == "" {
+			continue
+		}
+		domain := strings.TrimSuffix(strings.ToLower(zone.Domain), ".")
+		if trimmed == domain || strings.HasSuffix(trimmed, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func questionName(request *dns.Msg) string {

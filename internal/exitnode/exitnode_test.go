@@ -1,3 +1,5 @@
+//go:build linux
+
 package exitnode
 
 import (
@@ -10,11 +12,11 @@ import (
 
 // tempForwardingFile returns a writable stand-in for the ip_forward sysctl so
 // the reconciler can be tested without root.
-func tempForwardingFile(t *testing.T) string {
-	t.Helper()
-	path := t.TempDir() + "/ip_forward"
+func tempForwardingFile(tb testing.TB) string {
+	tb.Helper()
+	path := tb.TempDir() + "/ip_forward"
 	if err := os.WriteFile(path, []byte("0"), 0o644); err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return path
 }

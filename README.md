@@ -6,7 +6,7 @@ NetBird Management API。
 
 ## 核心能力
 
-- **完全去中心化 manager**：4 节点 BFT committee（HotStuff-lite，`n=4, f=1`），
+- **完全去中心化 manager**：3 节点 BFT committee（HotStuff-lite，`n=3, f=0`），
   proposal → Ed25519 vote → `2f+1` QC → commit，client 验证 certified snapshot。
 - **libp2p 数据面**：身份、multiaddr、swarm、QUIC、NAT 穿透、relay 均由 libp2p 提供；
   加密由 libp2p secure channel 承担。
@@ -15,13 +15,14 @@ NetBird Management API。
 
 ## 当前状态
 
-可运行的最小闭环：4 manager 完成 genesis，client 用 setup key 注册并获得 overlay IP 与
+可运行的最小闭环：3 manager 完成 genesis，client 用 setup key 注册并获得 overlay IP 与
 certified snapshot，由 certified state 驱动的 policy 允许/拒绝 overlay ICMP 转发。数据面通过
 用户态 UDP packet endpoint 接入，**不依赖 TUN**。
 - Web 控制台：每个 manager 内嵌 Svelte 控制台；普通 HTTP 只提供页面和 libp2p/WebRTC
   bootstrap，管理 API 跑在 `/netp2p/web-api/1.0.0` 的 libp2p HTTP 上。
 
 - 架构：`docs/architecture.md`
+- 运维与部署：`docs/OPERATIONS.md`
 - NetBird 调研：`docs/netbird-research.md`
 - 路线图：`docs/roadmap.md`
 - 测试与运行：`docs/testing.md`
@@ -48,3 +49,34 @@ netp2pd --role manager --config deploy/state.json \
 
 `http://127.0.0.1:8080` 会返回控制台和 `/api/bootstrap`。浏览器随后用 js-libp2p
 WebRTC 直连 manager，再通过 `@libp2p/http` 调用管理 API。
+
+## Release artifacts
+
+Tag releases build the Linux packages, tarball, Windows MSI, CycloneDX SBOM,
+`ghcr.io/zhongwwwhhh/netp2p-manager:$VERSION`, and
+`ghcr.io/zhongwwwhhh/netp2p-caddy:$VERSION` with the Cloudflare DNS module. The
+release publishes `netp2p-$VERSION-image-digest.txt` and
+`netp2p-caddy-$VERSION-image-digest.txt`; copy each `sha256:...` value into the
+matching Ansible digest variable. Digests can also be checked with:
+
+```bash
+docker buildx imagetools inspect ghcr.io/zhongwwwhhh/netp2p-manager:$VERSION \
+  --format '{{.Manifest.Digest}}'
+docker buildx imagetools inspect ghcr.io/zhongwwwhhh/netp2p-caddy:$VERSION \
+  --format '{{.Manifest.Digest}}'
+```
+
+When GHCR is unavailable, use a reachable local registry and record the digest
+only after a real push:
+
+```bash
+REGISTRY=127.0.0.1:5000
+docker build -t "$REGISTRY/netp2p-manager:$VERSION" .
+docker push "$REGISTRY/netp2p-manager:$VERSION"
+docker buildx imagetools inspect "$REGISTRY/netp2p-manager:$VERSION" \
+  --format '{{.Manifest.Digest}}'
+```
+
+`docker save`/`docker load` can transfer images without a registry, but the
+resulting image ID must be recorded as an image ID, not as a registry manifest
+digest. Do not use it to construct an `image@sha256:...` pin.

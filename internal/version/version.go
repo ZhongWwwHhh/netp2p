@@ -9,7 +9,7 @@ var Version = "0.1.0"
 // ProtocolVersion is the wire revision stamped into every libp2p protocol id.
 // Managers and clients refuse to exchange control-plane messages across
 // mismatched revisions. It changes only with a breaking wire change.
-const ProtocolVersion = "2.0.0"
+const ProtocolVersion = "3.0.0"
 
 // Capabilities lists the optional protocol features this build understands.
 // It is exchanged during login so a peer can reject an incompatible partner

@@ -73,6 +73,8 @@ type Device struct {
 	pinned   map[string]struct{}
 
 	underlayHosts []string
+	defaultRoute  string
+	hostRoutes    map[string]string
 }
 
 // configurator returns the platform route configurator, defaulting to the
@@ -116,8 +118,18 @@ func (device *Device) Close() error {
 		return nil
 	}
 	device.closed = true
+	routes := copySet(device.routes)
+	networks := copySet(device.networks)
+	pinned := copySet(device.pinned)
+	defaultRoute := device.defaultRoute
+	hostRoutes := copyStringMap(device.hostRoutes)
 	device.mu.Unlock()
-	return device.file.Close()
+	cleanupErr := device.cleanupManagedRoutes(routes, networks, pinned, defaultRoute, hostRoutes)
+	closeErr := device.file.Close()
+	if cleanupErr != nil {
+		return cleanupErr
+	}
+	return closeErr
 }
 
 // Configure brings the interface up with the peer's overlay address.
@@ -239,6 +251,17 @@ func (device *Device) ReconcileNetworks(cidrs []string) error {
 	pinned := device.pinned
 	device.pinned = make(map[string]struct{})
 	hosts := append([]string(nil), device.underlayHosts...)
+	if device.hostRoutes == nil {
+		device.hostRoutes = make(map[string]string)
+	}
+	hostRoutes := device.hostRoutes
+	defaultRoute := device.defaultRoute
+	if capturesDefault {
+		if state, ok := device.configurator().(routeStateConfigurator); ok && defaultRoute == "" {
+			defaultRoute = state.DefaultRoute()
+			device.defaultRoute = defaultRoute
+		}
+	}
 	device.mu.Unlock()
 
 	var firstError error
@@ -249,7 +272,7 @@ func (device *Device) ReconcileNetworks(cidrs []string) error {
 	}
 
 	if capturesDefault {
-		device.pinUnderlayLocked(hosts, pinned, record)
+		device.pinUnderlay(hosts, pinned, hostRoutes, record)
 	}
 
 	added := make([]string, 0, len(desired))
@@ -297,14 +320,24 @@ func (device *Device) ReconcileNetworks(cidrs []string) error {
 			for host := range pinned {
 				record(device.configurator().DelHostRoute(host))
 			}
+			record(device.restoreCapturedRoutes(defaultRoute, hostRoutes))
+			device.mu.Lock()
+			device.defaultRoute = ""
+			device.hostRoutes = make(map[string]string)
+			device.mu.Unlock()
 		}
 	}
 	return firstError
 }
 
-// pinUnderlayLocked re-installs host routes to the physical default gateway so
-// the manager control stream survives a 0.0.0.0/0 overlay route.
-func (device *Device) pinUnderlayLocked(hosts []string, previous map[string]struct{}, record func(error)) {
+// pinUnderlay installs host routes in the managed table so the manager control
+// stream survives a 0.0.0.0/0 overlay route.
+func (device *Device) pinUnderlay(hosts []string, previous map[string]struct{}, hostRoutes map[string]string, record func(error)) {
+	for host := range previous {
+		if !containsString(hosts, host) {
+			record(device.configurator().DelHostRoute(host))
+		}
+	}
 	if len(hosts) == 0 {
 		return
 	}
@@ -312,10 +345,16 @@ func (device *Device) pinUnderlayLocked(hosts []string, previous map[string]stru
 	if gateway == "" {
 		return
 	}
+	state, hasState := device.configurator().(routeStateConfigurator)
 	for _, host := range hosts {
 		host = strings.TrimSpace(host)
 		if host == "" {
 			continue
+		}
+		if hasState {
+			if _, saved := hostRoutes[host]; !saved {
+				hostRoutes[host] = state.HostRoute(host)
+			}
 		}
 		if err := device.configurator().AddHostRoute(device.name, host, gateway); err != nil {
 			record(err)
@@ -325,6 +364,71 @@ func (device *Device) pinUnderlayLocked(hosts []string, previous map[string]stru
 		device.pinned[host] = struct{}{}
 		device.mu.Unlock()
 	}
+}
+
+func (device *Device) cleanupManagedRoutes(routes, networks, pinned map[string]struct{}, defaultRoute string, hostRoutes map[string]string) error {
+	var firstError error
+	record := func(err error) {
+		if err != nil && firstError == nil {
+			firstError = err
+		}
+	}
+	for host := range pinned {
+		record(device.configurator().DelHostRoute(host))
+	}
+	for cidr := range networks {
+		record(device.configurator().DelRoute(device.name, cidr))
+	}
+	for address := range routes {
+		record(device.configurator().DelRoute(device.name, address+"/32"))
+	}
+	record(device.restoreCapturedRoutes(defaultRoute, hostRoutes))
+	return firstError
+}
+
+func (device *Device) restoreCapturedRoutes(defaultRoute string, hostRoutes map[string]string) error {
+	state, ok := device.configurator().(routeStateConfigurator)
+	if !ok || defaultRoute == "" && len(hostRoutes) == 0 {
+		return nil
+	}
+	var firstError error
+	record := func(err error) {
+		if err != nil && firstError == nil {
+			firstError = err
+		}
+	}
+	if defaultRoute != "" {
+		record(state.RestoreDefaultRoute(defaultRoute))
+	}
+	for host, route := range hostRoutes {
+		record(state.RestoreHostRoute(host, route))
+	}
+	return firstError
+}
+
+func copySet(values map[string]struct{}) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for value := range values {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func copyStringMap(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // defaultGateway reads "ip route show default" and returns the first gateway.
@@ -370,6 +474,6 @@ func Open(name string, run Runner) (*Device, error) {
 	return &Device{
 		file: file, name: actualName, run: run, output: RunCommandOutput,
 		routes: make(map[string]struct{}), networks: make(map[string]struct{}),
-		pinned: make(map[string]struct{}),
+		pinned: make(map[string]struct{}), hostRoutes: make(map[string]string),
 	}, nil
 }

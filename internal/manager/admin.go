@@ -64,6 +64,10 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 			respondAdmin(stream, AdminResponse{Error: err.Error()})
 			return
 		}
+		if err := bft.ValidateSnapshot(snapshot); err != nil {
+			respondAdmin(stream, AdminResponse{Error: err.Error()})
+			return
+		}
 		respondAdmin(stream, AdminResponse{Snapshot: &snapshot})
 	})
 }
@@ -78,7 +82,10 @@ func adminQuery(mesh *CommitteeMesh, query string) ([]byte, error) {
 		if !ok {
 			return nil, &AdminError{Message: "no certified snapshot"}
 		}
-		return json.Marshal(snapshot)
+		if err := bft.ValidateSnapshot(snapshot); err != nil {
+			return nil, err
+		}
+		return json.Marshal(model.ClientSnapshot(snapshot))
 	default:
 		return nil, &AdminError{Message: "unknown query " + query}
 	}
@@ -142,9 +149,6 @@ func SubmitAdmin(ctx context.Context, node *p2p.Node, managerID peer.ID, adminTo
 	if snapshot == nil {
 		return model.SignedSnapshot{}, &AdminError{Message: "no snapshot in response"}
 	}
-	if err := bft.ValidateSnapshot(*snapshot); err != nil {
-		return model.SignedSnapshot{}, err
-	}
 	return *snapshot, nil
 }
 
@@ -155,6 +159,10 @@ type AdminError struct {
 func (err *AdminError) Error() string { return err.Message }
 
 func respondAdmin(stream network.Stream, response AdminResponse) {
+	if response.Snapshot != nil {
+		redacted := model.ClientSnapshot(*response.Snapshot)
+		response.Snapshot = &redacted
+	}
 	if err := p2p.WriteMessage(stream, p2p.AdminProtocol, wire.AdminResponseToProto(response.Snapshot, response.Error)); err != nil {
 		stream.Reset()
 	}

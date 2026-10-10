@@ -2,7 +2,7 @@
   import { relativeTime } from '../format';
   import { navigate, routeTitle, router } from '../router.svelte';
   import { network, refresh, refreshAlerts, refreshPresence } from '../stores/network.svelte';
-  import { session, disconnect } from '../stores/session.svelte';
+  import { session, logout } from '../stores/session.svelte';
 
   let refreshing = $state(false);
 
@@ -43,7 +43,7 @@
         <p class="text-xs font-medium text-slate-700">Admin</p>
         <p class="text-xs text-slate-500">{session.bootstrap?.peerId.slice(0, 10) ?? ''}…</p>
       </div>
-      <button class="btn-ghost" onclick={() => void disconnect()}>Sign out</button>
+      <button class="btn-ghost" onclick={() => void logout()}>Sign out</button>
     </div>
   </div>
 </header>

@@ -6,15 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/client"
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/dns"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/oidc"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
@@ -23,36 +27,52 @@ import (
 )
 
 type clientOptions struct {
-	dataDir      string
-	listenAddr   string
-	managerAddr  string
-	networkID    string
-	setupKey     string
-	packetListen string
-	statusFile   string
-	hostname     string
-	tunName      string
-	tunMTU       int
-	noTun        bool
-	dnsListen    string
-	dnsManage    bool
-	noDNS        bool
-	sso          bool
-	ssoIssuer    string
-	ssoClientID  string
-	seedPath     string
-	posture      []string
+	dataDir          string
+	listenAddr       string
+	managerAddr      string
+	networkID        string
+	setupKey         string
+	packetListen     string
+	statusFile       string
+	hostname         string
+	tunName          string
+	tunMTU           int
+	noTun            bool
+	dnsListen        string
+	dnsManage        bool
+	noDNS            bool
+	sso              bool
+	ssoIssuer        string
+	ssoClientID      string
+	seedPath         string
+	trustPath        string
+	managerEndpoints []string
+	posture          []string
+	metricsListen    string
 }
 
 func runClient(ctx context.Context, options clientOptions) error {
 	dataDir := options.dataDir
+	collector, _, err := startClientMetrics(ctx, options)
+	if err != nil {
+		return err
+	}
 	p2pConfig := p2p.Config{DataDir: filepath.Join(dataDir, "client"), Listen: []string{options.listenAddr}}
+	var seed *config.Seed
 	if options.seedPath != "" {
-		seed, err := config.Load(options.seedPath)
+		loaded, err := config.Load(options.seedPath)
 		if err != nil {
 			return fmt.Errorf("load seed for bootstrap managers: %w", err)
 		}
-		bootstrapManagers, err := seed.BootstrapAddrInfos()
+		bootstrapManagers, err := loaded.BootstrapAddrInfos()
+		if err != nil {
+			return err
+		}
+		p2pConfig.StaticRelays = bootstrapManagers
+		seed = &loaded
+	}
+	if len(options.managerEndpoints) > 0 {
+		bootstrapManagers, err := managerAddrInfos(options.managerEndpoints)
 		if err != nil {
 			return err
 		}
@@ -72,11 +92,17 @@ func runClient(ctx context.Context, options clientOptions) error {
 		return err
 	}
 	defer sink.Close()
-	resolver, restoreDNS := startDNS(options, upstreams, tunDevice != nil)
+	resolver, restoreDNS := startDNS(options, upstreams, tunDevice != nil, collector)
 	if restoreDNS != nil {
 		defer restoreDNS()
 	}
 	optionsList := []client.Option{client.WithStateDir(filepath.Join(dataDir, "client"))}
+	if seed != nil {
+		optionsList = append(optionsList, client.WithManagerFailover(seedManagerEndpoints(*seed)...))
+	}
+	if len(options.managerEndpoints) > 0 {
+		optionsList = append(optionsList, client.WithManagerFailover(options.managerEndpoints...))
+	}
 	if options.hostname != "" {
 		optionsList = append(optionsList, client.WithHostname(options.hostname))
 	}
@@ -92,6 +118,7 @@ func runClient(ctx context.Context, options clientOptions) error {
 		netClient.SetDNSResolver(resolver)
 		netClient.SetDNSUpstreams(upstreams)
 	}
+	go runClientMetrics(ctx, netClient, collector)
 	if err := login(ctx, netClient, options); err != nil {
 		return err
 	}
@@ -156,7 +183,60 @@ func clientStatus(node *p2p.Node, netClient *client.Client, options clientOption
 		"peerID": node.Host.ID().String(), "overlayIP": netClient.Self().OverlayIP,
 		"height": netClient.SnapshotHeight(), "packetListen": options.packetListen,
 		"mode": clientMode(tunDevice), "assignments": paths,
+		"state": string(netClient.State()), "manager": netClient.ManagerStatus().ActiveManager.String(),
 	})
+}
+
+func seedManagerEndpoints(seed config.Seed) []string {
+	addresses := make([]string, 0, len(seed.Managers))
+	seen := make(map[string]struct{}, len(seed.Managers))
+	for _, manager := range seed.Managers {
+		if manager.Address == "" || manager.PeerID == "" {
+			continue
+		}
+		address := manager.Address + "/p2p/" + manager.PeerID
+		if _, duplicate := seen[address]; duplicate {
+			continue
+		}
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+	return addresses
+}
+
+func trustManagerEndpoints(trust config.ClientTrust) []string {
+	addresses := make([]string, 0, len(trust.Managers))
+	seen := make(map[string]struct{}, len(trust.Managers))
+	for _, manager := range trust.Managers {
+		if manager.Address == "" || manager.PeerID == "" {
+			continue
+		}
+		address := manager.Address + "/p2p/" + manager.PeerID
+		if _, duplicate := seen[address]; duplicate {
+			continue
+		}
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+	return addresses
+}
+
+func managerAddrInfos(addresses []string) ([]peer.AddrInfo, error) {
+	result := make([]peer.AddrInfo, 0, len(addresses))
+	seen := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		info, err := peer.AddrInfoFromString(address)
+		if err != nil {
+			return nil, fmt.Errorf("invalid manager address %q: %w", address, err)
+		}
+		key := info.ID.String()
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, *info)
+	}
+	return result, nil
 }
 
 func runStatusWriter(ctx context.Context, node *p2p.Node, netClient *client.Client, options clientOptions, tunDevice *tun.Device) {
@@ -178,11 +258,11 @@ func runStatusWriter(ctx context.Context, node *p2p.Node, netClient *client.Clie
 
 // startDNS brings up the local resolver and optionally points the host at it.
 // Failures are warnings: the overlay keeps working without DNS takeover.
-func startDNS(options clientOptions, upstreams []string, kernelRouting bool) (*dns.Resolver, func()) {
+func startDNS(options clientOptions, upstreams []string, kernelRouting bool, collector *metrics.Metrics) (*dns.Resolver, func()) {
 	if options.noDNS {
 		return nil, nil
 	}
-	resolver := dns.NewResolver(options.dnsListen)
+	resolver := dns.NewResolverWithMetrics(options.dnsListen, collector)
 	if err := resolver.ListenAndServe(); err != nil {
 		log.Printf("dns resolver disabled: %v", err)
 		return nil, nil
@@ -215,6 +295,71 @@ func startDNS(options clientOptions, upstreams []string, kernelRouting bool) (*d
 	}
 }
 
+// clientMetricsListen constrains the client metrics endpoint to the IPv4
+// loopback interface. The zero value selects an ephemeral loopback port.
+func clientMetricsListen(address string) (string, error) {
+	if address == "" {
+		return "127.0.0.1:0", nil
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("parse client metrics listen address: %w", err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.Equal(net.IPv4(127, 0, 0, 1)) {
+		return "", fmt.Errorf("client metrics listen address %q must bind 127.0.0.1", address)
+	}
+	return address, nil
+}
+
+// startClientMetrics exposes the client's local registry. A separate listener
+// avoids exposing diagnostics through the authenticated manager API and avoids
+// triggering host firewall prompts on Windows.
+func startClientMetrics(ctx context.Context, options clientOptions) (*metrics.Metrics, string, error) {
+	address, err := clientMetricsListen(options.metricsListen)
+	if err != nil {
+		return nil, "", err
+	}
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, "", fmt.Errorf("listen for client metrics on %s: %w", address, err)
+	}
+	collector := metrics.New()
+	server := &http.Server{Handler: collector.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownContext)
+	}()
+	go func() {
+		if serveErr := server.Serve(listener); serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Printf("client metrics server stopped: %v", serveErr)
+		}
+	}()
+	boundAddress := listener.Addr().String()
+	log.Printf("client metrics available on http://%s/metrics", boundAddress)
+	return collector, boundAddress, nil
+}
+
+func runClientMetrics(ctx context.Context, netClient *client.Client, collector *metrics.Metrics) {
+	updateClientMetrics(netClient.DataPlaneStats(), collector)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			updateClientMetrics(netClient.DataPlaneStats(), collector)
+		}
+	}
+}
+
+func updateClientMetrics(stats client.DataPlaneStats, collector *metrics.Metrics) {
+	collector.ForwardQueueDepth.Set(float64(stats.OutboundQueueDepth))
+}
+
 func clientMode(tunDevice *tun.Device) string {
 	if tunDevice != nil {
 		return "tun"
@@ -237,6 +382,9 @@ func underlayHosts(options clientOptions) []string {
 				hosts = append(hosts, hostFromMultiaddr(manager.Address)...)
 			}
 		}
+	}
+	for _, endpoint := range options.managerEndpoints {
+		hosts = append(hosts, hostFromMultiaddr(endpoint)...)
 	}
 	return dedupeStrings(hosts)
 }

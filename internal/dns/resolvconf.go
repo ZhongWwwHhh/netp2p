@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -48,7 +49,7 @@ func Takeover(path, listen string, upstreams []string) (*ResolvConf, error) {
 		return nil, err
 	}
 	if hadFile {
-		if err := os.WriteFile(backup, original, 0o644); err != nil {
+		if err := writeFileAtomic(backup, original, 0o644); err != nil {
 			return nil, fmt.Errorf("write %s: %w", backup, err)
 		}
 	}
@@ -60,7 +61,7 @@ func Takeover(path, listen string, upstreams []string) (*ResolvConf, error) {
 		builder.WriteString("# upstream " + upstream + "\n")
 	}
 
-	if err := os.WriteFile(path, []byte(builder.String()), 0o644); err != nil {
+	if err := writeFileAtomic(path, []byte(builder.String()), 0o644); err != nil {
 		return nil, fmt.Errorf("write %s: %w", path, err)
 	}
 	return &ResolvConf{path: path, backup: backup, original: original, hadFile: hadFile}, nil
@@ -101,7 +102,7 @@ func (resolv *ResolvConf) Restore() error {
 		}
 		return nil
 	}
-	if err := os.WriteFile(resolv.path, resolv.original, 0o644); err != nil {
+	if err := writeFileAtomic(resolv.path, resolv.original, 0o644); err != nil {
 		return fmt.Errorf("restore %s: %w", resolv.path, err)
 	}
 	_ = os.Remove(resolv.backup)
@@ -156,4 +157,32 @@ func splitListen(listen string) (string, string, error) {
 		host = "127.0.0.1"
 	}
 	return host, port, nil
+}
+
+// writeFileAtomic makes both takeover and recovery crash-safe: a partial write
+// lands in a temporary file and the visible path changes only by rename.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".netp2p-*")
+	if err != nil {
+		return err
+	}
+	tempName := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(tempName)
+	}()
+	if err := temp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := temp.Write(data); err != nil {
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempName, path)
 }

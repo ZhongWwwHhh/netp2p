@@ -5,8 +5,31 @@ import (
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+func metricValue(t *testing.T, collector prometheus.Collector) float64 {
+	t.Helper()
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metric: %v", err)
+	}
+	if len(families) == 0 || len(families[0].Metric) == 0 {
+		t.Fatal("metric produced no samples")
+	}
+	if counter := families[0].Metric[0].GetCounter(); counter != nil {
+		return counter.GetValue()
+	}
+	if gauge := families[0].Metric[0].GetGauge(); gauge != nil {
+		return gauge.GetValue()
+	}
+	t.Fatalf("unsupported metric type %v", families[0].GetType())
+	return 0
+}
 
 // Distinct, valid libp2p PeerIDs keep source, destination and the two manager
 // hops distinguishable; identical test identities would hide spoofing bugs.
@@ -140,5 +163,100 @@ func TestAcceptRejectsWrongPredecessor(t *testing.T) {
 	}
 	if _, err := table.Accept(predecessor, envelope); err != nil {
 		t.Fatalf("frame from certified predecessor rejected: %v", err)
+	}
+}
+
+func TestForwardMetricsRecordQueueDepth(t *testing.T) {
+	collector := metrics.New()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	table := NewTableWithMetrics(testState(), sourceID, func(peer.ID, Envelope) error {
+		close(entered)
+		<-release
+		return nil
+	}, collector)
+
+	source, err := peer.Decode(sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := peer.Decode(destinationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- table.Send(source, destination, "assignment-1", "path-via", []byte("payload"))
+	}()
+	<-entered
+	if table.QueueDepth() != 1 {
+		t.Fatalf("queue depth = %d, want 1", table.QueueDepth())
+	}
+	if got := metricValue(t, collector.ForwardQueueDepth); got != 1 {
+		t.Fatalf("forward queue depth metric = %v, want 1", got)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if table.QueueDepth() != 0 {
+		t.Fatalf("queue depth after send = %d, want 0", table.QueueDepth())
+	}
+	if got := metricValue(t, collector.ForwardQueueDepth); got != 0 {
+		t.Fatalf("forward queue depth metric after send = %v, want 0", got)
+	}
+}
+
+func TestForwardMetricsRecordDrops(t *testing.T) {
+	collector := metrics.New()
+	table := NewTableWithMetrics(testState(), firstHopID, func(peer.ID, Envelope) error {
+		return errors.New("send failed")
+	}, collector)
+	source, err := peer.Decode(sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := Envelope{Header: Header{
+		SourcePeerID: sourceID, DestinationPeerID: destinationID,
+		AssignmentID: "assignment-1", PathID: "path-via", TTL: 1,
+	}}
+	if _, err := table.Accept(source, envelope); err == nil {
+		t.Fatal("expected send failure")
+	}
+	if table.Dropped() != 1 {
+		t.Fatalf("dropped = %d, want 1", table.Dropped())
+	}
+	if got := metricValue(t, collector.ForwardDrops); got != 1 {
+		t.Fatalf("forward drop metric = %v, want 1", got)
+	}
+}
+
+func TestForwardMetricsRecordQuotaBlocked(t *testing.T) {
+	collector := metrics.New()
+	state := testState()
+	state.Settings.QuotaEnforcementEnabled = true
+	state.Budgets = []model.TrafficBudget{{
+		ID: "budget", SubjectType: "peer", SubjectID: sourceID,
+		DailyBytes: 1, UsedDailyBytes: 1, OnExhausted: "block",
+	}}
+	table := NewTableWithMetrics(state, firstHopID, func(peer.ID, Envelope) error {
+		return nil
+	}, collector)
+	source, err := peer.Decode(sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := Envelope{Header: Header{
+		SourcePeerID: sourceID, DestinationPeerID: destinationID,
+		AssignmentID: "assignment-1", PathID: "path-via", TTL: 1,
+	}, Payload: []byte("payload")}
+	if _, err := table.Accept(source, envelope); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("quota error = %v, want ErrQuotaExceeded", err)
+	}
+	if table.QuotaBlocked() != 1 {
+		t.Fatalf("quota blocked = %d, want 1", table.QuotaBlocked())
+	}
+	if got := metricValue(t, collector.QuotaBlocked); got != 1 {
+		t.Fatalf("quota blocked metric = %v, want 1", got)
 	}
 }

@@ -1,7 +1,10 @@
 package p2p
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"io"
 	"testing"
 	"time"
 
@@ -9,6 +12,39 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/wire/pb"
 )
+
+type envelopeStream struct {
+	network.Stream
+	reader io.Reader
+}
+
+func (stream envelopeStream) Read(buffer []byte) (int, error) {
+	return stream.reader.Read(buffer)
+}
+
+func TestEnvelopeRejectsOversizedPayload(t *testing.T) {
+	var buffer bytes.Buffer
+	if err := EncodeEnvelope(&buffer, FrameProtocol, make([]byte, MaxEnvelopePayloadLength+1)); err == nil {
+		t.Fatal("encoding an oversized payload should fail")
+	}
+
+	frame := bytes.Buffer{}
+	var header [4]byte
+	binary.BigEndian.PutUint32(header[:], 1)
+	if _, err := frame.Write(header[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := frame.WriteString("x"); err != nil {
+		t.Fatal(err)
+	}
+	binary.BigEndian.PutUint32(header[:], MaxEnvelopePayloadLength+1)
+	if _, err := frame.Write(header[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeEnvelope(envelopeStream{reader: bytes.NewReader(frame.Bytes())}); err == nil {
+		t.Fatal("decoding an oversized payload should fail")
+	}
+}
 
 func TestTwoNodesOpenSecureStream(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

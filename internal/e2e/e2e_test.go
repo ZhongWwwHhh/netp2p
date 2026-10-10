@@ -1,9 +1,10 @@
 // Package e2e exercises the full control and data plane in a single process:
-// a four-manager BFT committee plus userspace clients exchanging overlay ICMP.
+// a three-manager BFT committee plus userspace clients exchanging overlay ICMP.
 package e2e
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/bft"
+	"github.com/netp2p/netp2p/internal/chaos"
 	"github.com/netp2p/netp2p/internal/client"
 	"github.com/netp2p/netp2p/internal/link"
 	"github.com/netp2p/netp2p/internal/manager"
@@ -30,7 +32,12 @@ func testState() model.NetworkState {
 		NetworkID:    networkID,
 		OverlayCIDR:  "100.64.0.0/24",
 		NextIPOffset: 1,
-		Groups:       []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
+		Settings: model.NetworkSettings{
+			DirectPathEnabled: true,
+			ViaManagerEnabled: true,
+			MaxManagerHops:    2,
+		},
+		Groups: []model.Group{{ID: "clients-a"}, {ID: "clients-b"}},
 		SetupKeys: []model.SetupKey{
 			{ID: keyA, Token: keyA, TokenHash: model.SetupKeyHash(keyA), Groups: []string{"clients-a"}},
 			{ID: keyB, Token: keyB, TokenHash: model.SetupKeyHash(keyB), Groups: []string{"clients-b"}},
@@ -101,7 +108,7 @@ func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager
 	return newClusterWithHook(t, state, config, nil)
 }
 
-// newClusterWithHook builds the standard four-manager committee but installs a
+// newClusterWithHook builds the standard three-manager committee but installs a
 // send hook on every node, which is how chaos tests inject faults.
 func newClusterWithHook(t *testing.T, state model.NetworkState, config manager.Config, hookFor func(peer.ID) p2p.SendHook) *cluster {
 	t.Helper()
@@ -129,7 +136,11 @@ func newClusterWithHook(t *testing.T, state model.NetworkState, config manager.C
 		}
 	}
 	for index := range group.members {
-		node, err := p2p.New(ctx, p2p.Config{IdentitySeed: group.members[index].KeySeed, WebRTCListen: []string{"/ip4/127.0.0.1/udp/0/webrtc-direct"}})
+		node, err := p2p.New(ctx, p2p.Config{
+			IdentitySeed: group.members[index].KeySeed,
+			Listen:       []string{"/ip4/127.0.0.1/udp/0/quic-v1"},
+			WebRTCListen: []string{"/ip4/127.0.0.1/udp/0/webrtc-direct"},
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -214,7 +225,10 @@ func (group *cluster) stop() {
 func newTestClient(t *testing.T, seed int64, managerAddr, setupKey string) (*client.Client, *packet.UDPPacketSink) {
 	t.Helper()
 	ctx := t.Context()
-	node, err := p2p.New(ctx, p2p.Config{IdentitySeed: seed})
+	node, err := p2p.New(ctx, p2p.Config{
+		IdentitySeed: seed,
+		Listen:       []string{"/ip4/127.0.0.1/udp/0/quic-v1"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +375,7 @@ func TestViaManagerForwardsOverlayProbe(t *testing.T) {
 		if netClient.SnapshotHeight() < height {
 			t.Fatalf("client did not sync certified assignment height %d", height)
 		}
-		if err := bft.ValidateSnapshot(netClient.Snapshot()); err != nil {
+		if err := bft.ValidateClientSnapshot(netClient.Snapshot()); err != nil {
 			t.Fatalf("client snapshot failed validation: %v", err)
 		}
 		certified := make(map[string]model.RouteAssignment)
@@ -497,25 +511,29 @@ func waitForCertifiedAssignments(t *testing.T, group *cluster, sourceID, destina
 	t.Fatalf("planner never certified via-manager assignments for %s/%s", sourceID, destinationID)
 }
 
-func TestQuorumCertifiesAfterManagerFailure(t *testing.T) {
-	group := newCluster(t, testState())
-	address := group.members[0].Address
+func TestManagerFailureBlocksWrites(t *testing.T) {
+	controller := chaos.New()
+	group := newClusterWithHook(t, testState(), manager.Config{}, controller.HookFor)
+	waitForCommitteeHeight(t, group, 1)
 
-	clientA, _ := newTestClient(t, 211, address, keyA)
-	clientB, _ := newTestClient(t, 212, address, keyB)
-	waitForPeers(t, clientA, 2)
-	waitForPeers(t, clientB, 2)
+	// A 3-of-3 committee has no fault budget: stopping any manager must block
+	// the next certified write rather than allowing a split-brain commit.
+	controller.Isolate(group.members[len(group.members)-1].PeerID)
 
-	// Height 4 is led by manager-1; stopping manager-4 leaves a live leader and
-	// exactly three voters, which is still a quorum.
-	_ = group.nodes[3].Close()
-
-	clientC, _ := newTestClient(t, 213, address, keyA)
-	if clientC.Self().OverlayIP == "" {
-		t.Fatal("registration with one manager down did not return an overlay address")
+	transition := model.StateTransition{Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "blocked-group"}}
+	start := time.Now()
+	_, err := group.meshes[0].Submit(transition)
+	if err == nil {
+		t.Fatal("write unexpectedly certified with one manager unavailable")
 	}
-	if clientC.SnapshotHeight() < 4 {
-		t.Fatalf("certified height %d, want >= 4", clientC.SnapshotHeight())
+	if !errors.Is(err, manager.ErrCommitteeUnavailable) {
+		t.Fatalf("write error = %v, want committee unavailable", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("degraded write took %s, want an immediate rejection", elapsed)
+	}
+	if got := group.engines[0].Height(); got != 1 {
+		t.Fatalf("height advanced to %d while a manager was unavailable", got)
 	}
 }
 
@@ -526,7 +544,7 @@ func TestSnapshotVerificationRejectsTampering(t *testing.T) {
 	waitForPeers(t, netClient, 1)
 
 	snapshot := netClient.Snapshot()
-	if err := bft.ValidateSnapshot(snapshot); err != nil {
+	if err := bft.ValidateClientSnapshot(snapshot); err != nil {
 		t.Fatalf("valid snapshot rejected: %v", err)
 	}
 

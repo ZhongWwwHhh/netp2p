@@ -12,6 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/netp2p/netp2p/internal/forward"
 )
 
 const (
@@ -32,6 +33,11 @@ type PacketHandler func(remote peer.ID, payload []byte)
 // forwarding codec lives with the forwarding table so client and manager cannot
 // drift apart.
 type EnvelopeHandler func(remote peer.ID, wire []byte)
+
+type outboundFrame struct {
+	protocol string
+	payload  []byte
+}
 
 // Transport multiplexes framed overlay packets over persistent libp2p streams,
 // one outbound stream per remote peer.
@@ -75,6 +81,20 @@ func NewWithEnvelope(ctx context.Context, node host.Host, protocolID protocol.ID
 // never blocks: when the queue is full the frame is dropped and ErrQueueFull is
 // returned so the data path cannot stall behind one slow peer.
 func (transport *Transport) Send(remote peer.ID, payload []byte) error {
+	return transport.sendFrame(remote, frameProtocolFor(payload), payload)
+}
+
+// SendPacket sends an explicit raw-packet frame.
+func (transport *Transport) SendPacket(remote peer.ID, payload []byte) error {
+	return transport.sendFrame(remote, ProtocolPacket, payload)
+}
+
+// SendEnvelope sends an explicit forwarded-envelope frame.
+func (transport *Transport) SendEnvelope(remote peer.ID, payload []byte) error {
+	return transport.sendFrame(remote, ProtocolEnvelope, payload)
+}
+
+func (transport *Transport) sendFrame(remote peer.ID, protocolID string, payload []byte) error {
 	transport.mu.Lock()
 	if transport.closed {
 		transport.mu.Unlock()
@@ -87,7 +107,7 @@ func (transport *Transport) Send(remote peer.ID, payload []byte) error {
 		go conn.run()
 	}
 	transport.mu.Unlock()
-	return conn.send(payload)
+	return conn.send(protocolID, payload)
 }
 
 // Stats reports sent and dropped frame counts for one peer. It exists for tests
@@ -106,7 +126,7 @@ func (transport *Transport) handleStream(stream network.Stream) {
 	defer stream.Close()
 	remote := stream.Conn().RemotePeer()
 	for {
-		payload, err := ReadFrame(stream)
+		frame, err := ReadProtocolFrame(stream)
 		if err != nil {
 			if transport.ctx.Err() != nil {
 				return
@@ -116,11 +136,17 @@ func (transport *Transport) handleStream(stream network.Stream) {
 			}
 			return
 		}
-		if transport.onPacket != nil {
-			transport.onPacket(remote, payload)
-		}
-		if transport.onEnvelope != nil {
-			transport.onEnvelope(remote, payload)
+		switch frame.Protocol {
+		case ProtocolPacket:
+			if transport.onPacket != nil {
+				transport.onPacket(remote, frame.Payload)
+			}
+		case ProtocolEnvelope:
+			if transport.onEnvelope != nil {
+				transport.onEnvelope(remote, frame.Payload)
+			}
+		default:
+			log.Printf("frame stream from %s used unknown protocol %q", remote.ShortString(), frame.Protocol)
 		}
 	}
 }
@@ -154,7 +180,7 @@ type frameConn struct {
 	host     host.Host
 	protocol protocol.ID
 	remote   peer.ID
-	queue    chan []byte
+	queue    chan outboundFrame
 	done     chan struct{}
 
 	sent    atomic.Uint64
@@ -171,17 +197,21 @@ func newFrameConn(ctx context.Context, node host.Host, protocolID protocol.ID, r
 		host:     node,
 		protocol: protocolID,
 		remote:   remote,
-		queue:    make(chan []byte, depth),
+		queue:    make(chan outboundFrame, depth),
 		done:     make(chan struct{}),
 	}
 }
 
-func (conn *frameConn) send(payload []byte) error {
-	if len(payload) == 0 || len(payload) > MaxFrameSize {
+func (conn *frameConn) send(protocolID string, payload []byte) error {
+	limit := MaxProtocolFramePayloadSize
+	if protocolID == ProtocolPacket {
+		limit = MaxFrameSize
+	}
+	if protocolID == "" || len(payload) == 0 || len(payload) > limit {
 		return errors.New("invalid frame size")
 	}
 	select {
-	case conn.queue <- payload:
+	case conn.queue <- outboundFrame{protocol: protocolID, payload: payload}:
 		return nil
 	default:
 		conn.dropped.Add(1)
@@ -200,7 +230,7 @@ func (conn *frameConn) run() {
 			return
 		case <-conn.done:
 			return
-		case payload := <-conn.queue:
+		case frame := <-conn.queue:
 			stream, err := conn.outboundStream()
 			if err != nil {
 				conn.dropped.Add(1)
@@ -212,7 +242,7 @@ func (conn *frameConn) run() {
 			}
 			backoff = minBackoff
 			_ = stream.SetWriteDeadline(time.Now().Add(writeDeadline))
-			if err := WriteFrame(stream, payload); err != nil {
+			if err := WriteProtocolFrame(stream, frame.protocol, frame.payload); err != nil {
 				conn.resetStream()
 				conn.dropped.Add(1)
 				continue
@@ -220,6 +250,15 @@ func (conn *frameConn) run() {
 			conn.sent.Add(1)
 		}
 	}
+}
+
+func frameProtocolFor(payload []byte) string {
+	if len(payload) > 0 && payload[0] == forward.MagicByte {
+		if _, err := forward.DecodeEnvelope(payload); err == nil {
+			return ProtocolEnvelope
+		}
+	}
+	return ProtocolPacket
 }
 
 func (conn *frameConn) outboundStream() (network.Stream, error) {

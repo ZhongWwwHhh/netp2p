@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -26,6 +27,14 @@ func assignment() model.RouteAssignment {
 	return assignment
 }
 
+func pathSnapshot(directEnabled bool, assignments ...model.RouteAssignment) model.SignedSnapshot {
+	return model.SignedSnapshot{State: model.NetworkState{
+		NetworkID:   "path-selector-test",
+		Settings:    model.NetworkSettings{DirectPathEnabled: directEnabled},
+		Assignments: assignments,
+	}}
+}
+
 func init() {
 	if peerDestination == peerSource {
 		panic("test peer ids must differ")
@@ -38,7 +47,9 @@ func TestSelectorPrefersDirectAndFallsBack(t *testing.T) {
 	source, _ := peer.Decode(peerSource)
 	destination, _ := peer.Decode(peerDestination)
 	assignmentRecord := assignment()
-	selector.replaceAssignments([]model.RouteAssignment{assignmentRecord})
+	if err := selector.syncSnapshot(pathSnapshot(true, assignmentRecord)); err != nil {
+		t.Fatal(err)
+	}
 
 	_, path, ok := selector.selectFor(source, destination)
 	if !ok || path.Kind != model.PathKindDirect {
@@ -70,7 +81,9 @@ func TestSelectorHonorsCertifiedPrimaryOrder(t *testing.T) {
 	assignmentRecord := assignment()
 	assignmentRecord.Primary = model.PathSpec{ID: "via", Kind: model.PathKindViaManager, ManagerHops: []string{"manager"}}
 	assignmentRecord.Fallbacks = []model.PathSpec{{ID: "direct", Kind: model.PathKindDirect}}
-	selector.replaceAssignments([]model.RouteAssignment{assignmentRecord})
+	if err := selector.syncSnapshot(pathSnapshot(true, assignmentRecord)); err != nil {
+		t.Fatal(err)
+	}
 
 	_, path, ok := selector.selectFor(source, destination)
 	if !ok || path.ID != "via" {
@@ -94,7 +107,9 @@ func TestSelectorDoesNotFabricateAdmission(t *testing.T) {
 	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
 	source, _ := peer.Decode(peerSource)
 	destination, _ := peer.Decode(peerDestination)
-	selector.replaceAssignments([]model.RouteAssignment{assignment()})
+	if err := selector.syncSnapshot(pathSnapshot(true, assignment())); err != nil {
+		t.Fatal(err)
+	}
 
 	for index := 0; index < 3; index++ {
 		if _, _, ok := selector.selectFor(source, destination); !ok {
@@ -106,10 +121,144 @@ func TestSelectorDoesNotFabricateAdmission(t *testing.T) {
 	}
 }
 
-func TestSelectorRejectsUnknownAssignment(t *testing.T) {
+func TestSelectorRequiresSnapshotSync(t *testing.T) {
 	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
 	source, _ := peer.Decode(peerSource)
 	destination, _ := peer.Decode(peerDestination)
+	selector.replaceAssignments([]model.RouteAssignment{assignment()})
+
+	_, _, status := selector.selectWithStatus(source, destination)
+	if status.OK || status.State != PathSelectionSyncFailed || !errors.Is(status.Err, ErrPathSyncFailed) {
+		t.Fatalf("unsynchronized status = %+v", status)
+	}
+}
+
+func TestSelectorReportsInvalidSnapshotSync(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	if err := selector.syncSnapshot(model.SignedSnapshot{}); !errors.Is(err, ErrPathSyncFailed) {
+		t.Fatalf("sync error = %v", err)
+	}
+	_, _, status := selector.selectWithStatus(source, destination)
+	if status.OK || status.State != PathSelectionSyncFailed || !errors.Is(status.Err, ErrPathSyncFailed) {
+		t.Fatalf("invalid snapshot status = %+v", status)
+	}
+}
+
+func TestSelectorAllowsUnassignedDirectWithValidAddress(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	snapshot := pathSnapshot(true)
+	snapshot.State.Peers = []model.PeerRecord{{
+		PeerID: peerDestination, Addresses: []string{"/ip4/192.0.2.10/udp/4001/quic-v1"},
+	}}
+	if err := selector.syncSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	assignment, path, status := selector.selectWithStatus(source, destination)
+	if !status.OK || status.State != PathSelectionDirect || status.Certified || assignment.ID != "" ||
+		path.Kind != model.PathKindDirect || path.ID != "direct" {
+		t.Fatalf("unassigned direct status = assignment %+v path %+v status %+v", assignment, path, status)
+	}
+}
+
+func TestSelectorRejectsUnassignedDirectWhenDirectDisabled(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	snapshot := pathSnapshot(false)
+	snapshot.State.Peers = []model.PeerRecord{{
+		PeerID: peerDestination, Addresses: []string{"/ip4/192.0.2.10/udp/4001/quic-v1"},
+	}}
+	if err := selector.syncSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, status := selector.selectWithStatus(source, destination)
+	if status.OK || status.State != PathSelectionAssignmentMissing ||
+		!errors.Is(status.Err, ErrAssignmentMissing) || !errors.Is(status.Err, ErrDirectPathDisabled) {
+		t.Fatalf("disabled direct status = %+v", status)
+	}
+}
+
+func TestSelectorRejectsUnassignedDirectWithoutValidAddress(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	if err := selector.syncSnapshot(pathSnapshot(true)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, status := selector.selectWithStatus(source, destination)
+	if status.OK || status.State != PathSelectionAssignmentMissing ||
+		!errors.Is(status.Err, ErrAssignmentMissing) || !errors.Is(status.Err, ErrDirectPeerUnavailable) {
+		t.Fatalf("missing address status = %+v", status)
+	}
+}
+
+func TestSelectorUsesCertifiedViaManagerWhenDirectDisabled(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	assignmentRecord := assignment()
+	assignmentRecord.Primary = model.PathSpec{ID: "via", Kind: model.PathKindViaManager, ManagerHops: []string{"manager"}}
+	assignmentRecord.Fallbacks = []model.PathSpec{{ID: "direct", Kind: model.PathKindDirect}}
+	if err := selector.syncSnapshot(pathSnapshot(false, assignmentRecord)); err != nil {
+		t.Fatal(err)
+	}
+
+	current, path, status := selector.selectWithStatus(source, destination)
+	if !status.OK || !status.Certified || current.ID != "assignment" || path.ID != "via" {
+		t.Fatalf("certified via status = current %+v path %+v status %+v", current, path, status)
+	}
+}
+
+func TestSelectorDoesNotLeaveDirectOnlyAssignmentWhenDirectDisabled(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	assignmentRecord := assignment()
+	assignmentRecord.Fallbacks = nil
+	if err := selector.syncSnapshot(pathSnapshot(false, assignmentRecord)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, status := selector.selectWithStatus(source, destination)
+	if status.OK || status.State != PathSelectionDirectDisabled || !errors.Is(status.Err, ErrDirectPathDisabled) {
+		t.Fatalf("direct-only status = %+v", status)
+	}
+}
+
+func TestSelectorRejectsStaleSnapshot(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	initial := pathSnapshot(true, assignment())
+	initial.Height = 2
+	if err := selector.syncSnapshot(initial); err != nil {
+		t.Fatal(err)
+	}
+	stale := pathSnapshot(true, assignment())
+	stale.Height = 1
+	if err := selector.syncSnapshot(stale); !errors.Is(err, ErrPathSyncFailed) {
+		t.Fatalf("stale sync error = %v", err)
+	}
+	_, _, status := selector.selectWithStatus(source, destination)
+	if status.OK || status.State != PathSelectionSyncFailed || !errors.Is(status.Err, ErrPathSyncFailed) {
+		t.Fatalf("stale status = %+v", status)
+	}
+}
+
+func TestSelectorRejectsUnknownAssignmentWhenDirectDisabled(t *testing.T) {
+	selector := newPathSelector(forward.NewTable(model.NetworkState{}, "manager", func(peer.ID, forward.Envelope) error { return nil }), nil)
+	source, _ := peer.Decode(peerSource)
+	destination, _ := peer.Decode(peerDestination)
+	if err := selector.syncSnapshot(pathSnapshot(false)); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, ok := selector.selectFor(source, destination); ok {
 		t.Fatal("unknown assignment selected")
 	}
