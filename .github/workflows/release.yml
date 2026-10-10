@@ -37,7 +37,16 @@ jobs:
           $env:VITE_NETP2P_VERSION = $env:VERSION
           npm run build
       - name: Build Windows MSI
-        run: make package-windows VERSION="$env:VERSION" SKIP_UI=1
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+          $ldflags = "-s -w -X github.com/netp2p/netp2p/internal/version.Version=$env:VERSION"
+          $env:GOOS = "windows"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"
+          go build -trimpath -ldflags $ldflags -o dist/windows/netp2pd.exe ./cmd/netp2pd
+          go build -trimpath -ldflags $ldflags -o dist/windows/netp2p.exe ./cmd/netp2p
+          Copy-Item packaging/runtime.example.yaml dist/windows/runtime.yaml -Force
+          Copy-Item packaging/windows/tray.ps1 dist/windows/tray.ps1 -Force
+          packaging/windows/build.ps1 -Version $env:VERSION -BinDir dist/windows -OutDir dist
       - uses: actions/upload-artifact@v4
         with:
           name: netp2p-windows-msi
