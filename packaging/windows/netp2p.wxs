@@ -6,11 +6,11 @@
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLDIR" Name="NetP2P">
-          <Component Id="DaemonFiles" Guid="8A5B31DE-6BC4-4EF1-B6F5-3AAB5E77E52E" Win64="yes">
+          <Component Id="DaemonFiles" Guid="8A5B31DE-6BC4-4EF1-B6F5-3AAB5E77E52E">
             <File Id="NetP2PD" Source="$(var.BinDir)\netp2pd.exe" KeyPath="yes" />
             <File Id="Wintun" Source="$(var.BinDir)\wintun.dll" />
           </Component>
-          <Component Id="ServiceFiles" Guid="B2D83372-CBAE-42B4-90CE-1A47E2A2B3D4" Win64="yes">
+          <Component Id="ServiceFiles" Guid="B2D83372-CBAE-42B4-90CE-1A47E2A2B3D4">
             <File Id="NetP2PCLI" Source="$(var.BinDir)\netp2p.exe" KeyPath="yes" />
             <File Id="TrayScript" Source="$(var.BinDir)\tray.ps1" />
             <ServiceInstall Id="NetP2PService" Name="NetP2PClient" Type="ownProcess" Start="auto" ErrorControl="normal" Arguments="service run --config [NETP2P_CONFIG]runtime.yaml" />
@@ -20,13 +20,13 @@
       </Directory>
       <Directory Id="CommonAppDataFolder">
         <Directory Id="NETP2P_CONFIG" Name="netp2p">
-          <Component Id="ConfigFiles" Guid="6DC58065-9E5A-4E28-8F57-1D2E5A98DDB0" Win64="yes">
+          <Component Id="ConfigFiles" Guid="6DC58065-9E5A-4E28-8F57-1D2E5A98DDB0">
             <File Id="RuntimeConfig" Source="$(var.BinDir)\runtime.yaml" KeyPath="yes" />
           </Component>
         </Directory>
       </Directory>
       <Directory Id="ProgramMenuFolder">
-        <Component Id="TrayShortcut" Guid="3DEE1D9E-4AB6-4D32-99E7-CF2C91F6E3A2" Win64="yes">
+        <Component Id="TrayShortcut" Guid="3DEE1D9E-4AB6-4D32-99E7-CF2C91F6E3A2">
           <Shortcut Id="NetP2PTray" Name="NetP2P Tray" Target="[INSTALLDIR]netp2p.exe" Arguments="tray" WorkingDirectory="INSTALLDIR" />
           <RegistryValue Root="HKLM" Key="Software\NetP2P" Name="Tray" Type="integer" Value="1" KeyPath="yes" />
         </Component>
