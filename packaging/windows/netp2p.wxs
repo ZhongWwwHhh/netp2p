@@ -3,9 +3,8 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of NetP2P is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLDIR" Name="NetP2P">
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLDIR" Name="NetP2P">
           <Component Id="DaemonFiles" Guid="8A5B31DE-6BC4-4EF1-B6F5-3AAB5E77E52E">
             <File Id="NetP2PD" Source="$(var.BinDir)\netp2pd.exe" KeyPath="yes" />
             <File Id="Wintun" Source="$(var.BinDir)\wintun.dll" />
@@ -17,21 +16,20 @@
             <ServiceControl Id="NetP2PServiceControl" Name="NetP2PClient" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
           </Component>
         </Directory>
-      </Directory>
-      <Directory Id="CommonAppDataFolder">
+      </StandardDirectory>
+      <StandardDirectory Id="CommonAppDataFolder">
         <Directory Id="NETP2P_CONFIG" Name="netp2p">
           <Component Id="ConfigFiles" Guid="6DC58065-9E5A-4E28-8F57-1D2E5A98DDB0">
             <File Id="RuntimeConfig" Source="$(var.BinDir)\runtime.yaml" KeyPath="yes" />
           </Component>
         </Directory>
-      </Directory>
-      <Directory Id="ProgramMenuFolder">
+      </StandardDirectory>
+      <StandardDirectory Id="ProgramMenuFolder">
         <Component Id="TrayShortcut" Guid="3DEE1D9E-4AB6-4D32-99E7-CF2C91F6E3A2">
           <Shortcut Id="NetP2PTray" Name="NetP2P Tray" Target="[INSTALLDIR]netp2p.exe" Arguments="tray" WorkingDirectory="INSTALLDIR" />
           <RegistryValue Root="HKLM" Key="Software\NetP2P" Name="Tray" Type="integer" Value="1" KeyPath="yes" />
         </Component>
-      </Directory>
-    </Directory>
+      </StandardDirectory>
 
     <Feature Id="Main" Level="1">
       <ComponentRef Id="DaemonFiles" />
