@@ -125,7 +125,8 @@ jobs:
         run: dotnet tool install --global wix
       - name: Build Windows MSI
         shell: pwsh
-        run: packaging/windows/build.ps1 -Version 0.0.0-dev -BinDir dist/windows -OutDir dist
+        # WiX requires a numeric ProductVersion even for CI smoke builds.
+        run: packaging/windows/build.ps1 -Version 0.0.0 -BinDir dist/windows -OutDir dist
 
   build-other:
     runs-on: ubuntu-latest
