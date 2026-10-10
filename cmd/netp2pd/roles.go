@@ -309,16 +309,20 @@ func runManager(ctx context.Context, options managerOptions) error {
 		}
 		log.Printf("quorum unavailable; manager %s entering degraded read-only mode at height %d", local.ID, engine.Height())
 	}
-	// A restarting or lagging manager first tries to catch up from peers.
-	// If catch-up fails, the height-1 leader still tries genesis so a cold
-	// start (all managers fresh) can certify the first state.
+	// A restarting or lagging manager first tries to catch up from peers, even
+	// when it has a restored ledger: its height can still be behind a quorum.
+	// A no-op catch-up is normal when the committee is already current.
+	if !degraded {
+		catchContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+		_ = mesh.CatchUp(catchContext)
+		cancel()
+	}
+	// If catch-up cannot advance a cold manager, its leader still tries genesis
+	// so an all-manager cold start can certify the first state.
 	if engine.Height() == 0 {
 		if hasLedger {
 			return fmt.Errorf("certified ledger exists but did not restore; refusing re-genesis")
 		}
-		catchContext, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_ = mesh.CatchUp(catchContext)
-		cancel()
 		if !degraded && engine.Leader(1, 0).ID == local.ID {
 			if err := submitGenesis(ctx, mesh); err != nil {
 				return err

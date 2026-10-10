@@ -302,6 +302,27 @@ func (engine *Engine) RoundTimeout() time.Duration {
 	return engine.roundTimeout
 }
 
+// CurrentRound reports the local consensus view. It is carried in committee
+// probes so a restarted manager can adopt the highest view known to a quorum.
+func (engine *Engine) CurrentRound() uint64 {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return engine.currentRound
+}
+
+// AlignRound advances a lagging local view to a round reported by a committee
+// quorum. Only advancing is safe: never undo a view in which a proposal may
+// already have collected votes.
+func (engine *Engine) AlignRound(round uint64) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if round <= engine.currentRound {
+		return
+	}
+	engine.clearUncommittedHeightLocked(engine.height + 1)
+	engine.startRoundLocked(round)
+}
+
 // deriveCommitteeKeys builds the deterministic (t-of-n) BLS sharing for a
 // committee sorted by member ID. Each member's share is evaluated at a stable
 // point derived from its ID, so replacing a member does not invalidate the

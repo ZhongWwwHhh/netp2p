@@ -832,6 +832,79 @@ func TestViewChangeRecoversAfterLostRoundZeroVote(t *testing.T) {
 	}
 }
 
+func TestAlignRoundAdoptsQuorumView(t *testing.T) {
+	committee, privateKeys := testCommittee()
+	engines := make([]*Engine, 0, len(committee))
+	for index, member := range committee {
+		engine, err := NewEngine(testState(), committee, member.ID, privateKeys[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		engines = append(engines, engine)
+	}
+
+	transition := model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "aligned"}}
+	// While manager three is unavailable, the two live managers rotate through
+	// failed views. A restarting manager restores at round zero and must learn
+	// the committee's current view before the next proposal.
+	for _, engine := range engines[1:] {
+		engine.roundDeadline = time.Now().Add(-time.Millisecond)
+		engine.expireRoundLocked(engine.Height() + 1)
+		if engine.currentRound != 1 {
+			t.Fatalf("expected view rotation to round 1, got %d", engine.currentRound)
+		}
+		engine.roundDeadline = time.Now().Add(-time.Millisecond)
+		engine.expireRoundLocked(engine.Height() + 1)
+		if engine.currentRound != 2 {
+			t.Fatalf("expected view rotation to round 2, got %d", engine.currentRound)
+		}
+	}
+	engines[0].AlignRound(2)
+	if engines[0].currentRound != 2 {
+		t.Fatalf("expected aligned round 2, got %d", engines[0].currentRound)
+	}
+
+	round := engines[0].currentRound
+	leaderIndex := int((engines[0].Height() + 1 + round) % uint64(len(engines)))
+	leader := engines[leaderIndex]
+	proposal, leaderVote, err := leader.Propose(transition, round)
+	if err != nil {
+		t.Fatalf("leader round %d proposal failed: %v", round, err)
+	}
+	if _, _, err := leader.ProcessVote(leaderVote); err != nil {
+		t.Fatal(err)
+	}
+	ready := false
+	var qc model.QuorumCertificate
+	for index, engine := range engines {
+		if index == leaderIndex {
+			continue
+		}
+		vote, err := engine.ProcessProposal(proposal)
+		if err != nil {
+			t.Fatalf("engine %d rejected aligned proposal: %v", index, err)
+		}
+		qc, ready, err = leader.ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			break
+		}
+	}
+	if !ready {
+		t.Fatal("aligned committee did not reach quorum")
+	}
+	for _, engine := range engines {
+		if _, err := engine.Commit(proposal, qc); err != nil {
+			t.Fatal(err)
+		}
+		if engine.Height() != 1 {
+			t.Fatalf("expected height 1, got %d", engine.Height())
+		}
+	}
+}
+
 func TestProcessVoteRejectsMismatchedRound(t *testing.T) {
 	engines, _ := newBFTTestEngines(t)
 	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)

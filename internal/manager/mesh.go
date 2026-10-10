@@ -37,7 +37,7 @@ type CommitteeMesh struct {
 
 type committeeProbe struct {
 	generation uint64
-	response   chan struct{}
+	response   chan uint64
 }
 
 const committeeProbeTimeout = 500 * time.Millisecond
@@ -130,7 +130,7 @@ func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
 	mesh.mu.Lock()
 	mesh.probeGeneration++
 	generation := mesh.probeGeneration
-	response := make(chan struct{}, len(peers))
+	response := make(chan uint64, len(peers))
 	for _, peerID := range peers {
 		mesh.probeResponses[peerID] = committeeProbe{generation: generation, response: response}
 	}
@@ -145,31 +145,51 @@ func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
 		mesh.mu.Unlock()
 	}()
 
-	for _, peerID := range peers {
-		go func(peerID peer.ID) {
+	for memberID, peerID := range peers {
+		go func(memberID string, peerID peer.ID) {
 			ctx, cancel := context.WithTimeout(context.Background(), committeeProbeTimeout)
 			defer cancel()
-			_ = mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, wire.CommitteeEnvelopeToProto(
-				model.CommitteeEnvelope{Type: "ready", Height: generation},
-			))
-		}(peerID)
+			message := wire.CommitteeEnvelopeToProto(model.CommitteeEnvelope{
+				Type: "ready", Height: generation, Round: mesh.engine.CurrentRound(),
+			})
+			sendCtx, cancelSend := context.WithTimeout(ctx, committeeProbeTimeout/2)
+			if err := mesh.node.Send(sendCtx, peerID, p2p.StateUpdateProtocol, message); err != nil {
+				cancelSend()
+				// A stale QUIC connection can remain "connected" after the
+				// remote manager restarts. Repair it once and use the rest of
+				// the probe budget for a fresh application-level attempt.
+				mesh.refreshPeer(memberID, peerID)
+				_ = mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, message)
+			} else {
+				cancelSend()
+			}
+		}(memberID, peerID)
 	}
 
 	timer := time.NewTimer(committeeProbeTimeout)
 	defer timer.Stop()
 	answered := 0
+	remoteRounds := make([]uint64, 0, required)
 	for answered < required {
 		select {
-		case <-response:
+		case remoteRound := <-response:
 			answered++
+			remoteRounds = append(remoteRounds, remoteRound)
 		case <-timer.C:
 			return fmt.Errorf("%w: %d of %d remote committee members answered", ErrCommitteeUnavailable, answered, len(peers))
 		}
 	}
+	highestRound := mesh.engine.CurrentRound()
+	for _, remoteRound := range remoteRounds {
+		if remoteRound > highestRound {
+			highestRound = remoteRound
+		}
+	}
+	mesh.engine.AlignRound(highestRound)
 	return nil
 }
 
-func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64) {
+func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64, round uint64) {
 	mesh.mu.Lock()
 	probe, ok := mesh.probeResponses[remote]
 	mesh.mu.Unlock()
@@ -177,7 +197,7 @@ func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64) 
 		return
 	}
 	select {
-	case probe.response <- struct{}{}:
+	case probe.response <- round:
 	default:
 	}
 }
@@ -358,9 +378,11 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		}
 		_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "sync_response", Snapshot: &snapshot})
 	case "ready":
-		_ = mesh.send(remote, model.CommitteeEnvelope{Type: "ready_ack", Height: message.Height})
+		_ = mesh.send(remote, model.CommitteeEnvelope{
+			Type: "ready_ack", Height: message.Height, Round: mesh.engine.CurrentRound(),
+		})
 	case "ready_ack":
-		mesh.markProbeResponse(remote, message.Height)
+		mesh.markProbeResponse(remote, message.Height, message.Round)
 	}
 }
 
@@ -529,7 +551,14 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 	if err := mesh.ensureCommitteeAvailable(); err != nil {
 		return model.SignedSnapshot{}, err
 	}
-	for round := uint64(0); round < uint64(params.Size); round++ {
+	startRound := mesh.engine.CurrentRound()
+	if proposal, ok := mesh.engine.CurrentProposal(); ok && !bytes.Equal(
+		bft.TransitionHash(proposal.Transition), transitionHash,
+	) {
+		startRound++
+	}
+	for attempt := uint64(0); attempt < uint64(params.Size); attempt++ {
+		round := startRound + attempt
 		height := mesh.engine.Height() + 1
 		leader := mesh.engine.Leader(height, round)
 		if leader.ID == mesh.engine.LocalID() {
@@ -598,5 +627,23 @@ func (mesh *CommitteeMesh) broadcast(message model.CommitteeEnvelope) {
 func (mesh *CommitteeMesh) send(peerID peer.ID, message model.CommitteeEnvelope) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, wire.CommitteeEnvelopeToProto(message))
+	payload := wire.CommitteeEnvelopeToProto(message)
+	if err := mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, payload); err == nil {
+		return nil
+	}
+	memberID, ok := mesh.memberIDForPeer(peerID)
+	if !ok {
+		return mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, payload)
+	}
+	mesh.refreshPeer(memberID, peerID)
+	return mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, payload)
+}
+
+func (mesh *CommitteeMesh) refreshPeer(memberID string, peerID peer.ID) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = mesh.node.Host.Network().ClosePeer(peerID)
+	if err := mesh.node.Host.Connect(ctx, mesh.connectInfo(memberID, peerID)); err != nil {
+		log.Printf("committee member %s did not accept a reconnect: %v", memberID, err)
+	}
 }
