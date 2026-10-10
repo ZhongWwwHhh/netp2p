@@ -10,7 +10,36 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Unit tests
+        run: go test ./cmd/... ./internal/...
+      - name: Race tests
+        run: go test -race ./cmd/... ./internal/...
+      - name: UI tests
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          VITE_NETP2P_VERSION=0.0.0-dev npm run build
+          npx vitest run
+      - name: Build test image
+        run: docker build -t netp2p-test:latest .
+      - name: Userspace end-to-end
+        run: sudo -E scripts/e2e.sh
+
   windows:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +84,7 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
-    needs: windows
+    needs: [windows, test]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

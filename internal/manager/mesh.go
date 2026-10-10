@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/bft"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/tracing"
@@ -33,6 +34,8 @@ type CommitteeMesh struct {
 	subscribers     map[chan model.SignedSnapshot]struct{}
 	probeGeneration uint64
 	probeResponses  map[peer.ID]committeeProbe
+	metrics         *metrics.Metrics
+	refreshes       map[peer.ID]chan struct{}
 }
 
 type committeeProbe struct {
@@ -61,6 +64,7 @@ func NewCommitteeMesh(node *p2p.Node, engine *bft.Engine, members []model.Commit
 		node: node, engine: engine, members: members, peers: peers,
 		subscribers:    make(map[chan model.SignedSnapshot]struct{}),
 		probeResponses: make(map[peer.ID]committeeProbe),
+		refreshes:      make(map[peer.ID]chan struct{}),
 	}
 	node.Handle(p2p.StateUpdateProtocol, mesh.handleStateUpdate)
 	engine.OnCommit(mesh.onCommit)
@@ -110,20 +114,17 @@ func (mesh *CommitteeMesh) memberIDForPeer(remote peer.ID) (string, bool) {
 }
 
 // ensureCommitteeAvailable proves that enough remote members answer an
-// application-level handshake to combine their votes with this manager's vote.
-// Transport connectedness is not sufficient: a partitioned peer can remain
-// connected while every state-update message is dropped.
+// application-level handshake. It deliberately does not mutate consensus
+// state: unsigned readiness acknowledgements are not view-change evidence.
+// Transport connectedness is not sufficient either; a partitioned peer can
+// remain connected while every state-update message is dropped.
 func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
 	mesh.probeMu.Lock()
 	defer mesh.probeMu.Unlock()
 
 	peers := mesh.peerSnapshot()
 	params := mesh.engine.CommitteeParams()
-	required := params.QuorumSize - 1
-	if required > len(peers) {
-		required = len(peers)
-	}
-	if required <= 0 {
+	if params.QuorumSize <= 0 || params.QuorumSize > len(peers)+1 {
 		return nil
 	}
 
@@ -166,26 +167,26 @@ func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
 		}(memberID, peerID)
 	}
 
+	required := params.QuorumSize - 1
+	if required > len(peers) {
+		required = len(peers)
+	}
+	roundCounts := make(map[uint64]int)
 	timer := time.NewTimer(committeeProbeTimeout)
 	defer timer.Stop()
 	answered := 0
-	remoteRounds := make([]uint64, 0, required)
+	// A probe response can race with the timeout, so select must not consume
+	// from a closed channel. Keep the channel open and let the deferred cleanup
+	// remove the generation-specific response target.
 	for answered < required {
 		select {
 		case remoteRound := <-response:
 			answered++
-			remoteRounds = append(remoteRounds, remoteRound)
+			roundCounts[remoteRound]++
 		case <-timer.C:
 			return fmt.Errorf("%w: %d of %d remote committee members answered", ErrCommitteeUnavailable, answered, len(peers))
 		}
 	}
-	highestRound := mesh.engine.CurrentRound()
-	for _, remoteRound := range remoteRounds {
-		if remoteRound > highestRound {
-			highestRound = remoteRound
-		}
-	}
-	mesh.engine.AlignRound(highestRound)
 	return nil
 }
 
@@ -200,6 +201,13 @@ func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64, 
 	case probe.response <- round:
 	default:
 	}
+}
+
+// SetMetrics attaches optional submit observability after mesh construction.
+func (mesh *CommitteeMesh) SetMetrics(collector *metrics.Metrics) {
+	mesh.mu.Lock()
+	defer mesh.mu.Unlock()
+	mesh.metrics = collector
 }
 
 // syncMembers rebuilds the member list from the engine's current committee and
@@ -325,7 +333,10 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 			return
 		}
 		vote, err := mesh.engine.ProcessProposal(*message.Proposal)
-		if err == nil {
+		if err != nil {
+			log.Printf("committee proposal rejected at height %d round %d from %s: %v",
+				message.Proposal.Height, message.Proposal.Round, senderID, err)
+		} else {
 			_ = mesh.send(stream.Conn().RemotePeer(), model.CommitteeEnvelope{Type: "vote", Vote: &vote})
 		}
 	case "vote":
@@ -340,7 +351,10 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 			return
 		}
 		qc, ready, err := mesh.engine.ProcessVote(*message.Vote)
-		if err != nil || !ready {
+		if err != nil {
+			log.Printf("committee vote rejected at height %d round %d from %s: %v",
+				message.Vote.Height, message.Vote.Round, senderID, err)
+		} else if !ready {
 			return
 		}
 		proposal, ok := mesh.engine.CurrentProposal()
@@ -515,6 +529,20 @@ func (mesh *CommitteeMesh) CatchUp(ctx context.Context) error {
 // current leader: the transition is forwarded to the leader and the caller
 // waits for the committed snapshot.
 func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.SignedSnapshot, error) {
+	mesh.mu.Lock()
+	collector := mesh.metrics
+	mesh.mu.Unlock()
+	if collector != nil {
+		collector.BFTSubmitAttempts.Inc()
+	}
+	snapshot, err := mesh.submit(transition)
+	if err != nil && collector != nil {
+		collector.BFTSubmitFailures.Inc()
+	}
+	return snapshot, err
+}
+
+func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.SignedSnapshot, error) {
 	if tracing.Enabled() {
 		_, span := otel.Tracer("netp2p").Start(context.Background(), "bft.submit")
 		defer span.End()
@@ -625,24 +653,52 @@ func (mesh *CommitteeMesh) broadcast(message model.CommitteeEnvelope) {
 }
 
 func (mesh *CommitteeMesh) send(peerID peer.ID, message model.CommitteeEnvelope) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	payload := wire.CommitteeEnvelopeToProto(message)
-	if err := mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, payload); err == nil {
+	if err := mesh.sendOnce(peerID, payload); err == nil {
 		return nil
 	}
 	memberID, ok := mesh.memberIDForPeer(peerID)
 	if !ok {
-		return mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, payload)
+		return mesh.sendOnce(peerID, payload)
 	}
 	mesh.refreshPeer(memberID, peerID)
+	return mesh.sendOnce(peerID, payload)
+}
+
+func (mesh *CommitteeMesh) sendOnce(peerID peer.ID, payload proto.Message) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	return mesh.node.Send(ctx, peerID, p2p.StateUpdateProtocol, payload)
 }
 
 func (mesh *CommitteeMesh) refreshPeer(memberID string, peerID peer.ID) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	mesh.mu.Lock()
+	if done, refreshing := mesh.refreshes[peerID]; refreshing {
+		mesh.mu.Unlock()
+		// Concurrent vote/probe/forward failures must not race to close and
+		// dial the same peer; a single reconnect owner is enough.
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+		return
+	}
+	done := make(chan struct{})
+	mesh.refreshes[peerID] = done
+	mesh.mu.Unlock()
+
+	defer func() {
+		mesh.mu.Lock()
+		if current := mesh.refreshes[peerID]; current == done {
+			delete(mesh.refreshes, peerID)
+		}
+		close(done)
+		mesh.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_ = mesh.node.Host.Network().ClosePeer(peerID)
+	mesh.node.Host.Network().ClosePeer(peerID)
 	if err := mesh.node.Host.Connect(ctx, mesh.connectInfo(memberID, peerID)); err != nil {
 		log.Printf("committee member %s did not accept a reconnect: %v", memberID, err)
 	}

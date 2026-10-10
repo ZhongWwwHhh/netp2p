@@ -20,6 +20,8 @@ type Metrics struct {
 	BFTCommits        prometheus.Counter
 	BFTRejected       prometheus.Counter
 	BFTLastCommitTime prometheus.Gauge
+	BFTSubmitAttempts prometheus.Counter
+	BFTSubmitFailures prometheus.Counter
 	Forwarded         prometheus.Counter
 	ForwardDrops      prometheus.Counter
 	ForwardQueueDepth prometheus.Gauge
@@ -51,6 +53,12 @@ func New() *Metrics {
 		}),
 		BFTRejected: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_bft_rejected_total", Help: "Number of rejected votes or certificates.",
+		}),
+		BFTSubmitAttempts: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "netp2p_bft_submit_attempts_total", Help: "State transitions submitted to the committee.",
+		}),
+		BFTSubmitFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "netp2p_bft_submit_failures_total", Help: "State transitions that failed to reach a certified quorum.",
 		}),
 		Forwarded: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_forward_forwarded_total", Help: "Frames forwarded on behalf of other peers.",
@@ -88,6 +96,7 @@ func New() *Metrics {
 	}
 	registry.MustRegister(
 		metrics.BFTHeight, metrics.BFTCommits, metrics.BFTRejected, metrics.BFTLastCommitTime,
+		metrics.BFTSubmitAttempts, metrics.BFTSubmitFailures,
 		metrics.Forwarded, metrics.ForwardDrops, metrics.SyncRequests, metrics.SyncErrors, metrics.SyncTimeouts,
 		metrics.QuotaBlocked, metrics.CertifiedPeers, metrics.LinkSegments,
 		metrics.LinkConfidence, metrics.ForwardQueueDepth, metrics.DNSFailures,

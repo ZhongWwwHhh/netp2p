@@ -832,76 +832,59 @@ func TestViewChangeRecoversAfterLostRoundZeroVote(t *testing.T) {
 	}
 }
 
-func TestAlignRoundAdoptsQuorumView(t *testing.T) {
-	committee, privateKeys := testCommittee()
-	engines := make([]*Engine, 0, len(committee))
-	for index, member := range committee {
-		engine, err := NewEngine(testState(), committee, member.ID, privateKeys[index])
-		if err != nil {
-			t.Fatal(err)
-		}
-		engines = append(engines, engine)
-	}
-
-	transition := model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "aligned"}}
-	// While manager three is unavailable, the two live managers rotate through
-	// failed views. A restarting manager restores at round zero and must learn
-	// the committee's current view before the next proposal.
-	for _, engine := range engines[1:] {
-		engine.roundDeadline = time.Now().Add(-time.Millisecond)
-		engine.expireRoundLocked(engine.Height() + 1)
-		if engine.currentRound != 1 {
-			t.Fatalf("expected view rotation to round 1, got %d", engine.currentRound)
-		}
-		engine.roundDeadline = time.Now().Add(-time.Millisecond)
-		engine.expireRoundLocked(engine.Height() + 1)
-		if engine.currentRound != 2 {
-			t.Fatalf("expected view rotation to round 2, got %d", engine.currentRound)
-		}
-	}
-	engines[0].AlignRound(2)
-	if engines[0].currentRound != 2 {
-		t.Fatalf("expected aligned round 2, got %d", engines[0].currentRound)
-	}
-
-	round := engines[0].currentRound
-	leaderIndex := int((engines[0].Height() + 1 + round) % uint64(len(engines)))
-	leader := engines[leaderIndex]
-	proposal, leaderVote, err := leader.Propose(transition, round)
+func TestProcessProposalRejectsStaleRoundWithEvidence(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	proposal, _, err := leader.Propose(model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "protected"}}, 0)
 	if err != nil {
-		t.Fatalf("leader round %d proposal failed: %v", round, err)
-	}
-	if _, _, err := leader.ProcessVote(leaderVote); err != nil {
 		t.Fatal(err)
 	}
-	ready := false
-	var qc model.QuorumCertificate
-	for index, engine := range engines {
-		if index == leaderIndex {
-			continue
-		}
-		vote, err := engine.ProcessProposal(proposal)
-		if err != nil {
-			t.Fatalf("engine %d rejected aligned proposal: %v", index, err)
-		}
-		qc, ready, err = leader.ProcessVote(vote)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if ready {
+	var follower *Engine
+	for _, engine := range engines {
+		if engine != leader {
+			follower = engine
 			break
 		}
 	}
-	if !ready {
-		t.Fatal("aligned committee did not reach quorum")
+	if _, err := follower.ProcessProposal(proposal); err != nil {
+		t.Fatal(err)
 	}
+	// Simulate only the view number moving forward without expiry clearing the
+	// current proposal. A stale leader proposal must not discard that evidence.
+	follower.currentRound = 1
+	if _, err := follower.ProcessProposal(proposal); err == nil {
+		t.Fatal("stale proposal overwrote a higher view containing evidence")
+	}
+	if follower.currentRound != 1 {
+		t.Fatalf("current round changed to %d during rejection", follower.currentRound)
+	}
+}
+
+func TestProcessProposalSigningFailureDoesNotMutate(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	proposal, _, err := leader.Propose(model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "unsigned"}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var follower *Engine
 	for _, engine := range engines {
-		if _, err := engine.Commit(proposal, qc); err != nil {
-			t.Fatal(err)
+		if engine != leader {
+			follower = engine
+			break
 		}
-		if engine.Height() != 1 {
-			t.Fatalf("expected height 1, got %d", engine.Height())
-		}
+	}
+	delete(follower.blsIndex, follower.localID)
+	beforeRound := follower.currentRound
+	if _, err := follower.ProcessProposal(proposal); err == nil {
+		t.Fatal("proposal was accepted without a local signing share")
+	}
+	if follower.currentRound != beforeRound {
+		t.Fatalf("current round advanced from %d to %d after signing failure", beforeRound, follower.currentRound)
+	}
+	key := proposalKey{Height: proposal.Height, Round: proposal.Round}
+	if _, ok := follower.proposals[key]; ok {
+		t.Fatal("failed proposal was stored")
 	}
 }
 
@@ -921,7 +904,10 @@ func TestProcessVoteRejectsMismatchedRound(t *testing.T) {
 	}
 	mismatched := proposal
 	mismatched.Round = 1
-	vote := follower.localVote(mismatched)
+	vote, err := follower.localVote(mismatched)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := leader.ProcessVote(vote); err == nil {
 		t.Fatal("vote with a mismatched round was accepted")
 	}

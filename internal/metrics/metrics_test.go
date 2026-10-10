@@ -20,6 +20,8 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 	collector.RecordSyncRequest()
 	collector.RecordSyncError()
 	collector.RecordSyncTimeout()
+	collector.BFTSubmitAttempts.Add(2)
+	collector.BFTSubmitFailures.Add(1)
 
 	recorder := httptest.NewRecorder()
 	collector.Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))
@@ -43,6 +45,10 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 		!strings.Contains(body, "netp2p_sync_errors_total 1") ||
 		!strings.Contains(body, "netp2p_sync_timeouts_total 1") {
 		t.Fatalf("sync counters missing from exposition:\n%s", body)
+	}
+	if !strings.Contains(body, "netp2p_bft_submit_attempts_total 2") ||
+		!strings.Contains(body, "netp2p_bft_submit_failures_total 1") {
+		t.Fatalf("BFT submit counters missing from exposition:\n%s", body)
 	}
 	if !strings.Contains(body, "go_goroutines") {
 		t.Fatalf("go goroutine metric missing from exposition:\n%s", body)

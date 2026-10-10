@@ -291,6 +291,7 @@ func (engine *Engine) SetRoundTimeout(timeout time.Duration) error {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
 	engine.roundTimeout = timeout
+	engine.roundDeadline = time.Now().Add(timeout)
 	return nil
 }
 
@@ -303,24 +304,20 @@ func (engine *Engine) RoundTimeout() time.Duration {
 }
 
 // CurrentRound reports the local consensus view. It is carried in committee
-// probes so a restarted manager can adopt the highest view known to a quorum.
+// probes for observability only: it never authorizes a view change.
 func (engine *Engine) CurrentRound() uint64 {
 	engine.mu.RLock()
 	defer engine.mu.RUnlock()
 	return engine.currentRound
 }
 
-// AlignRound advances a lagging local view to a round reported by a committee
-// quorum. Only advancing is safe: never undo a view in which a proposal may
-// already have collected votes.
-func (engine *Engine) AlignRound(round uint64) {
+// AdvanceExpiredRound rotates an idle local view after its deadline. Tests and
+// operational probes use this to reproduce cold-start view skew explicitly.
+func (engine *Engine) AdvanceExpiredRound(height uint64) uint64 {
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
-	if round <= engine.currentRound {
-		return
-	}
-	engine.clearUncommittedHeightLocked(engine.height + 1)
-	engine.startRoundLocked(round)
+	engine.expireRoundLocked(height)
+	return engine.currentRound
 }
 
 // deriveCommitteeKeys builds the deterministic (t-of-n) BLS sharing for a
@@ -662,22 +659,35 @@ func (engine *Engine) expireRoundLocked(height uint64) {
 	engine.roundDeadline = time.Now().Add(engine.roundTimeout)
 }
 
+func (engine *Engine) hasUncommittedHeightLocked(height uint64) bool {
+	for key := range engine.proposals {
+		if key.Height == height {
+			return true
+		}
+	}
+	for key := range engine.votes {
+		if key.Height == height {
+			return true
+		}
+	}
+	return false
+}
+
 func (engine *Engine) acceptRoundLocked(round uint64) error {
 	switch {
 	case round < engine.currentRound:
-		return fmt.Errorf("stale proposal round %d, current round %d", round, engine.currentRound)
-	case round > engine.currentRound+1:
+		// A peer whose local timeout ran ahead while its view stayed idle may
+		// rejoin the authenticated leader's round. Never erase a higher view
+		// that already has evidence: a conflicting leader proposal cannot
+		// replace votes that may have accumulated toward a QC.
+		if engine.hasUncommittedHeightLocked(engine.height + 1) {
+			return fmt.Errorf("stale proposal round %d conflicts with current view %d", round, engine.currentRound)
+		}
+		engine.clearUncommittedHeightLocked(engine.height + 1)
+		engine.startRoundLocked(round)
+	case round > engine.currentRound+uint64(engine.params.Size):
 		return fmt.Errorf("proposal round %d skips ahead of current round %d", round, engine.currentRound)
-	case round == engine.currentRound+1:
-		// A next-round proposal is admissible only after the active view has
-		// timed out. Clearing both maps is essential: retaining the old
-		// height-only proposal was the liveness bug observed in production.
-		if engine.roundDeadline.IsZero() {
-			return fmt.Errorf("cannot advance to round %d without an active round-%d proposal", round, engine.currentRound)
-		}
-		if time.Now().Before(engine.roundDeadline) {
-			return fmt.Errorf("proposal round %d arrived before round %d deadline", round, engine.currentRound)
-		}
+	case round > engine.currentRound:
 		engine.clearUncommittedHeightLocked(engine.height + 1)
 	}
 	return nil
@@ -770,7 +780,11 @@ func (engine *Engine) Propose(transition model.StateTransition, round uint64) (P
 				return existing, vote, nil
 			}
 		}
-		return existing, engine.localVote(existing), nil
+		vote, err := engine.localVote(existing)
+		if err != nil {
+			return Proposal{}, Vote{}, fmt.Errorf("sign local vote at height %d round %d: %w", height, round, err)
+		}
+		return existing, vote, nil
 	}
 	next := cloneState(engine.current)
 	next.EngineCommittee = append([]model.CommitteeMember(nil), engine.committee...)
@@ -779,14 +793,17 @@ func (engine *Engine) Propose(transition model.StateTransition, round uint64) (P
 	}
 	next.EngineCommittee = nil
 	proposal := Proposal{Height: height, Round: round, NetworkID: next.NetworkID, State: next, LeaderID: leader.ID, Transition: transition}
-	vote := engine.localVote(proposal)
+	vote, err := engine.localVote(proposal)
+	if err != nil {
+		return Proposal{}, Vote{}, fmt.Errorf("sign proposal vote: %w", err)
+	}
 	engine.startRoundLocked(round)
 	engine.proposals[key] = proposal
 	engine.addVoteLocked(vote)
 	return proposal, vote, nil
 }
 
-func (engine *Engine) localVote(proposal Proposal) Vote {
+func (engine *Engine) localVote(proposal Proposal) (Vote, error) {
 	hash := StateHash(proposal.State)
 	vote := Vote{
 		Height: proposal.Height, Round: proposal.Round, NetworkID: proposal.NetworkID,
@@ -795,9 +812,9 @@ func (engine *Engine) localVote(proposal Proposal) Vote {
 		CommitteeEpoch: engine.committeeConfig.CommitteeEpoch,
 	}
 	if err := engine.signVoteShare(&vote); err != nil {
-		return vote
+		return vote, err
 	}
-	return vote
+	return vote, nil
 }
 
 func (engine *Engine) ProcessProposal(proposal Proposal) (Vote, error) {
@@ -812,12 +829,17 @@ func (engine *Engine) ProcessProposal(proposal Proposal) (Vote, error) {
 	if proposal.Height != engine.height+1 {
 		return Vote{}, fmt.Errorf("unexpected proposal height")
 	}
-	engine.expireRoundLocked(proposal.Height)
-	if err := engine.acceptRoundLocked(proposal.Round); err != nil {
-		return Vote{}, err
-	}
 	if proposal.LeaderID != engine.Leader(proposal.Height, proposal.Round).ID {
 		return Vote{}, ErrUnknownLeader
+	}
+	// Check view admissibility before the existing-proposal fast path. A lower
+	// round must not silently re-vote for its old proposal after a higher view
+	// has already collected evidence.
+	if proposal.Round < engine.currentRound && engine.hasUncommittedHeightLocked(engine.height+1) {
+		return Vote{}, fmt.Errorf("stale proposal round %d conflicts with current view %d", proposal.Round, engine.currentRound)
+	}
+	if proposal.Round > engine.currentRound+uint64(engine.params.Size) {
+		return Vote{}, fmt.Errorf("proposal round %d skips ahead of current round %d", proposal.Round, engine.currentRound)
 	}
 	key := proposalKey{Height: proposal.Height, Round: proposal.Round}
 	if existing, ok := engine.proposals[key]; ok {
@@ -841,9 +863,16 @@ func (engine *Engine) ProcessProposal(proposal Proposal) (Vote, error) {
 	if !bytes.Equal(StateHash(expected), StateHash(proposal.State)) {
 		return Vote{}, fmt.Errorf("proposal state does not match transition")
 	}
+	vote, err := engine.localVote(proposal)
+	if err != nil {
+		return Vote{}, fmt.Errorf("sign local vote at height %d round %d: %w", proposal.Height, proposal.Round, err)
+	}
+	engine.expireRoundLocked(proposal.Height)
+	if err := engine.acceptRoundLocked(proposal.Round); err != nil {
+		return Vote{}, err
+	}
 	engine.startRoundLocked(proposal.Round)
 	engine.proposals[key] = proposal
-	vote := engine.localVote(proposal)
 	engine.addVoteLocked(vote)
 	return vote, nil
 }

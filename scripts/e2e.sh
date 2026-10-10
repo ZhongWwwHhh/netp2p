@@ -16,7 +16,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-DOCKER=(sudo -n docker)
+if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
+  DOCKER=(docker)
+else
+  DOCKER=(sudo -n docker)
+fi
 COMPOSE=("${DOCKER[@]}" compose -f docker-compose.test.yml --env-file deploy/compose.env)
 IMAGE=netp2p-test:latest
 RUN_DIR=deploy/run
@@ -26,6 +30,7 @@ WITH_MULTIHOP=0
 WITH_QUOTA=0
 WITH_CHAOS=0
 ADMIN_TOKEN=netp2p-admin-v0
+METRICS_URL="${NETP2P_METRICS_URL:-http://127.0.0.1:9100/metrics}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -135,8 +140,12 @@ PY
 echo "MANAGER1_PEER_ID=$MANAGER1_PEER_ID" > deploy/compose.env
 echo "manager-1 peer id: $MANAGER1_PEER_ID"
 
-log "build image"
-"${DOCKER[@]}" build -t "$IMAGE" .
+if "${DOCKER[@]}" image inspect "$IMAGE" >/dev/null 2>&1; then
+  log "reuse image"
+else
+  log "build image"
+  "${DOCKER[@]}" build -t "$IMAGE" .
+fi
 
 log "start managers and clients"
 start_profiles=""
@@ -311,7 +320,7 @@ echo "OK: client-a status carries certified assignment data"
 log "manager metrics endpoint must be scrapable"
 metrics=""
 for _ in $(seq 1 20); do
-  metrics="$(curl -fsS http://127.0.0.1:9100/metrics 2>/dev/null || true)"
+  metrics="$(curl -fsS "$METRICS_URL" 2>/dev/null || true)"
   [ -n "$metrics" ] && break
   sleep 1
 done
@@ -361,7 +370,7 @@ PY
   else
     fail "client-a-tun could not reach $B_TUN_IP after forcing via-manager paths"
   fi
-  forwarded="$(curl -fsS http://127.0.0.1:9100/metrics 2>/dev/null | grep '^netp2p_forward_forwarded_total' || true)"
+  forwarded="$(curl -fsS "$METRICS_URL" 2>/dev/null | grep '^netp2p_forward_forwarded_total' || true)"
   echo "OK: manager forwarding metrics: ${forwarded:-<none>}"
 fi
 

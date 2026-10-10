@@ -369,6 +369,7 @@ func runManager(ctx context.Context, options managerOptions) error {
 		if err := startMetricsServer(ctx, options.metricsListen, collector.Handler()); err != nil {
 			return err
 		}
+		mesh.SetMetrics(collector)
 	}
 	// Alerts are always evaluated; without a webhook they are written to the
 	// structured log so an operator still sees a record of every transition.

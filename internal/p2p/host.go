@@ -8,10 +8,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/crypto"
@@ -302,6 +304,18 @@ func (node *Node) sendDirect(ctx context.Context, peerID peer.ID, id protocol.ID
 	// keeping the libp2p stream open for a response.
 	if fullStream, ok := stream.(interface{ CloseWrite() error }); ok {
 		_ = fullStream.CloseWrite()
+	}
+	if id == StateUpdateProtocol {
+		// Committee messages need delivery evidence, not merely a successful
+		// QUIC write. State-update handlers close their stream after validation
+		// and side effects, so EOF is the minimal stream-level acknowledgement.
+		_ = stream.SetReadDeadline(time.Now().Add(time.Second))
+		var ack [1]byte
+		if _, err := stream.Read(ack[:]); err == nil {
+			return fmt.Errorf("unexpected state-update response")
+		} else if !errors.Is(err, io.EOF) {
+			return fmt.Errorf("wait for state-update acknowledgement: %w", err)
+		}
 	}
 	return nil
 }
