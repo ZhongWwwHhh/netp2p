@@ -1,5 +1,5 @@
 import { session } from './session.svelte';
-import type { Alert, Presence, Snapshot, StateTransition } from '../types';
+import type { Alert, Presence, SetupKeyCreateInput, SetupKeyCreation, Snapshot, StateTransition } from '../types';
 
 // Certified state is the authoritative view. Writes replace it with the
 // snapshot returned by the committee, so the UI never shows uncommitted state.
@@ -86,6 +86,24 @@ export async function submit(transition: StateTransition): Promise<boolean> {
   } catch (caught) {
     network.error = caught instanceof Error ? caught.message : String(caught);
     return false;
+  } finally {
+    network.loading = false;
+  }
+}
+
+export async function createSetupKey(input: SetupKeyCreateInput): Promise<SetupKeyCreation | null> {
+  const client = session.client;
+  if (!client) return null;
+  network.loading = true;
+  network.error = '';
+  try {
+    const creation = await client.createSetupKey(input);
+    network.snapshot = creation.snapshot;
+    network.lastRefresh = Date.now();
+    return creation;
+  } catch (caught) {
+    network.error = caught instanceof Error ? caught.message : String(caught);
+    return null;
   } finally {
     network.loading = false;
   }

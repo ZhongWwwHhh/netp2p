@@ -6,7 +6,6 @@
   import TrustBadge from '../components/TrustBadge.svelte';
   import { shortHash, shortPeerId } from '../format';
   import { network, presenceFor } from '../stores/network.svelte';
-  import { QuorumSize } from '../quorum';
   import type { CommitteeMember } from '../types';
 
   const snapshot = $derived(network.snapshot);
@@ -31,10 +30,11 @@
     if (!snapshot || committee.length === 0) return '';
     return ordered[(snapshot.height + 1) % ordered.length]?.id ?? '';
   });
+  const quorumSize = $derived(snapshot?.committeeConfig?.threshold ?? committee.length);
 </script>
 
 <div class="space-y-5">
-  <PageHeader title="Committee" subtitle="The 4-manager BFT committee that certifies every state change." />
+  <PageHeader title="Committee" subtitle="The BFT committee that certifies every state change." />
 
   {#if snapshot}
     <div class="grid gap-4 md:grid-cols-4">
@@ -49,7 +49,7 @@
       <div class="surface p-4">
         <p class="text-xs uppercase tracking-wide text-slate-500">QC signers</p>
         <p class="mt-1 text-2xl font-semibold text-slate-900">{signed.size}/{committee.length}</p>
-        <p class="text-xs text-slate-500">quorum {QuorumSize}</p>
+        <p class="text-xs text-slate-500">quorum {quorumSize}</p>
       </div>
       <div class="surface p-4">
         <p class="text-xs uppercase tracking-wide text-slate-500">Next leader</p>

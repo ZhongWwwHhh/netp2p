@@ -4,20 +4,31 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 	collector := New()
 	collector.BFTHeight.Set(7)
+	collector.BFTLastCommitTime.Set(1770791724.25)
 	collector.Forwarded.Add(3)
 	collector.ForwardQueueDepth.Set(2)
 	collector.DNSFailures.Add(1)
+	collector.RecordSyncRequest()
+	collector.RecordSyncError()
+	collector.RecordSyncTimeout()
 
 	recorder := httptest.NewRecorder()
 	collector.Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))
 	body := recorder.Body.String()
 	if !strings.Contains(body, "netp2p_bft_height 7") {
 		t.Fatalf("height gauge missing from exposition:\n%s", body)
+	}
+	if !strings.Contains(body, "netp2p_bft_last_commit_timestamp_seconds") {
+		t.Fatalf("last commit timestamp missing from exposition:\n%s", body)
 	}
 	if !strings.Contains(body, "netp2p_forward_forwarded_total 3") {
 		t.Fatalf("forward counter missing from exposition:\n%s", body)
@@ -28,12 +39,69 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 	if !strings.Contains(body, "netp2p_dns_failures_total 1") {
 		t.Fatalf("dns failure counter missing from exposition:\n%s", body)
 	}
+	if !strings.Contains(body, "netp2p_sync_requests_total 1") ||
+		!strings.Contains(body, "netp2p_sync_errors_total 1") ||
+		!strings.Contains(body, "netp2p_sync_timeouts_total 1") {
+		t.Fatalf("sync counters missing from exposition:\n%s", body)
+	}
 	if !strings.Contains(body, "go_goroutines") {
 		t.Fatalf("go goroutine metric missing from exposition:\n%s", body)
 	}
 	if !strings.Contains(body, "process_resident_memory_bytes") {
 		t.Fatalf("process resident memory metric missing from exposition:\n%s", body)
 	}
+}
+
+func TestBFTCommitHelpers(t *testing.T) {
+	collector := New()
+	certifiedAt := time.Unix(1770791724, 500000000).UTC()
+
+	collector.RestoreBFTSnapshot(12, certifiedAt)
+	if got := gaugeValue(t, collector.BFTHeight); got != 12 {
+		t.Fatalf("restored height = %v, want 12", got)
+	}
+	if got := gaugeValue(t, collector.BFTLastCommitTime); got != 1770791724.5 {
+		t.Fatalf("restored timestamp = %v, want 1770791724.5", got)
+	}
+	if got := counterValue(t, collector.BFTCommits); got != 0 {
+		t.Fatalf("restore incremented commits to %v, want 0", got)
+	}
+
+	collector.PublishBFTCommit(13, certifiedAt.Add(time.Second))
+	if got := gaugeValue(t, collector.BFTHeight); got != 13 {
+		t.Fatalf("published height = %v, want 13", got)
+	}
+	if got := gaugeValue(t, collector.BFTLastCommitTime); got != 1770791725.5 {
+		t.Fatalf("published timestamp = %v, want 1770791725.5", got)
+	}
+	if got := counterValue(t, collector.BFTCommits); got != 1 {
+		t.Fatalf("published commits = %v, want 1", got)
+	}
+
+	var nilCollector *Metrics
+	nilCollector.RestoreBFTSnapshot(1, time.Now())
+	nilCollector.PublishBFTCommit(2, time.Now())
+	nilCollector.RecordSyncRequest()
+	nilCollector.RecordSyncError()
+	nilCollector.RecordSyncTimeout()
+}
+
+func gaugeValue(t *testing.T, gauge prometheus.Gauge) float64 {
+	t.Helper()
+	var metric dto.Metric
+	if err := gauge.Write(&metric); err != nil {
+		t.Fatal(err)
+	}
+	return metric.GetGauge().GetValue()
+}
+
+func counterValue(t *testing.T, counter prometheus.Counter) float64 {
+	t.Helper()
+	var metric dto.Metric
+	if err := counter.Write(&metric); err != nil {
+		t.Fatal(err)
+	}
+	return metric.GetCounter().GetValue()
 }
 
 func TestRegistriesAreIsolated(t *testing.T) {

@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { multiaddr } from '@multiformats/multiaddr';
 import { bitrateLabel, bytesLabel, percent, relativeTime, shortPeerId } from './lib/format';
+import { bootstrapAddresses } from './lib/libp2p';
 import { normalizePresence, normalizeSnapshot } from './lib/normalize';
 import { httpResource, joinProtocolPath } from './lib/paths';
-import { QuorumSize, signerCount } from './lib/quorum';
+import { CommitteeSize, FaultLimit, QuorumSize, signerCount } from './lib/quorum';
 import { defaultPath, routeTitle, routes } from './lib/router.svelte';
 import type { Presence, Snapshot, StateTransition } from './lib/types';
 import { verifySnapshot } from './lib/verifier';
@@ -42,7 +43,7 @@ function baseSnapshot(): Snapshot {
     height: 1,
     stateHash: 'hash',
     state: { ...emptyState },
-    committee: committee(4),
+    committee: committee(3),
     qc: {
       height: 1,
       round: 0,
@@ -52,7 +53,7 @@ function baseSnapshot(): Snapshot {
       signerBitmap: [0b00000111],
       committeeEpoch: 0,
     },
-    committeeConfig: { threshold: 3, size: 4, groupPublicKey: 'pub', committeeEpoch: 0 },
+    committeeConfig: { threshold: 3, size: 3, groupPublicKey: 'pub', committeeEpoch: 0 },
     transition: { type: 'upsert_group', group: { id: 'g' } },
     leaderId: 'manager-2',
   };
@@ -72,6 +73,37 @@ describe('protocol path construction', () => {
     expect(resource.toString()).toContain(
       '/http-path/netp2p%2Fweb-api%2F1.0.0%2Fapi%2Fv1%2Fsnapshot',
     );
+  });
+});
+
+describe('manager bootstrap addresses', () => {
+  it('uses advertised public DNS endpoints without browser-side address rewriting', () => {
+    const advertised = '/dns4/manager-1.netp2p.example/udp/4101/webrtc-direct/p2p/manager';
+    const addresses = bootstrapAddresses({
+      peerId: 'manager',
+      publicKey: 'key',
+      webrtcAddresses: [advertised],
+      apiProtocol: '/netp2p/web-api/3.0.0',
+      apiBase: '/api/v1',
+      networkId: 'net',
+      version: 'v0.1.0',
+      committee: [],
+    });
+
+    expect(addresses.map((address) => address.toString())).toEqual([advertised]);
+  });
+
+  it('rejects bootstrap data without a manager endpoint', () => {
+    expect(() => bootstrapAddresses({
+      peerId: 'manager',
+      publicKey: 'key',
+      webrtcAddresses: [],
+      apiProtocol: '/netp2p/web-api/3.0.0',
+      apiBase: '/api/v1',
+      networkId: 'net',
+      version: 'v0.1.0',
+      committee: [],
+    })).toThrow(/did not advertise/);
   });
 });
 
@@ -166,6 +198,8 @@ describe('snapshot verifier', () => {
   it('accepts a well-formed quorum of known signers', () => {
     expect(verifySnapshot(baseSnapshot())).toBe(true);
     expect(QuorumSize).toBe(3);
+    expect(CommitteeSize).toBe(3);
+    expect(FaultLimit).toBe(0);
   });
 
   it('counts contributing shares from the signer bitmap', () => {

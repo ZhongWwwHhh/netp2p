@@ -372,6 +372,26 @@ message SyncRequest {
   string protocol_version = 6;
 }
 
+message SyncHeartbeat {
+  string network_id = 1;
+  uint64 height = 2;
+  bool degraded = 3;
+  int64 server_time_unix_ms = 4;
+}
+
+message SyncError {
+  string code = 1;
+  string message = 2;
+}
+
+message SyncResponse {
+  oneof response {
+    SignedSnapshot snapshot = 1;
+    SyncHeartbeat heartbeat = 2;
+    SyncError error = 3;
+  }
+}
+
 message AdmissionReport {
   string assignment_id = 1;
   string path_id = 2;

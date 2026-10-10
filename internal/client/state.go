@@ -63,6 +63,7 @@ type ClientManagerStatus struct {
 	ManagerEndpoint string
 	LastError       string
 	SnapshotHeight  uint64
+	NextAction      string
 }
 
 // persistedClientState is the local recovery record. The snapshot was fully
@@ -465,7 +466,30 @@ func (client *Client) ManagerStatus() ClientManagerStatus {
 	return ClientManagerStatus{
 		State: client.connectionState, ActiveManager: client.manager.ID,
 		ManagerEndpoint: client.managerAddress(), LastError: client.lastManagerError,
-		SnapshotHeight: client.snapshot.Height,
+		SnapshotHeight: client.snapshot.Height, NextAction: client.nextActionLocked(),
+	}
+}
+
+// NextAction gives diagnostics and the doctor a concrete operator-facing next
+// step instead of leaving them to infer one from a warning list.
+func (client *Client) NextAction() string {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	return client.nextActionLocked()
+}
+
+func (client *Client) nextActionLocked() string {
+	switch client.connectionState {
+	case ClientStateReady:
+		return "No action required."
+	case ClientStateDegraded:
+		return "Run netp2p doctor and restore manager connectivity; the persisted certified state remains usable."
+	case ClientStateNeedsLogin:
+		return "Run netp2p login with a valid setup key or SSO account."
+	case ClientStateFailed:
+		return "Run netp2p doctor, fix the reported manager or local failure, then retry login."
+	default:
+		return "Run netp2p doctor to identify the client state."
 	}
 }
 
@@ -494,6 +518,24 @@ func (client *Client) markManagerRequestFailure(err error) {
 	} else {
 		client.connectionState = ClientStateFailed
 	}
+	client.mu.Unlock()
+}
+
+func (client *Client) markSyncError(err *SyncError) {
+	message := "sync failed"
+	if err != nil && err.Error() != "" {
+		message = err.Error()
+	}
+	state := ClientStateFailed
+	if client.SnapshotHeight() > 0 {
+		state = ClientStateDegraded
+	}
+	if err != nil && (err.Code == "peer_removed" || err.Code == "network_mismatch") {
+		state = ClientStateNeedsLogin
+	}
+	client.mu.Lock()
+	client.lastManagerError = message
+	client.connectionState = state
 	client.mu.Unlock()
 }
 

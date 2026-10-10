@@ -29,6 +29,9 @@ const (
 	defaultProbeTimeout    = 2000 * time.Millisecond
 	defaultBandwidthBudget = 128 * 1024
 	minBandwidthBurst      = 32 * 1024
+	// Keep sub-millisecond local bursts from becoming an unbounded estimate
+	// when the platform clock reports the transfer as instantaneous.
+	minBandwidthSample     = time.Millisecond
 	maxProbeFrame          = 1 << 20
 	maxProbeBurst          = 4 << 20
 	probeResponderDeadline = 30 * time.Second
@@ -278,7 +281,11 @@ func (prober *Prober) bandwidth(ctx context.Context, target peer.ID, timeout tim
 	if err != nil {
 		return 0, 0, err
 	}
-	return time.Since(start), reply.ReceivedBytes, nil
+	elapsed := time.Since(start)
+	if elapsed < minBandwidthSample {
+		elapsed = minBandwidthSample
+	}
+	return elapsed, reply.ReceivedBytes, nil
 }
 
 func (prober *Prober) openProbeStream(ctx context.Context, target peer.ID, timeout time.Duration) (network.Stream, error) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -129,6 +130,9 @@ func buildTransition(action, file, target string) (model.StateTransition, error)
 		if err := loadRecord(file, &record); err != nil {
 			return transition, err
 		}
+		if err := normalizeSetupKey(&record); err != nil {
+			return transition, err
+		}
 		transition.Record = &record
 	case "remove-setup-key":
 		transition.Type = bft.TransitionRemoveSetupKey
@@ -183,6 +187,18 @@ func buildTransition(action, file, target string) (model.StateTransition, error)
 		return transition, fmt.Errorf("--file or --target is required for action %q", action)
 	}
 	return transition, nil
+}
+
+func normalizeSetupKey(record *model.SetupKey) error {
+	token := strings.TrimSpace(record.Token)
+	if token == "" && len(record.TokenHash) == 0 {
+		return fmt.Errorf("setup key requires token or tokenHash")
+	}
+	record.Token = ""
+	if token != "" {
+		record.TokenHash = model.SetupKeyHash(token)
+	}
+	return nil
 }
 
 func loadRecord(path string, value any) error {

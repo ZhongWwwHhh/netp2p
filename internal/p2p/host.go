@@ -27,6 +27,10 @@ import (
 // Version is the protocol revision embedded in every libp2p protocol id.
 const Version = version.ProtocolVersion
 
+// SyncVersion changes only the sync framing. The response became a oneof in
+// 3.1.0, so old clients must negotiate to a different protocol ID.
+const SyncVersion = "3.1.0"
+
 const ProtocolPrefix = "/netp2p"
 
 const (
@@ -39,7 +43,7 @@ const (
 
 var (
 	LoginProtocol       = protocol.ID(ProtocolPrefix + "/control/login/" + Version)
-	SyncProtocol        = protocol.ID(ProtocolPrefix + "/control/sync/" + Version)
+	SyncProtocol        = protocol.ID(ProtocolPrefix + "/control/sync/" + SyncVersion)
 	StateUpdateProtocol = protocol.ID(ProtocolPrefix + "/control/state-update/" + Version)
 	ProbeProtocol       = protocol.ID(ProtocolPrefix + "/link/probe/" + Version)
 	FrameProtocol       = protocol.ID(ProtocolPrefix + "/data/frame/" + Version)

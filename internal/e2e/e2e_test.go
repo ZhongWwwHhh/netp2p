@@ -104,6 +104,19 @@ func probeDrivenState() model.NetworkState {
 	return state
 }
 
+func bidirectionalDirectState() model.NetworkState {
+	state := testState()
+	state.Policies = []model.Policy{{
+		ID:                "allow-clients-icmp",
+		SourceGroups:      []string{"clients-a", "clients-b"},
+		DestinationGroups: []string{"clients-a", "clients-b"},
+		Services:          []model.Service{{Protocol: "icmp"}},
+		Effect:            model.EffectAllow,
+		Direction:         model.DirectionBidirectional,
+	}}
+	return state
+}
+
 func newClusterWithConfig(t *testing.T, state model.NetworkState, config manager.Config) *cluster {
 	return newClusterWithHook(t, state, config, nil)
 }
@@ -324,6 +337,28 @@ func TestOverlayProbeRespectsPolicy(t *testing.T) {
 
 	if _, err := probe(t, sinkB, overlayB, overlayA, 2*time.Second); err == nil {
 		t.Fatal("B->A probe succeeded despite deny policy")
+	}
+}
+
+func TestDirectOverlayProbeIsBidirectional(t *testing.T) {
+	group := newCluster(t, bidirectionalDirectState())
+	address := group.members[0].Address
+
+	clientA, sinkA := newTestClient(t, 203, address, keyA)
+	clientB, sinkB := newTestClient(t, 204, address, keyB)
+	waitForPeers(t, clientA, 2)
+	waitForPeers(t, clientB, 2)
+
+	overlayA := clientA.Self().OverlayIP
+	overlayB := clientB.Self().OverlayIP
+
+	ok, err := probe(t, sinkA, overlayA, overlayB, 5*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("A->B direct probe failed: ok=%v err=%v", ok, err)
+	}
+	ok, err = probe(t, sinkB, overlayB, overlayA, 5*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("B->A direct probe failed: ok=%v err=%v", ok, err)
 	}
 }
 

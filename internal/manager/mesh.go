@@ -323,8 +323,11 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if err != nil || !ready {
 			return
 		}
-		proposal, ok := mesh.engine.Proposal(qc.Height)
+		proposal, ok := mesh.engine.CurrentProposal()
 		if !ok {
+			return
+		}
+		if proposal.Height != qc.Height || proposal.Round != qc.Round {
 			return
 		}
 		snapshot, err := mesh.engine.Commit(proposal, qc)
@@ -408,8 +411,8 @@ func (mesh *CommitteeMesh) adoptSnapshot(snapshot model.SignedSnapshot) error {
 	if snapshot.Height <= mesh.engine.Height() {
 		return fmt.Errorf("stale snapshot at height %d", snapshot.Height)
 	}
-	proposal, ok := mesh.engine.Proposal(snapshot.Height)
-	if !ok {
+	proposal, ok := mesh.engine.CurrentProposal()
+	if !ok || proposal.Height != snapshot.Height || proposal.Round != snapshot.QC.Round {
 		return mesh.engine.CatchUp(snapshot)
 	}
 	_, err := mesh.engine.Commit(proposal, snapshot.QC)
@@ -418,9 +421,18 @@ func (mesh *CommitteeMesh) adoptSnapshot(snapshot model.SignedSnapshot) error {
 
 func (mesh *CommitteeMesh) proposeLocal(transition model.StateTransition, round uint64) {
 	height := mesh.engine.Height() + 1
-	if _, exists := mesh.engine.Proposal(height); exists {
-		log.Printf("committee already has a proposal at height %d, skipping", height)
-		return
+	if existing, exists := mesh.engine.CurrentProposal(); exists && existing.Height == height {
+		if existing.Round == round {
+			log.Printf("committee already has a proposal at height %d round %d, skipping", height, round)
+			return
+		}
+		if existing.Round > round {
+			log.Printf("committee proposal at height %d round %d is newer than round %d, skipping", height, existing.Round, round)
+			return
+		}
+		log.Printf("committee replacing stale proposal at height %d round %d with round %d", height, existing.Round, round)
+	} else if exists {
+		log.Printf("committee discarding stale proposal at height %d round %d for height %d round %d", existing.Height, existing.Round, height, round)
 	}
 	// Propose records the leader's own vote internally, so a quorum is reached
 	// when the outstanding peer votes arrive. Calling ProcessVote on the local
@@ -428,7 +440,7 @@ func (mesh *CommitteeMesh) proposeLocal(transition model.StateTransition, round 
 	// deletes the proposal.
 	proposal, _, err := mesh.engine.Propose(transition, round)
 	if err != nil {
-		log.Printf("committee propose failed: %v", err)
+		log.Printf("committee propose failed at height %d round %d: %v", height, round, err)
 		return
 	}
 	mesh.broadcast(model.CommitteeEnvelope{Type: "proposal", Proposal: &proposal})
@@ -532,7 +544,10 @@ func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.Signe
 				continue
 			}
 		}
-		roundDeadline := time.After(2 * time.Second)
+		// Followers start their deadline when a proposal arrives. Leave a
+		// margin over the engine timeout so the next-round proposal cannot win
+		// a race against the last follower's local deadline.
+		roundDeadline := time.After(mesh.engine.RoundTimeout() + time.Second)
 		rotating := true
 		for rotating {
 			select {

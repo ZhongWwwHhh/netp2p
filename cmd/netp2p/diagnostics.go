@@ -157,8 +157,10 @@ func runDoctor(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var payload struct {
-		Version string `json:"version"`
-		Checks  []struct {
+		Version    string `json:"version"`
+		State      string `json:"state"`
+		NextAction string `json:"nextAction"`
+		Checks     []struct {
 			Name   string `json:"name"`
 			OK     bool   `json:"ok"`
 			Detail string `json:"detail"`
@@ -170,6 +172,9 @@ func runDoctor(args []string) error {
 	fmt.Printf("netp2pd %s\n", payload.Version)
 	for _, check := range payload.Checks {
 		printCheck(check.Name, check.Detail, nil)
+	}
+	if payload.NextAction != "" {
+		fmt.Printf("next action      %s\n", payload.NextAction)
 	}
 	return nil
 }

@@ -347,6 +347,29 @@ func (store *Store) LatestSnapshot() (model.SignedSnapshot, bool, error) {
 	return snapshot, true, nil
 }
 
+// LatestCertifiedAt returns the durable commit timestamp for the latest
+// snapshot. Metrics need this separately because SignedSnapshot intentionally
+// carries no local database metadata.
+func (store *Store) LatestCertifiedAt() (time.Time, bool, error) {
+	if store == nil || store.db == nil {
+		return time.Time{}, false, fmt.Errorf("store is closed")
+	}
+	var encoded string
+	err := store.db.QueryRow(`
+		SELECT certified_at FROM certified_snapshots ORDER BY height DESC LIMIT 1`).Scan(&encoded)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("query latest certified time: %w", err)
+	}
+	certifiedAt, err := time.Parse(time.RFC3339Nano, encoded)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("decode latest certified time: %w", err)
+	}
+	return certifiedAt.UTC(), true, nil
+}
+
 // HasLedger reports whether at least one certified snapshot is stored.
 func (store *Store) HasLedger() (bool, error) {
 	if store == nil || store.db == nil {

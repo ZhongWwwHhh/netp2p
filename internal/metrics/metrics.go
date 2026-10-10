@@ -4,6 +4,7 @@ package metrics
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -18,10 +19,13 @@ type Metrics struct {
 	BFTHeight         prometheus.Gauge
 	BFTCommits        prometheus.Counter
 	BFTRejected       prometheus.Counter
+	BFTLastCommitTime prometheus.Gauge
 	Forwarded         prometheus.Counter
 	ForwardDrops      prometheus.Counter
 	ForwardQueueDepth prometheus.Gauge
 	SyncRequests      prometheus.Counter
+	SyncErrors        prometheus.Counter
+	SyncTimeouts      prometheus.Counter
 	QuotaBlocked      prometheus.Counter
 	DNSFailures       prometheus.Counter
 	CertifiedPeers    prometheus.Gauge
@@ -41,6 +45,10 @@ func New() *Metrics {
 		BFTCommits: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_bft_commits_total", Help: "Number of committed heights observed locally.",
 		}),
+		BFTLastCommitTime: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "netp2p_bft_last_commit_timestamp_seconds",
+			Help: "Unix timestamp of the latest certified height known to this process.",
+		}),
 		BFTRejected: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_bft_rejected_total", Help: "Number of rejected votes or certificates.",
 		}),
@@ -55,6 +63,12 @@ func New() *Metrics {
 		}),
 		SyncRequests: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_sync_requests_total", Help: "Client sync requests served.",
+		}),
+		SyncErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "netp2p_sync_errors_total", Help: "Client sync requests that failed validation or response writes.",
+		}),
+		SyncTimeouts: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "netp2p_sync_timeouts_total", Help: "Client sync long polls closed at the session lifetime limit.",
 		}),
 		QuotaBlocked: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_quota_blocked_packets_total", Help: "Packets dropped because a budget was exhausted.",
@@ -73,14 +87,60 @@ func New() *Metrics {
 		}),
 	}
 	registry.MustRegister(
-		metrics.BFTHeight, metrics.BFTCommits, metrics.BFTRejected,
-		metrics.Forwarded, metrics.ForwardDrops, metrics.SyncRequests,
+		metrics.BFTHeight, metrics.BFTCommits, metrics.BFTRejected, metrics.BFTLastCommitTime,
+		metrics.Forwarded, metrics.ForwardDrops, metrics.SyncRequests, metrics.SyncErrors, metrics.SyncTimeouts,
 		metrics.QuotaBlocked, metrics.CertifiedPeers, metrics.LinkSegments,
 		metrics.LinkConfidence, metrics.ForwardQueueDepth, metrics.DNSFailures,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return metrics
+}
+
+// RestoreBFTSnapshot initializes gauges after a manager restart. It does not
+// increment commit counters: those describe commits observed by this process.
+func (metrics *Metrics) RestoreBFTSnapshot(height uint64, certifiedAt time.Time) {
+	if metrics == nil {
+		return
+	}
+	metrics.BFTHeight.Set(float64(height))
+	if !certifiedAt.IsZero() {
+		metrics.BFTLastCommitTime.Set(unixSeconds(certifiedAt))
+	}
+}
+
+// PublishBFTCommit records a newly observed certified height.
+func (metrics *Metrics) PublishBFTCommit(height uint64, committedAt time.Time) {
+	if metrics == nil {
+		return
+	}
+	metrics.RestoreBFTSnapshot(height, committedAt)
+	metrics.BFTCommits.Inc()
+}
+
+func (metrics *Metrics) RecordSyncRequest() {
+	if metrics == nil {
+		return
+	}
+	metrics.SyncRequests.Inc()
+}
+
+func (metrics *Metrics) RecordSyncError() {
+	if metrics == nil {
+		return
+	}
+	metrics.SyncErrors.Inc()
+}
+
+func (metrics *Metrics) RecordSyncTimeout() {
+	if metrics == nil {
+		return
+	}
+	metrics.SyncTimeouts.Inc()
+}
+
+func unixSeconds(timestamp time.Time) float64 {
+	return float64(timestamp.UnixNano()) / float64(time.Second)
 }
 
 // Handler serves the Prometheus exposition format.

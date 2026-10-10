@@ -29,14 +29,17 @@ func newTestServer() *Server {
 }
 
 type fakeAccountDirectory struct {
-	users  []model.User
-	groups []model.Group
+	users     []model.User
+	groups    []model.Group
+	setupKeys []model.SetupKey
 }
 
 func (fake *fakeAccountDirectory) Users() []model.User { return fake.users }
 
 func (fake *fakeAccountDirectory) Snapshot() model.SignedSnapshot {
-	return model.SignedSnapshot{State: model.NetworkState{Users: fake.users, Groups: fake.groups}}
+	return model.SignedSnapshot{State: model.NetworkState{
+		Users: fake.users, Groups: fake.groups, SetupKeys: fake.setupKeys,
+	}}
 }
 
 func (fake *fakeAccountDirectory) SubmitAs(
@@ -47,6 +50,11 @@ func (fake *fakeAccountDirectory) SubmitAs(
 	}
 	if transition.User != nil {
 		fake.users = append(fake.users, *transition.User)
+	}
+	if transition.Record != nil {
+		record := *transition.Record
+		record.Token = ""
+		fake.setupKeys = append(fake.setupKeys, record)
 	}
 	return fake.Snapshot(), nil
 }
@@ -124,6 +132,139 @@ func TestBootstrapHandlerHealthz(t *testing.T) {
 	server.BootstrapHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "ok") {
 		t.Fatalf("healthz status %d body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestBootstrapHandlerReadyzWithoutManager(t *testing.T) {
+	server := newTestServer()
+	recorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz status = %d body %q, want 503", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "manager is unavailable") {
+		t.Fatalf("readyz body %q missing reason", recorder.Body.String())
+	}
+}
+
+func TestBootstrapHandlerReadyzReady(t *testing.T) {
+	server := newTestServer()
+	server.readinessFunc = func() ReadinessStatus {
+		return ReadinessStatus{
+			Status:          "ready",
+			Height:          14,
+			CommitteeOnline: 3,
+			CommitteeSize:   3,
+			QuorumSize:      3,
+			LedgerReady:     true,
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("readyz status %d body %q", recorder.Code, recorder.Body.String())
+	}
+	var status ReadinessStatus
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Height != 14 || status.CommitteeOnline != 3 ||
+		!status.LedgerReady || status.Degraded || status.Status != "ready" {
+		t.Fatalf("readiness = %+v", status)
+	}
+	if status.Reasons == nil {
+		t.Fatal("readiness reasons must serialize as an empty JSON array")
+	}
+	if cache := recorder.Header().Get("Cache-Control"); cache != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cache)
+	}
+}
+
+func TestBootstrapHandlerReadyzDegraded(t *testing.T) {
+	server := newTestServer()
+	server.readinessFunc = func() ReadinessStatus {
+		return ReadinessStatus{
+			Status:          "degraded",
+			Height:          14,
+			CommitteeOnline: 2,
+			CommitteeSize:   3,
+			QuorumSize:      3,
+			LedgerReady:     true,
+			Degraded:        true,
+			Reasons:         []string{"committee quorum is unavailable"},
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz status %d body %q", recorder.Code, recorder.Body.String())
+	}
+	var status ReadinessStatus
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.CommitteeOnline != 2 || !status.Degraded || len(status.Reasons) != 1 {
+		t.Fatalf("readiness = %+v", status)
+	}
+
+	healthRecorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(healthRecorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if healthRecorder.Code != http.StatusOK {
+		t.Fatalf("healthz followed readiness state: status %d body %q",
+			healthRecorder.Code, healthRecorder.Body.String())
+	}
+}
+
+func TestBootstrapHandlerReadyzRequiresGET(t *testing.T) {
+	server := newTestServer()
+	recorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/readyz", nil))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("readyz status %d body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestSetupKeyCreationReturnsTokenOnce(t *testing.T) {
+	server, accounts, _ := newLocalAuthTestServer(t)
+	accounts.groups = append(accounts.groups, model.Group{ID: "clients"})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup-keys", strings.NewReader(`{
+		"name":"workstations","type":"one-off","groups":["clients"],"expiresAt":"7d"
+	}`))
+	request.Header.Set("Authorization", "Bearer secret")
+	recorder := httptest.NewRecorder()
+	server.handleAPI(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body %q, want 200", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Token    string               `json:"token"`
+		Snapshot model.SignedSnapshot `json:"snapshot"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(response.Token, "netp2p-sk-") || len(response.Token) < 40 {
+		t.Fatalf("token = %q, want a long netp2p-sk token", response.Token)
+	}
+	if len(accounts.setupKeys) != 1 {
+		t.Fatalf("certified setup keys = %d, want 1", len(accounts.setupKeys))
+	}
+	stored := accounts.setupKeys[0]
+	if stored.Token != "" || len(stored.TokenHash) == 0 ||
+		!bytes.Equal(stored.TokenHash, model.SetupKeyHash(response.Token)) {
+		t.Fatalf("stored key = %+v, want verifier only", stored)
+	}
+	expiresAt, err := time.Parse(time.RFC3339, stored.ExpiresAt)
+	if err != nil {
+		t.Fatalf("parse setup key expiry: %v", err)
+	}
+	untilExpiry := expiresAt.Sub(time.Now())
+	if stored.UsageLimit != 1 || untilExpiry < 6*24*time.Hour || untilExpiry > 8*24*time.Hour {
+		t.Fatalf("stored key limits/expiry = %d/%q", stored.UsageLimit, stored.ExpiresAt)
+	}
+	if len(response.Snapshot.State.SetupKeys) != 1 || response.Snapshot.State.SetupKeys[0].TokenHash != nil {
+		t.Fatalf("client snapshot setup keys = %+v, want redacted key", response.Snapshot.State.SetupKeys)
 	}
 }
 

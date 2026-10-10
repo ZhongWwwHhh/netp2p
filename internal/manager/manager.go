@@ -54,6 +54,11 @@ type Manager struct {
 	waiters        map[chan model.SignedSnapshot]struct{}
 }
 
+var (
+	syncHeartbeatInterval = 10 * time.Second
+	syncMaxLifetime       = 10 * time.Minute
+)
+
 // Config wires optional capabilities into the manager.
 type Config struct {
 	// SSO, when set, verifies ID tokens for peer and console logins.
@@ -62,6 +67,9 @@ type Config struct {
 	Forwarding bool
 	// Metrics, when set, receives operational counters and gauges.
 	Metrics *metrics.Metrics
+	// InitialCertifiedAt restores the last commit timestamp after process
+	// restart. It comes from SQLite and is not part of the signed snapshot.
+	InitialCertifiedAt time.Time
 	// Alerts, when set, evaluates local operational rules on a timer.
 	Alerts *alerts.Alerter
 }
@@ -98,6 +106,10 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 	node.Handle(p2p.SyncProtocol, manager.handleSync)
 	node.Handle(p2p.QuotaProtocol, manager.handleQuotaReport)
 	engine.OnCommit(manager.onCommit)
+	if snapshot, exists := engine.LatestSnapshot(); exists && manager.metrics != nil {
+		manager.metrics.RestoreBFTSnapshot(snapshot.Height, config.InitialCertifiedAt)
+		manager.metrics.CertifiedPeers.Set(float64(len(snapshot.State.Peers)))
+	}
 	return manager
 }
 
@@ -289,6 +301,12 @@ func (manager *Manager) Committee() []model.CommitteeMember {
 	return manager.engine.CommitteeMembers()
 }
 
+// CommitteeParams exposes the certified threshold configuration to callers
+// outside the BFT package.
+func (manager *Manager) CommitteeParams() model.CommitteeParams {
+	return manager.engine.CommitteeParams()
+}
+
 // Users returns the certified user records.
 func (manager *Manager) Users() []model.User {
 	return manager.engine.CurrentState().Users
@@ -425,24 +443,51 @@ func (manager *Manager) handleSync(stream network.Stream) {
 	}
 	envelope, err := p2p.DecodeEnvelope(stream)
 	if err != nil {
+		manager.metrics.RecordSyncError()
 		return
 	}
 	var syncMessage pb.SyncRequest
 	if err := proto.Unmarshal(envelope.Payload, &syncMessage); err != nil {
+		manager.metrics.RecordSyncError()
 		return
 	}
 	request := wire.SyncRequestFromProto(&syncMessage)
+	manager.metrics.RecordSyncRequest()
+	writeSyncError := func(code, message string) {
+		manager.metrics.RecordSyncError()
+		if err := writeSyncErrorResponse(stream, code, message); err != nil {
+			manager.metrics.RecordSyncError()
+		}
+	}
 	if request.ProtocolVersion != version.ProtocolVersion {
+		writeSyncError("protocol_mismatch", fmt.Sprintf(
+			"protocol version mismatch: manager %s, client %s", version.ProtocolVersion, request.ProtocolVersion,
+		))
 		return
 	}
 	if request.PeerID != stream.Conn().RemotePeer().String() {
+		writeSyncError("peer_mismatch", "sync peer id does not match stream peer")
+		return
+	}
+	if networkID := manager.engine.CurrentState().NetworkID; request.NetworkID == "" || request.NetworkID != networkID {
+		writeSyncError("network_mismatch", fmt.Sprintf(
+			"sync network %q does not match manager network %q", request.NetworkID, networkID,
+		))
 		return
 	}
 	manager.presence.Observe(request.PeerID, stream.Conn().RemoteMultiaddr().String(), manager.engine.LocalID())
 	manager.observeAdmissions(request.PeerID, request.Admissions)
+	networkID := manager.engine.CurrentState().NetworkID
 	snapshot := manager.Snapshot()
+	heartbeatHeight := snapshot.Height
+	if heartbeatHeight == 0 {
+		heartbeatHeight = manager.engine.Height()
+	}
 	if snapshot.Height > request.Height {
-		writeSnapshot(stream, snapshot)
+		if err := writeSyncSnapshot(stream, snapshot); err != nil {
+			manager.metrics.RecordSyncError()
+			stream.Reset()
+		}
 		return
 	}
 	waiter := make(chan model.SignedSnapshot, 1)
@@ -454,12 +499,49 @@ func (manager *Manager) handleSync(stream network.Stream) {
 		delete(manager.waiters, waiter)
 		manager.mu.Unlock()
 	}()
-	waitContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	select {
-	case snapshot := <-waiter:
-		writeSnapshot(stream, snapshot)
-	case <-waitContext.Done():
+	streamContext, cancelStreamContext := context.WithCancel(context.Background())
+	defer cancelStreamContext()
+	go monitorSyncStream(stream, streamContext, cancelStreamContext)
+	ticker := time.NewTicker(syncHeartbeatInterval)
+	defer ticker.Stop()
+	lifetime := time.NewTimer(syncMaxLifetime)
+	defer lifetime.Stop()
+	for {
+		select {
+		case snapshot := <-waiter:
+			if err := writeSyncSnapshot(stream, snapshot); err != nil {
+				manager.metrics.RecordSyncError()
+				stream.Reset()
+			}
+			return
+		case <-ticker.C:
+			if err := writeSyncHeartbeat(stream, networkID, heartbeatHeight); err != nil {
+				manager.metrics.RecordSyncError()
+				stream.Reset()
+				return
+			}
+		case <-lifetime.C:
+			manager.metrics.RecordSyncTimeout()
+			return
+		case <-streamContext.Done():
+			return
+		}
+	}
+}
+
+func monitorSyncStream(stream network.Stream, ctx context.Context, cancel context.CancelFunc) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if stream.Conn().IsClosed() {
+				cancel()
+				return
+			}
+		}
 	}
 }
 
@@ -623,8 +705,7 @@ func (manager *Manager) publishMetrics(snapshot model.SignedSnapshot) {
 	if manager.metrics == nil {
 		return
 	}
-	manager.metrics.BFTHeight.Set(float64(snapshot.Height))
-	manager.metrics.BFTCommits.Inc()
+	manager.metrics.PublishBFTCommit(snapshot.Height, time.Now())
 	manager.metrics.CertifiedPeers.Set(float64(len(snapshot.State.Peers)))
 	if manager.forwarding != nil {
 		manager.metrics.ForwardQueueDepth.Set(float64(manager.forwarding.QueueDepth()))
@@ -658,9 +739,30 @@ func (manager *Manager) respond(stream network.Stream, id libprotocol.ID, respon
 	}
 }
 
-func writeSnapshot(stream network.Stream, snapshot model.SignedSnapshot) {
+func writeSyncSnapshot(stream network.Stream, snapshot model.SignedSnapshot) error {
 	snapshot = model.ClientSnapshot(snapshot)
-	if err := p2p.WriteMessage(stream, p2p.SyncProtocol, wire.SignedSnapshotToProto(snapshot)); err != nil {
+	return p2p.WriteMessage(stream, p2p.SyncProtocol, &pb.SyncResponse{
+		Response: &pb.SyncResponse_Snapshot{Snapshot: wire.SignedSnapshotToProto(snapshot)},
+	})
+}
+
+func writeSyncHeartbeat(stream network.Stream, networkID string, height uint64) error {
+	return p2p.WriteMessage(stream, p2p.SyncProtocol, &pb.SyncResponse{
+		Response: &pb.SyncResponse_Heartbeat{Heartbeat: &pb.SyncHeartbeat{
+			NetworkId:        networkID,
+			Height:           height,
+			Degraded:         false,
+			ServerTimeUnixMs: time.Now().UTC().UnixMilli(),
+		}},
+	})
+}
+
+func writeSyncErrorResponse(stream network.Stream, code, message string) error {
+	if err := p2p.WriteMessage(stream, p2p.SyncProtocol, &pb.SyncResponse{
+		Response: &pb.SyncResponse_Error{Error: &pb.SyncError{Code: code, Message: message}},
+	}); err != nil {
 		stream.Reset()
+		return err
 	}
+	return nil
 }

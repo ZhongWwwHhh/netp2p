@@ -3,12 +3,12 @@ import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { identify } from '@libp2p/identify';
 import { http } from '@libp2p/http';
 import { webRTCDirect } from '@libp2p/webrtc';
-import { multiaddr } from '@multiformats/multiaddr';
+import { multiaddr, type Multiaddr } from '@multiformats/multiaddr';
 import { normalizePresence, normalizeSnapshot } from './normalize';
 import { httpResource, joinProtocolPath, resolveProtocolBasePath } from './paths';
 import type {
   ActivityEntry, AdmissionReport, Alert, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
-  SessionInfo, Snapshot, StateTransition, User,
+  SessionInfo, SetupKeyCreateInput, SetupKeyCreation, Snapshot, StateTransition, User,
 } from './types';
 
 export async function createConsoleNode() {
@@ -19,22 +19,19 @@ export async function createConsoleNode() {
   });
 }
 
+export function bootstrapAddresses(bootstrap: Bootstrap): Multiaddr[] {
+  const addresses = bootstrap.webrtcAddresses.map((address) => multiaddr(address));
+  if (addresses.length === 0) {
+    throw new Error('bootstrap did not advertise a manager endpoint');
+  }
+  return addresses;
+}
+
 export async function apiClient(bootstrap: Bootstrap) {
   const node = await createConsoleNode();
   try {
     const transport = node.services.http;
-    const hostname = globalThis.location.hostname;
-    const addresses = bootstrap.webrtcAddresses
-      .map((address) => multiaddr(address))
-      .filter((address) => {
-        const value = address.toString();
-        return !value.includes('/ip4/127.0.0.1/');
-      })
-      .map((address) => {
-        const value = address.toString();
-        if (!value.startsWith('/ip4/')) return address;
-        return multiaddr(value.replace(/^\/ip4\/[^/]+\//, `/ip4/${hostname}/`));
-      });
+    const addresses = bootstrapAddresses(bootstrap);
     let token = '';
     // The well-known metadata advertises the protocol *base* path
     // (e.g. `/netp2p/web-api/1.0.0/`); concrete endpoints must be appended to
@@ -65,6 +62,14 @@ export async function apiClient(bootstrap: Bootstrap) {
         method: 'POST',
         body: JSON.stringify({ transition }),
       }).then(snapshot),
+      createSetupKey: async (input: SetupKeyCreateInput): Promise<SetupKeyCreation> => {
+        const body = await request('/api/v1/setup-keys', {
+          method: 'POST',
+          body: JSON.stringify(input),
+        }) as { token?: string; snapshot?: Snapshot };
+        if (!body.token || !body.snapshot) throw new Error('manager did not return a one-time setup key');
+        return { token: body.token, snapshot: normalizeSnapshot(body.snapshot) };
+      },
       presence: () => request('/api/v1/presence').then((body) =>
         normalizePresence((body as { observations?: Presence[] } | null)?.observations)),
       session: () => request('/api/v1/session') as Promise<SessionInfo>,

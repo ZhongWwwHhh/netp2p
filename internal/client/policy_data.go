@@ -44,6 +44,14 @@ func isEchoReply(request packet.IPv4Packet) bool {
 	return icmp.Type() == packet.ICMPTypeEchoReply
 }
 
+func isEchoRequest(request packet.IPv4Packet) bool {
+	if request.Protocol() != packet.ProtocolICMP || len(request) <= request.HeaderLength() {
+		return false
+	}
+	icmp := packet.ICMPMessage(request[request.HeaderLength():])
+	return icmp.Type() == packet.ICMPTypeEchoRequest
+}
+
 func buildEchoReply(request packet.IPv4Packet) ([]byte, bool) {
 	if request.Protocol() != packet.ProtocolICMP || len(request) <= request.HeaderLength() {
 		return nil, false

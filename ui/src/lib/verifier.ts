@@ -1,7 +1,8 @@
 import type { Snapshot } from './types';
 import { QuorumSize, signerCount } from './quorum';
 
-// Fixed 4-of-3 committee: n=4, f=1, quorum=2f+1.
+// Default production committee: n=3, f=0, quorum=3. A snapshot's certified
+// committeeConfig.threshold still takes precedence over this fallback.
 export const QUORUM = QuorumSize;
 
 /**

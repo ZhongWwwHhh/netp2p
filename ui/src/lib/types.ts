@@ -115,6 +115,13 @@ export interface SetupKey {
   lastUsedAt?: string;
 }
 
+export type SetupKeyCreateInput = Pick<SetupKey, 'name' | 'type' | 'groups' | 'expiresAt' | 'usageLimit'>;
+
+export interface SetupKeyCreation {
+  token: string;
+  snapshot: Snapshot;
+}
+
 export interface Budget {
   id: string;
   subjectType: string;

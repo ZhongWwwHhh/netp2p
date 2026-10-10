@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -63,7 +64,16 @@ type Client struct {
 	exitNodeEnabled bool
 	dnsUpdater      DNSUpdater
 	dnsUpstreams    []string
+	retrySleep      func(context.Context, time.Duration) error
 }
+
+const (
+	loginRetryLimit    = 10
+	recoveryRetryLimit = 10
+	retryInitialDelay  = 250 * time.Millisecond
+	retryMaxDelay      = 5 * time.Second
+	connectTimeout     = 3 * time.Second
+)
 
 func New(node *p2p.Node, managerAddr string, sink packet.PacketSink, options ...Option) (*Client, error) {
 	if _, err := peer.AddrInfoFromString(managerAddr); err != nil {
@@ -72,6 +82,7 @@ func New(node *p2p.Node, managerAddr string, sink packet.PacketSink, options ...
 	client := &Client{
 		node: node, sink: sink, flows: conntrack.NewTable(),
 		managerAddresses: []string{managerAddr},
+		retrySleep:       sleepWithContext,
 	}
 	client.forwarding = forward.NewTable(model.NetworkState{}, node.Host.ID().String(), func(remote peer.ID, envelope forward.Envelope) error {
 		frames := client.frameTransport()
@@ -114,7 +125,77 @@ func (err *LoginError) Error() string {
 	return "login failed: " + err.Code
 }
 
+// SyncError is a manager response that will not become valid by retrying the
+// same request, such as a network or peer identity mismatch.
+type SyncError struct {
+	Code    string
+	Message string
+}
+
+func (err *SyncError) Error() string {
+	if err.Message != "" {
+		return err.Message
+	}
+	return "sync failed: " + err.Code
+}
+
+// RetryExhaustedError marks a bounded retry sequence so callers can show a
+// terminal state instead of looping forever at the process boundary.
+type RetryExhaustedError struct {
+	Operation string
+	Attempts  int
+	Err       error
+}
+
+func (err *RetryExhaustedError) Error() string {
+	return fmt.Sprintf("%s failed after %d attempts: %v", err.Operation, err.Attempts, err.Err)
+}
+
+func (err *RetryExhaustedError) Unwrap() error { return err.Err }
+
+var ErrNeedsLogin = errors.New("client needs login")
+
 func (client *Client) Login(ctx context.Context, networkID, setupKey, jwtToken string) error {
+	if client.hasRecoverableState() {
+		err := client.Recover(ctx)
+		if err == nil {
+			return nil
+		}
+		var syncErr *SyncError
+		if !errors.As(err, &syncErr) {
+			return err
+		}
+		// Peer removal or a network mismatch invalidates the old recovery
+		// record; explicit login is then the next boundary.
+	}
+	return client.loginWithRetry(ctx, networkID, setupKey, jwtToken)
+}
+
+func (client *Client) loginWithRetry(ctx context.Context, networkID, setupKey, jwtToken string) error {
+	var lastErr error
+	for attempt := 1; attempt <= loginRetryLimit; attempt++ {
+		err := client.loginOnce(ctx, networkID, setupKey, jwtToken)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var loginErr *LoginError
+		if errors.As(err, &loginErr) {
+			return err
+		}
+		lastErr = err
+		if attempt < loginRetryLimit {
+			if err := client.sleepBeforeRetry(ctx, attempt); err != nil {
+				return err
+			}
+		}
+	}
+	return &RetryExhaustedError{Operation: "login", Attempts: loginRetryLimit, Err: lastErr}
+}
+
+func (client *Client) loginOnce(ctx context.Context, networkID, setupKey, jwtToken string) error {
 	if err := client.connect(ctx); err != nil {
 		return fmt.Errorf("connect manager: %w", err)
 	}
@@ -148,16 +229,17 @@ func (client *Client) Login(ctx context.Context, networkID, setupKey, jwtToken s
 	return nil
 }
 
-// Sync long-polls the manager for a newer certified snapshot. The manager
-// blocks the stream until a new height is committed or the request times out.
+// Sync long-polls the manager for a newer certified snapshot. A heartbeat at
+// the same height confirms that persisted state is current without treating a
+// quiet long poll as a stream error.
 func (client *Client) Sync(ctx context.Context) error {
-	client.mu.RLock()
+	client.mu.Lock()
 	height := client.snapshot.Height
 	networkID := client.snapshot.State.NetworkID
 	assignmentHeight := assignmentHeightLocked(client.snapshot)
 	admissions := client.admissionQueue
 	client.admissionQueue = nil
-	client.mu.RUnlock()
+	client.mu.Unlock()
 	if err := client.connect(ctx); err != nil {
 		return fmt.Errorf("connect manager: %w", err)
 	}
@@ -166,13 +248,35 @@ func (client *Client) Sync(ctx context.Context) error {
 		AssignmentsHeight: assignmentHeight, Admissions: admissions,
 		ProtocolVersion: version.ProtocolVersion,
 	}
-	var syncReply pb.SignedSnapshot
-	if err := client.request(ctx, p2p.SyncProtocol, wire.SyncRequestToProto(syncRequest), &syncReply); err != nil {
+	result, err := client.requestSync(ctx, syncRequest)
+	if err != nil {
 		client.queueAdmissions(admissions)
-		client.markManagerRequestFailure(err)
+		var syncErr *SyncError
+		if errors.As(err, &syncErr) {
+			client.markSyncError(syncErr)
+		} else {
+			client.markManagerRequestFailure(err)
+		}
 		return err
 	}
-	snapshot := wire.SignedSnapshotFromProto(&syncReply)
+	snapshot := result.snapshot
+	if result.heartbeat.networkID != "" {
+		if result.heartbeat.networkID != networkID {
+			client.setClientState(ClientStateNeedsLogin)
+			return &SyncError{Code: "network_mismatch", Message: "sync heartbeat network does not match local state"}
+		}
+		if result.heartbeat.height < height {
+			client.setClientState(ClientStateDegraded)
+			return &SyncError{Code: "stale_manager", Message: "manager is behind the local certified snapshot"}
+		}
+		client.mu.Lock()
+		client.lastManagerError = ""
+		if height > 0 {
+			client.connectionState = ClientStateReady
+		}
+		client.mu.Unlock()
+		return nil
+	}
 	if err := bft.ValidateClientSnapshot(snapshot); err != nil {
 		if client.SnapshotHeight() > 0 {
 			client.setClientState(ClientStateDegraded)
@@ -181,18 +285,138 @@ func (client *Client) Sync(ctx context.Context) error {
 		}
 		return err
 	}
-	if snapshot.Height <= height {
-		client.queueAdmissions(admissions)
-		return fmt.Errorf("manager did not provide newer snapshot")
+	if snapshot.State.NetworkID != networkID || snapshot.Height < height {
+		client.setClientState(ClientStateDegraded)
+		return &SyncError{Code: "invalid_snapshot", Message: "manager snapshot does not match local certified state"}
 	}
 	client.mu.RLock()
 	self := client.self
 	client.mu.RUnlock()
 	if peerRecord, ok := findPeer(snapshot, self.PeerID); ok {
 		self = peerRecord
+	} else if self.PeerID != "" {
+		client.setClientState(ClientStateNeedsLogin)
+		return &SyncError{Code: "peer_removed", Message: "local peer is no longer present in certified state"}
 	}
 	client.applySnapshot(snapshot, self)
 	return nil
+}
+
+type syncHeartbeat struct {
+	networkID string
+	height    uint64
+}
+
+type syncResult struct {
+	snapshot  model.SignedSnapshot
+	heartbeat syncHeartbeat
+}
+
+func (client *Client) requestSync(ctx context.Context, request netproto.SyncRequest) (syncResult, error) {
+	stream, err := client.node.Host.NewStream(ctx, client.manager.ID, p2p.SyncProtocol)
+	if err != nil {
+		return syncResult{}, err
+	}
+	defer stream.Close()
+	if err := p2p.WriteMessage(stream, p2p.SyncProtocol, wire.SyncRequestToProto(request)); err != nil {
+		return syncResult{}, err
+	}
+	if closer, ok := stream.(interface{ CloseWrite() error }); ok {
+		_ = closer.CloseWrite()
+	}
+	for {
+		envelope, err := p2p.DecodeEnvelope(stream)
+		if err != nil {
+			return syncResult{}, err
+		}
+		if envelope.Protocol != p2p.SyncProtocol {
+			return syncResult{}, fmt.Errorf("unexpected sync response protocol %q", envelope.Protocol)
+		}
+		var reply pb.SyncResponse
+		if err := proto.Unmarshal(envelope.Payload, &reply); err != nil {
+			return syncResult{}, err
+		}
+		switch response := reply.GetResponse().(type) {
+		case *pb.SyncResponse_Snapshot:
+			return syncResult{snapshot: wire.SignedSnapshotFromProto(response.Snapshot)}, nil
+		case *pb.SyncResponse_Heartbeat:
+			heartbeat := response.Heartbeat
+			if heartbeat == nil {
+				return syncResult{}, fmt.Errorf("empty sync heartbeat")
+			}
+			return syncResult{heartbeat: syncHeartbeat{
+				networkID: heartbeat.GetNetworkId(), height: heartbeat.GetHeight(),
+			}}, nil
+		case *pb.SyncResponse_Error:
+			syncErr := response.Error
+			if syncErr == nil {
+				return syncResult{}, fmt.Errorf("empty sync error")
+			}
+			return syncResult{}, &SyncError{Code: syncErr.GetCode(), Message: syncErr.GetMessage()}
+		default:
+			return syncResult{}, fmt.Errorf("sync response had no payload")
+		}
+	}
+}
+
+// Recover refreshes persisted certified state without registering the peer
+// again. It is the startup and manager-failover path for an existing identity.
+func (client *Client) Recover(ctx context.Context) error {
+	if !client.hasRecoverableState() {
+		client.setClientState(ClientStateNeedsLogin)
+		return ErrNeedsLogin
+	}
+	var lastErr error
+	for attempt := 1; attempt <= recoveryRetryLimit; attempt++ {
+		err := client.Sync(ctx)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var syncErr *SyncError
+		if errors.As(err, &syncErr) {
+			return err
+		}
+		lastErr = err
+		if attempt < recoveryRetryLimit {
+			if err := client.sleepBeforeRetry(ctx, attempt); err != nil {
+				return err
+			}
+		}
+	}
+	client.markManagerRequestFailure(lastErr)
+	return &RetryExhaustedError{Operation: "recovery", Attempts: recoveryRetryLimit, Err: lastErr}
+}
+
+func (client *Client) hasRecoverableState() bool {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	if client.snapshot.Height == 0 || client.self.PeerID != client.node.Host.ID().String() {
+		return false
+	}
+	_, present := findPeer(client.snapshot, client.self.PeerID)
+	return present
+}
+
+func (client *Client) sleepBeforeRetry(ctx context.Context, attempt int) error {
+	delay := retryInitialDelay << (attempt - 1)
+	if delay > retryMaxDelay || delay <= 0 {
+		delay = retryMaxDelay
+	}
+	return client.retrySleep(ctx, delay)
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // SyncLoop keeps the local certified snapshot fresh for the lifetime of ctx.
@@ -224,7 +448,10 @@ func (client *Client) connect(ctx context.Context) error {
 	for offset := range candidates {
 		index := (start + offset) % len(candidates)
 		candidate := candidates[index]
-		if err := client.node.Host.Connect(ctx, candidate); err != nil {
+		connectContext, cancel := context.WithTimeout(ctx, connectTimeout)
+		err := client.node.Host.Connect(connectContext, candidate)
+		cancel()
+		if err != nil {
 			lastErr = err
 			continue
 		}

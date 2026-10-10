@@ -1,7 +1,7 @@
-// Mirrors internal/bft: a fixed 4-member committee tolerates 1 fault, so a
-// certificate needs 2f+1 = 3 signatures.
-export const CommitteeSize = 4;
-export const FaultLimit = 1;
+// Mirrors the production manifest: a 3-member committee with no fault budget,
+// so every certificate needs all 3 signatures.
+export const CommitteeSize = 3;
+export const FaultLimit = 0;
 export const QuorumSize = CommitteeSize - FaultLimit;
 
 // The quorum certificate carries a threshold BLS signer bitmap rather than a

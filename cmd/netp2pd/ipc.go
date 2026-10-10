@@ -175,6 +175,8 @@ func (state *ipcState) handleDoctor(writer http.ResponseWriter, request *http.Re
 	}
 	state.mu.RLock()
 	cfg := state.cfg
+	processState := state.state
+	lastErr := state.lastErr
 	state.mu.RUnlock()
 	checks := []map[string]any{
 		{"name": "version", "ok": true, "detail": version.Version},
@@ -185,7 +187,30 @@ func (state *ipcState) handleDoctor(writer http.ResponseWriter, request *http.Re
 	if cfg.Manager != "" {
 		checks = append(checks, map[string]any{"name": "manager", "ok": true, "detail": cfg.Manager})
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"version": version.Version, "checks": checks})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"version": version.Version, "state": processState, "nextAction": doctorNextAction(processState, lastErr), "checks": checks,
+	})
+}
+
+func doctorNextAction(state, lastErr string) string {
+	switch state {
+	case "running":
+		if lastErr != "" {
+			return "Inspect the last error with netp2p status, then rerun netp2p doctor."
+		}
+		return "No action required; use netp2p status --json for live manager state."
+	case "idle", "stopped":
+		return "Run netp2p up to connect using the configured trust bundle and credentials."
+	case "stopping":
+		return "Wait for the client to stop; run netp2p status if it does not finish."
+	case "error":
+		if lastErr != "" {
+			return "Fix the reported failure (" + lastErr + "), then rerun netp2p doctor."
+		}
+		return "Inspect netp2pd logs, fix the failure, then rerun netp2p doctor."
+	default:
+		return "Run netp2p status and netp2p doctor to identify the client state."
+	}
 }
 
 func (state *ipcState) handlePing(writer http.ResponseWriter, request *http.Request) {

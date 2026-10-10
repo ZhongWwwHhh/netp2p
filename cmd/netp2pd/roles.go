@@ -152,6 +152,13 @@ func runManager(ctx context.Context, options managerOptions) error {
 	if err != nil {
 		return fmt.Errorf("load latest certified snapshot: %w", err)
 	}
+	latestCertifiedAt := time.Time{}
+	if hasLatest {
+		latestCertifiedAt, _, err = stateStore.LatestCertifiedAt()
+		if err != nil {
+			return fmt.Errorf("load latest certified timestamp: %w", err)
+		}
+	}
 	if hasLedger != hasLatest {
 		return fmt.Errorf("certified ledger state is inconsistent")
 	}
@@ -381,6 +388,7 @@ func runManager(ctx context.Context, options managerOptions) error {
 	}
 	netManager := manager.New(node, engine, mesh, manager.Config{
 		SSO: sso, Links: linkGossiper, Forwarding: options.forwarding, Metrics: collector, Alerts: alerter,
+		InitialCertifiedAt: latestCertifiedAt,
 	})
 	manager.RegisterAdminHandler(node, mesh, adminToken)
 	netManager.EnableForwarding(ctx)

@@ -153,6 +153,13 @@ func TestCommitPersistenceRestartAndBackupRecovery(t *testing.T) {
 	if latest, ok, err := store.LatestSnapshot(); err != nil || !ok || latest.Height != group.Height {
 		t.Fatalf("latest snapshot = height %d ok=%v err=%v, want height %d", latest.Height, ok, err, group.Height)
 	}
+	latestCertifiedAt, hasCertifiedAt, err := store.LatestCertifiedAt()
+	if err != nil || !hasCertifiedAt {
+		t.Fatalf("LatestCertifiedAt() = %v, %v, %v, want true, nil", latestCertifiedAt, hasCertifiedAt, err)
+	}
+	if time.Since(latestCertifiedAt) < -time.Minute || time.Since(latestCertifiedAt) > time.Minute {
+		t.Fatalf("latest certified time = %s, want the current commit time", latestCertifiedAt)
+	}
 
 	backupPath := filepath.Join(t.TempDir(), "manager-backup.sqlite")
 	if err := store.Backup(backupPath); err != nil {

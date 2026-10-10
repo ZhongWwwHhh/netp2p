@@ -2,7 +2,9 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/http"
 	"github.com/netp2p/netp2p/internal/auth"
@@ -54,6 +57,14 @@ type TransitionRequest struct {
 	Transition model.StateTransition `json:"transition"`
 }
 
+type SetupKeyCreateRequest struct {
+	Name       string   `json:"name"`
+	Type       string   `json:"type"`
+	Groups     []string `json:"groups"`
+	ExpiresIn  string   `json:"expiresAt"`
+	UsageLimit int      `json:"usageLimit"`
+}
+
 type CommitteeStatus struct {
 	LocalID       string                   `json:"localId"`
 	Height        uint64                   `json:"height"`
@@ -64,6 +75,23 @@ type CommitteeStatus struct {
 	Connected     map[string]bool          `json:"connected"`
 	LatestQC      *model.QuorumCertificate `json:"latestQc,omitempty"`
 }
+
+// ReadinessStatus is the unauthenticated readiness projection used by load
+// balancers and deployment validation.
+type ReadinessStatus struct {
+	Status          string   `json:"status"`
+	Height          uint64   `json:"height"`
+	CommitteeOnline int      `json:"committeeOnline"`
+	CommitteeSize   int      `json:"committeeSize"`
+	QuorumSize      int      `json:"quorumSize"`
+	LedgerReady     bool     `json:"ledgerReady"`
+	Degraded        bool     `json:"degraded"`
+	Reasons         []string `json:"reasons"`
+}
+
+// ReadinessFunc lets a manager provide a richer readiness signal, for example
+// SQLite write health, without the web package depending on storage internals.
+type ReadinessFunc func() ReadinessStatus
 
 type Config struct {
 	AdminToken string
@@ -77,6 +105,8 @@ type Config struct {
 	Authenticator Authenticator
 	// OIDC is advertised to the browser console for PKCE login.
 	OIDC *BootstrapOIDC
+	// Readiness overrides the default manager/node-derived readiness signal.
+	Readiness ReadinessFunc
 }
 
 // Authenticator resolves an SSO ID token to an authenticated identity. It is
@@ -98,6 +128,7 @@ type Server struct {
 	accounts              accountDirectory
 	authStore             *store.Store
 	sessions              *auth.SessionManager
+	readinessFunc         ReadinessFunc
 	dummyPasswordVerifier []byte
 }
 
@@ -131,6 +162,7 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 		accounts:              manager,
 		authStore:             config.AuthStore,
 		sessions:              sessions,
+		readinessFunc:         config.Readiness,
 		dummyPasswordVerifier: model.HashPassword("netp2p-dummy-verifier"),
 	}
 	server.httpHost.SetHTTPHandler(p2p.WebAPIProtocol, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -296,6 +328,36 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		writeJSON(writer, http.StatusOK, map[string]any{"alerts": server.manager.ActiveAlerts()})
 	case request.Method == http.MethodGet && path == "/api/v1/schema":
 		writeJSON(writer, http.StatusOK, map[string]string{"protocol": string(p2p.WebAPIProtocol)})
+	case request.Method == http.MethodPost && path == "/api/v1/setup-keys":
+		var body SetupKeyCreateRequest
+		if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid request")
+			return
+		}
+		if err := auth.AuthorizeTransition(identity, bft.TransitionUpsertSetupKey); err != nil {
+			writeError(writer, http.StatusForbidden, err.Error())
+			return
+		}
+		token, record, err := newSetupKey(body)
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		snapshot, err := server.accounts.SubmitAs(model.StateTransition{
+			Type: bft.TransitionUpsertSetupKey, Record: &record,
+		}, auth.ActorOf(identity))
+		if err != nil {
+			writeError(writer, http.StatusConflict, err.Error())
+			return
+		}
+		if server.manager != nil {
+			err = bft.ValidateSnapshot(snapshot)
+		}
+		if err != nil {
+			writeError(writer, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"token": token, "snapshot": model.ClientSnapshot(snapshot)})
 	case request.Method == http.MethodPost && path == "/api/v1/transitions":
 		var body TransitionRequest
 		if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
@@ -443,6 +505,7 @@ func (server *Server) handleEvents(writer http.ResponseWriter, request *http.Req
 func (server *Server) diagnostics() map[string]any {
 	state := server.manager.Snapshot().State
 	linkView := server.manager.LinkView()
+	committeeParams := server.manager.CommitteeParams()
 	forwarded, dropped := server.manager.ForwardingStats()
 	problems := make([]string, 0)
 	if server.manager.Height() == 0 {
@@ -465,8 +528,8 @@ func (server *Server) diagnostics() map[string]any {
 		"manager":         server.manager.LocalID(),
 		"networkId":       state.NetworkID,
 		"height":          server.manager.Height(),
-		"quorumSize":      bft.QuorumSize,
-		"committeeSize":   bft.CommitteeSize,
+		"quorumSize":      committeeParams.QuorumSize,
+		"committeeSize":   committeeParams.Size,
 		"peers":           len(state.Peers),
 		"groups":          len(state.Groups),
 		"policies":        len(state.Policies),
@@ -481,17 +544,80 @@ func (server *Server) diagnostics() map[string]any {
 	}
 }
 
+func newSetupKey(request SetupKeyCreateRequest) (string, model.SetupKey, error) {
+	if strings.TrimSpace(request.Name) == "" {
+		return "", model.SetupKey{}, errors.New("name is required")
+	}
+	if len(request.Groups) == 0 {
+		return "", model.SetupKey{}, errors.New("at least one group is required")
+	}
+	keyType := request.Type
+	if keyType == "" {
+		keyType = model.SetupKeyReusable
+	}
+	if keyType != model.SetupKeyReusable && keyType != model.SetupKeyOneOff {
+		return "", model.SetupKey{}, errors.New("type must be reusable or one-off")
+	}
+	if request.UsageLimit < 0 {
+		return "", model.SetupKey{}, errors.New("usage limit cannot be negative")
+	}
+	expiresAt, err := setupKeyExpiry(request.ExpiresIn)
+	if err != nil {
+		return "", model.SetupKey{}, err
+	}
+	token, err := randomToken("netp2p-sk-", 32)
+	if err != nil {
+		return "", model.SetupKey{}, fmt.Errorf("generate setup key: %w", err)
+	}
+	id, err := randomToken("key-", 12)
+	if err != nil {
+		return "", model.SetupKey{}, fmt.Errorf("generate setup key id: %w", err)
+	}
+	usageLimit := request.UsageLimit
+	if keyType == model.SetupKeyOneOff {
+		usageLimit = 1
+	}
+	return token, model.SetupKey{
+		ID: id, Name: strings.TrimSpace(request.Name), TokenPrefix: token[:8],
+		TokenHash: model.SetupKeyHash(token), Type: keyType, Groups: append([]string(nil), request.Groups...),
+		ExpiresAt: expiresAt, UsageLimit: usageLimit, CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func randomToken(prefix string, bytes int) (string, error) {
+	buffer := make([]byte, bytes)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return prefix + base64.RawURLEncoding.EncodeToString(buffer), nil
+}
+
+func setupKeyExpiry(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if !strings.HasSuffix(value, "d") {
+		return "", errors.New("expiry must be empty or Nd")
+	}
+	days, err := strconv.Atoi(strings.TrimSuffix(value, "d"))
+	if err != nil || days < 1 || days > 3650 {
+		return "", errors.New("expiry must be between 1d and 3650d")
+	}
+	return time.Now().UTC().AddDate(0, 0, days).Format(time.RFC3339), nil
+}
+
 func (server *Server) committeeStatus() CommitteeStatus {
 	latest, _ := server.manager.LatestSnapshot()
 	height := server.manager.Height()
 	committee := server.manager.Committee()
+	committeeParams := server.manager.CommitteeParams()
 	status := CommitteeStatus{
 		LocalID:       server.manager.LocalID(),
 		Height:        height,
 		LeaderAtHead:  server.manager.Leader(height+1, 0).ID,
 		NextRound:     0,
-		QuorumSize:    bft.QuorumSize,
-		CommitteeSize: len(committee),
+		QuorumSize:    committeeParams.QuorumSize,
+		CommitteeSize: committeeParams.Size,
 		Connected:     make(map[string]bool, len(committee)),
 	}
 	if latest.Height > 0 {
@@ -504,9 +630,85 @@ func (server *Server) committeeStatus() CommitteeStatus {
 			continue
 		}
 		peerID, err := peer.Decode(member.PeerID)
-		status.Connected[member.ID] = err == nil && server.node.Host.Network().Connectedness(peerID) == 1
+		status.Connected[member.ID] = err == nil && server.node.Host.Network().Connectedness(peerID) == network.Connected
 	}
 	return status
+}
+
+func (server *Server) readinessStatus() ReadinessStatus {
+	if server.readinessFunc != nil {
+		status := server.readinessFunc()
+		if status.Reasons == nil {
+			status.Reasons = []string{}
+		}
+		return status
+	}
+	return server.readinessFromManager()
+}
+
+func (server *Server) readinessFromManager() ReadinessStatus {
+	if server.manager == nil {
+		return ReadinessStatus{
+			Status: "degraded", Degraded: true,
+			Reasons: []string{"manager is unavailable"},
+		}
+	}
+	status := ReadinessStatus{
+		QuorumSize: server.manager.CommitteeParams().QuorumSize,
+		Reasons:    []string{},
+	}
+
+	snapshot, hasSnapshot := server.manager.LatestSnapshot()
+	status.Height = server.manager.Height()
+	status.LedgerReady = hasSnapshot && snapshot.Height > 0 && snapshot.Height == status.Height
+	if !status.LedgerReady {
+		if status.Height == 0 {
+			status.Reasons = append(status.Reasons, "ledger has no certified height")
+		} else {
+			status.Reasons = append(status.Reasons, "latest certified snapshot is not loaded at the current height")
+		}
+	}
+
+	committee := server.manager.Committee()
+	status.CommitteeSize = len(committee)
+	for _, member := range committee {
+		if member.ID == server.manager.LocalID() {
+			status.CommitteeOnline++
+			continue
+		}
+		peerID, err := peer.Decode(member.PeerID)
+		if err != nil {
+			status.Reasons = append(status.Reasons, fmt.Sprintf("committee member %s has an invalid peer ID", member.ID))
+			continue
+		}
+		if server.node == nil || server.node.Host.Network().Connectedness(peerID) != network.Connected {
+			status.Reasons = append(status.Reasons, fmt.Sprintf("committee member %s is not connected", member.ID))
+			continue
+		}
+		status.CommitteeOnline++
+	}
+	if status.QuorumSize <= 0 {
+		status.Reasons = append(status.Reasons, "committee quorum is not configured")
+	} else if status.CommitteeOnline < status.QuorumSize {
+		status.Reasons = append(status.Reasons, fmt.Sprintf(
+			"committee quorum is unavailable: %d of %d members online, quorum %d",
+			status.CommitteeOnline, status.CommitteeSize, status.QuorumSize,
+		))
+	}
+
+	status.Degraded = !status.LedgerReady || status.QuorumSize <= 0 ||
+		status.CommitteeOnline < status.QuorumSize
+	if status.Degraded {
+		status.Status = "degraded"
+	} else {
+		status.Status = "ready"
+	}
+	return status
+}
+
+func readinessIsReady(status ReadinessStatus) bool {
+	return !status.Degraded && status.LedgerReady &&
+		status.QuorumSize > 0 && status.CommitteeOnline >= status.QuorumSize
 }
 
 func (server *Server) BootstrapHandler() http.Handler {
@@ -535,6 +737,19 @@ func (server *Server) BootstrapHandler() http.Handler {
 				return
 			}
 			writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+			return
+		case "/readyz":
+			if request.Method != http.MethodGet {
+				methodNotAllowed(writer)
+				return
+			}
+			status := server.readinessStatus()
+			responseStatus := http.StatusServiceUnavailable
+			if readinessIsReady(status) {
+				responseStatus = http.StatusOK
+			}
+			writer.Header().Set("Cache-Control", "no-store")
+			writeJSON(writer, responseStatus, status)
 			return
 		}
 		if strings.HasPrefix(request.URL.Path, "/api/") {

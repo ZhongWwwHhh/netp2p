@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/netp2p/netp2p/internal/model"
 )
@@ -723,6 +724,191 @@ validated:
 	wrongLeader.LeaderID = "not-the-leader"
 	if err := ValidateSnapshot(wrongLeader); err == nil {
 		t.Fatal("a snapshot with the wrong leader must not validate")
+	}
+}
+
+func newBFTTestEngines(t *testing.T) ([]*Engine, []model.CommitteeMember) {
+	t.Helper()
+	committee, privateKeys := testCommittee()
+	engines := make([]*Engine, len(committee))
+	for index, member := range committee {
+		engine, err := NewEngine(testState(), committee, member.ID, privateKeys[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.SetRoundTimeout(5 * time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
+		engines[index] = engine
+	}
+	return engines, committee
+}
+
+func engineForMember(t *testing.T, engines []*Engine, memberID string) *Engine {
+	t.Helper()
+	for _, engine := range engines {
+		if engine.LocalID() == memberID {
+			return engine
+		}
+	}
+	t.Fatalf("engine for committee member %q not found", memberID)
+	return nil
+}
+
+func TestViewChangeRecoversAfterLostRoundZeroVote(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	transition := model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "round-recovery"}}
+
+	roundZeroLeader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	proposal, leaderVote, err := roundZeroLeader.Propose(transition, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := roundZeroLeader.ProcessVote(leaderVote); err != nil {
+		t.Fatal(err)
+	}
+	for _, engine := range engines {
+		if engine == roundZeroLeader {
+			continue
+		}
+		if _, err := engine.ProcessProposal(proposal); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, engine := range engines {
+		engine.roundDeadline = time.Now().Add(-time.Millisecond)
+	}
+	roundOneLeaderID := engines[0].Leader(1, 1).ID
+	if roundOneLeaderID == roundZeroLeader.LocalID() {
+		t.Fatal("test expects round one to select a different leader")
+	}
+	roundOneLeader := engineForMember(t, engines, roundOneLeaderID)
+	proposal, leaderVote, err = roundOneLeader.Propose(transition, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundOneLeader.roundDeadline = time.Now().Add(time.Minute)
+	if _, _, err := roundOneLeader.ProcessVote(leaderVote); err != nil {
+		t.Fatal(err)
+	}
+	var qc model.QuorumCertificate
+	ready := false
+	for _, engine := range engines {
+		if engine == roundOneLeader {
+			continue
+		}
+		vote, err := engine.ProcessProposal(proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qc, ready, err = roundOneLeader.ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			break
+		}
+	}
+	if !ready {
+		t.Fatal("round one failed to reach quorum")
+	}
+
+	var snapshot model.SignedSnapshot
+	for _, engine := range engines {
+		committed, err := engine.Commit(proposal, qc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snapshot.Height == 0 {
+			snapshot = committed
+		}
+	}
+	if snapshot.Height != 1 || snapshot.QC.Round != 1 {
+		t.Fatalf("expected height 1 round 1, got height %d round %d", snapshot.Height, snapshot.QC.Round)
+	}
+	if _, ok := engines[0].CurrentProposal(); ok {
+		t.Fatal("committed proposal was not cleared")
+	}
+}
+
+func TestProcessVoteRejectsMismatchedRound(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	proposal, _, err := leader.Propose(model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "rounds"}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var follower *Engine
+	for _, engine := range engines {
+		if engine != leader {
+			follower = engine
+			break
+		}
+	}
+	mismatched := proposal
+	mismatched.Round = 1
+	vote := follower.localVote(mismatched)
+	if _, _, err := leader.ProcessVote(vote); err == nil {
+		t.Fatal("vote with a mismatched round was accepted")
+	}
+}
+
+func TestProcessProposalRejectsConflictingCurrentRound(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	proposal, _, err := leader.Propose(model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "first"}}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var follower *Engine
+	for _, engine := range engines {
+		if engine != leader {
+			follower = engine
+			break
+		}
+	}
+	if _, err := follower.ProcessProposal(proposal); err != nil {
+		t.Fatal(err)
+	}
+
+	conflicting := proposal
+	conflicting.Transition = model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "second"}}
+	expected := follower.CurrentState()
+	if err := ApplyTransition(&expected, conflicting.Transition); err != nil {
+		t.Fatal(err)
+	}
+	conflicting.State = expected
+	if _, err := follower.ProcessProposal(conflicting); err == nil {
+		t.Fatal("conflicting proposal for the same height and round was accepted")
+	}
+	retained, ok := follower.Proposal(1)
+	if !ok || retained.Transition.Group.ID != "first" {
+		t.Fatal("conflicting proposal replaced the retained proposal")
+	}
+}
+
+func TestSetupKeyWithoutVerifierRejected(t *testing.T) {
+	state := testState()
+	transition := model.StateTransition{Type: TransitionUpsertSetupKey, Record: &model.SetupKey{
+		ID: "missing-verifier", Token: "plaintext", Groups: []string{"clients-a"},
+	}}
+	if err := ApplyTransition(&state, transition); err == nil {
+		t.Fatal("setup key with plaintext token but no verifier was accepted")
+	}
+}
+
+func TestSetupKeyPlaintextNeverEntersCertifiedState(t *testing.T) {
+	state := testState()
+	transition := model.StateTransition{Type: TransitionUpsertSetupKey, Record: &model.SetupKey{
+		ID: "redacted", Token: "secret", TokenHash: model.SetupKeyHash("secret"), Groups: []string{"clients-a"},
+	}}
+	if err := ApplyTransition(&state, transition); err != nil {
+		t.Fatal(err)
+	}
+	stored := state.SetupKeys[len(state.SetupKeys)-1]
+	if stored.ID != "redacted" || stored.Token != "" || len(stored.TokenHash) == 0 {
+		t.Fatalf("certified setup key = %+v, want verifier without plaintext", state.SetupKeys)
 	}
 }
 

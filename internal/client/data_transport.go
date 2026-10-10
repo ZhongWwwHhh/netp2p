@@ -154,7 +154,7 @@ func (client *Client) forwardLocalPacket(ctx context.Context, raw []byte) {
 	flow, hasFlow := ipPacket.Flow()
 	// Outbound return traffic: this packet answers something we admitted
 	// inbound, so the reverse policy must not be required to also allow it.
-	if hasFlow && client.flows.ReplyAllowed(conntrack.Key(flow)) {
+	if hasFlow && !isEchoRequest(ipPacket) && client.flows.ReplyAllowed(conntrack.Key(flow)) {
 		client.sendToPeer(destination, raw)
 		return
 	}
@@ -378,7 +378,7 @@ func (client *Client) handleFrameWithAdmission(remote peer.ID, raw []byte, admit
 		return
 	}
 	flow, hasFlow := ipPacket.Flow()
-	if hasFlow && client.flows.ReplyAllowed(conntrack.Key(flow)) {
+	if hasFlow && !isEchoRequest(ipPacket) && client.flows.ReplyAllowed(conntrack.Key(flow)) {
 		if admit && !client.admitDestination(len(raw)) {
 			return
 		}

@@ -1,7 +1,7 @@
 import { apiClient } from './libp2p';
 import type {
   ActivityEntry, AdmissionReport, Alert, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
-  SessionInfo, Snapshot, StateTransition, User,
+  SessionInfo, SetupKeyCreateInput, SetupKeyCreation, Snapshot, StateTransition, User,
 } from './types';
 
 export { apiClient };
@@ -18,6 +18,7 @@ export interface ApiClient {
   snapshot(): Promise<Snapshot>;
   snapshotAt(height: number): Promise<Snapshot>;
   transition(transition: StateTransition): Promise<Snapshot>;
+  createSetupKey(input: SetupKeyCreateInput): Promise<SetupKeyCreation>;
   presence(): Promise<Presence[]>;
   session(): Promise<SessionInfo>;
   users(): Promise<User[]>;

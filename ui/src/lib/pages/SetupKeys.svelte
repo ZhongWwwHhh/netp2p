@@ -7,7 +7,7 @@
   import FormField from '../components/FormField.svelte';
   import MultiSelect from '../components/MultiSelect.svelte';
   import PageHeader from '../components/PageHeader.svelte';
-  import { network, submit } from '../stores/network.svelte';
+  import { createSetupKey, network, submit } from '../stores/network.svelte';
   import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { SetupKey } from '../types';
@@ -52,21 +52,17 @@
     if (!editing.name?.trim()) return notify('Name is required', 'error');
     if (editing.groups.length === 0) return notify('At least one group is required', 'error');
     busy = true;
-    const record: SetupKey = {
-      id: crypto.randomUUID(),
+    const creation = await createSetupKey({
       name: editing.name.trim(),
       type: editing.type ?? 'reusable',
       groups: [...editing.groups],
       usageLimit: editing.type === 'one-off' ? 1 : (editing.usageLimit ?? 0),
       expiresAt: editing.expiresAt || '',
-    };
-    const ok = await submit({ type: 'upsert_setup_key', setupKeyRecord: record });
+    });
     busy = false;
-    if (ok) {
-      // The response snapshot contains the plaintext token; extract it for display.
-      const updated = (network.snapshot?.state.setupKeys ?? []).find((k) => k.id === record.id);
-      revealed = updated?.token ?? '';
-      notify(`Setup key "${record.name}" committed`);
+    if (creation) {
+      revealed = creation.token;
+      notify(`Setup key "${editing.name.trim()}" committed`);
       editing = null;
     } else {
       notify(network.error || 'commit failed', 'error');

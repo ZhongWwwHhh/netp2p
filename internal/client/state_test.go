@@ -309,9 +309,9 @@ func newTestP2PNode(t *testing.T) *p2p.Node {
 	return node
 }
 
-func certifiedClientSnapshot(t *testing.T, networkID string) model.SignedSnapshot {
+func certifiedClientSnapshot(t *testing.T, networkID string, peers ...model.PeerRecord) model.SignedSnapshot {
 	t.Helper()
-	state := model.NetworkState{NetworkID: networkID, OverlayCIDR: "10.80.0.0/24"}
+	state := model.NetworkState{NetworkID: networkID, OverlayCIDR: "10.80.0.0/24", Peers: peers}
 	committee := make([]model.CommitteeMember, bft.CommitteeSize)
 	for index := range committee {
 		committee[index] = model.CommitteeMember{
