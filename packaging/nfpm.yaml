@@ -2,6 +2,8 @@ name: netp2p
 arch: amd64
 platform: linux
 version: ${VERSION}
+depends:
+  - iptables
 section: net
 priority: optional
 maintainer: NetP2P <maintainers@netp2p.example>

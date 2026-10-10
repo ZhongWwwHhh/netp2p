@@ -1,5 +1,5 @@
 [Unit]
-Description=NetP2P overlay daemon
+Description=NetP2P overlay client daemon
 Documentation=https://github.com/ZhongWwwHhh/netp2p
 After=network-online.target
 Wants=network-online.target
@@ -20,7 +20,7 @@ ProtectHome=true
 PrivateTmp=true
 StateDirectory=netp2p
 RuntimeDirectory=netp2p
-ReadWritePaths=/var/lib/netp2p /run/netp2p
+ReadWritePaths=/var/lib/netp2p /run/netp2p /etc/resolv.conf
 
 [Install]
 WantedBy=multi-user.target

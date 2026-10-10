@@ -157,3 +157,22 @@ func TestReconcileWithoutMasqueradeSkipsNAT(t *testing.T) {
 		t.Fatalf("expected a FORWARD accept rule: %s", joined)
 	}
 }
+
+// A client enables its exit reconciler before it knows the certified feature
+// state. If that state later says exit nodes are disabled, reconciling and
+// closing must not invoke iptables merely to clean up state NetP2P never owned.
+func TestDisabledExitNodeCloseIsCleanNoOp(t *testing.T) {
+	reconciler := New("100.64.0.0/24", func(name string, args ...string) error {
+		t.Fatalf("unexpected command %s %v", name, args)
+		return nil
+	})
+	if err := reconciler.Reconcile(nil); err != nil {
+		t.Fatalf("reconcile disabled exit node: %v", err)
+	}
+	if err := reconciler.Close(); err != nil {
+		t.Fatalf("close disabled exit node: %v", err)
+	}
+	if commands := reconciler.Commands(); len(commands) != 0 {
+		t.Fatalf("disabled exit node issued commands: %v", commands)
+	}
+}

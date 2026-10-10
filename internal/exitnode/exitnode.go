@@ -49,6 +49,7 @@ type Reconciler struct {
 	mu       sync.Mutex
 	closed   bool
 	chains   bool
+	enabled  bool
 	current  map[string]Route
 	commands []string // audit trail for diagnostics and tests
 }
@@ -94,6 +95,9 @@ func (reconciler *Reconciler) Reconcile(routes []Route) error {
 	reconciler.mu.Unlock()
 
 	if len(desired) > 0 {
+		reconciler.mu.Lock()
+		reconciler.enabled = true
+		reconciler.mu.Unlock()
 		if err := reconciler.ensureChains(); err != nil {
 			return err
 		}
@@ -154,7 +158,8 @@ func (reconciler *Reconciler) Reconcile(routes []Route) error {
 // Close removes every managed rule and restores the original forwarding sysctl.
 func (reconciler *Reconciler) Close() error {
 	reconciler.mu.Lock()
-	if reconciler.closed {
+	if reconciler.closed || !reconciler.enabled {
+		reconciler.closed = true
 		reconciler.mu.Unlock()
 		return nil
 	}

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -105,6 +106,13 @@ func TestLeaderProposalRecoversIdleAdvancedView(t *testing.T) {
 	}
 
 	leaderRound := engines[leaderIndex].CurrentRound()
+	// Leave uncommitted proposal evidence in the leader's active view. A
+	// readiness exchange must neither advance over it nor discard it.
+	pendingTransition := model.StateTransition{Type: bft.TransitionGenesis}
+	pendingProposal, _, err := engines[leaderIndex].Propose(pendingTransition, leaderRound)
+	if err != nil {
+		t.Fatalf("seed pending proposal: %v", err)
+	}
 	if err := meshes[followerOne].send(meshes[leaderIndex].node.Host.ID(), model.CommitteeEnvelope{Type: "ready", Height: 1, Round: 999}); err != nil {
 		t.Fatalf("send forged readiness acknowledgement: %v", err)
 	}
@@ -112,8 +120,14 @@ func TestLeaderProposalRecoversIdleAdvancedView(t *testing.T) {
 	if got := engines[leaderIndex].CurrentRound(); got != leaderRound {
 		t.Fatalf("ready acknowledgement changed leader round from %d to %d", leaderRound, got)
 	}
+	pending, ok := engines[leaderIndex].CurrentProposal()
+	if !ok || !bytes.Equal(bft.TransitionHash(pending.Transition), bft.TransitionHash(pendingProposal.Transition)) || pending.Round != pendingProposal.Round {
+		t.Fatalf("ready acknowledgement cleared pending proposal (round %d)", leaderRound)
+	}
 
-	if _, err := meshes[leaderIndex].Submit(model.StateTransition{Type: bft.TransitionGenesis}); err != nil {
+	if _, err := meshes[leaderIndex].Submit(model.StateTransition{
+		Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "clients-b"},
+	}); err != nil {
 		t.Fatalf("genesis after readiness alignment: %v", err)
 	}
 	for index, engine := range engines {
@@ -121,5 +135,34 @@ func TestLeaderProposalRecoversIdleAdvancedView(t *testing.T) {
 			t.Fatalf("manager %d height=%d, want 1 (rounds leader=%d stale=%d current=%d)",
 				index, engine.Height(), engines[leaderIndex].CurrentRound(), engines[followerOne].CurrentRound(), engines[followerTwo].CurrentRound())
 		}
+	}
+}
+
+// Probe generations own their response channels. Submit creates a fresh
+// generation for every proposal retry, so a late ack from a prior attempt can
+// never satisfy the availability check for a later attempt.
+func TestProbeGenerationIsolatesLateAcks(t *testing.T) {
+	remote := peer.ID("remote-peer")
+	mesh := &CommitteeMesh{probeResponses: make(map[peer.ID]committeeProbe)}
+	response := make(chan uint64, 1)
+	mesh.mu.Lock()
+	mesh.probeResponses[remote] = committeeProbe{generation: 2, response: response}
+	mesh.mu.Unlock()
+
+	mesh.markProbeResponse(remote, 1, 999)
+	select {
+	case got := <-response:
+		t.Fatalf("stale probe generation completed a later retry with round %d", got)
+	default:
+	}
+
+	mesh.markProbeResponse(remote, 2, 999)
+	select {
+	case got := <-response:
+		if got != 999 {
+			t.Fatalf("current probe got round %d, want 999", got)
+		}
+	default:
+		t.Fatal("current probe generation did not receive its acknowledgement")
 	}
 }

@@ -43,6 +43,14 @@ type committeeProbe struct {
 	response   chan uint64
 }
 
+// CommitteeReadiness is diagnostic evidence from an application-level probe.
+// Readiness acknowledgements are intentionally unsigned and are not view-change
+// certificates; callers must never use them to move an engine's round.
+type CommitteeReadiness struct {
+	Responders int
+	Rounds     map[uint64]int
+}
+
 const committeeProbeTimeout = 500 * time.Millisecond
 
 var ErrCommitteeUnavailable = errors.New("committee unavailable")
@@ -118,14 +126,14 @@ func (mesh *CommitteeMesh) memberIDForPeer(remote peer.ID) (string, bool) {
 // state: unsigned readiness acknowledgements are not view-change evidence.
 // Transport connectedness is not sufficient either; a partitioned peer can
 // remain connected while every state-update message is dropped.
-func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
+func (mesh *CommitteeMesh) ensureCommitteeAvailable() (CommitteeReadiness, error) {
 	mesh.probeMu.Lock()
 	defer mesh.probeMu.Unlock()
 
 	peers := mesh.peerSnapshot()
 	params := mesh.engine.CommitteeParams()
 	if params.QuorumSize <= 0 || params.QuorumSize > len(peers)+1 {
-		return nil
+		return CommitteeReadiness{Rounds: map[uint64]int{}}, nil
 	}
 
 	mesh.mu.Lock()
@@ -171,7 +179,7 @@ func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
 	if required > len(peers) {
 		required = len(peers)
 	}
-	roundCounts := make(map[uint64]int)
+	readiness := CommitteeReadiness{Rounds: make(map[uint64]int)}
 	timer := time.NewTimer(committeeProbeTimeout)
 	defer timer.Stop()
 	answered := 0
@@ -182,12 +190,13 @@ func (mesh *CommitteeMesh) ensureCommitteeAvailable() error {
 		select {
 		case remoteRound := <-response:
 			answered++
-			roundCounts[remoteRound]++
+			readiness.Responders++
+			readiness.Rounds[remoteRound]++
 		case <-timer.C:
-			return fmt.Errorf("%w: %d of %d remote committee members answered", ErrCommitteeUnavailable, answered, len(peers))
+			return readiness, fmt.Errorf("%w: %d of %d remote committee members answered", ErrCommitteeUnavailable, answered, len(peers))
 		}
 	}
-	return nil
+	return readiness, nil
 }
 
 func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64, round uint64) {
@@ -201,6 +210,29 @@ func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64, 
 	case probe.response <- round:
 	default:
 	}
+}
+
+// validateProposalRound checks the locally selected proposal view before any
+// forward or proposal is emitted. Probe evidence only proves remote handler
+// availability; it cannot widen the local view or select the maximum remote
+// round. The authenticated proposal/vote path remains the only way followers
+// adopt that view.
+func (mesh *CommitteeMesh) validateProposalRound(round uint64, readiness CommitteeReadiness) error {
+	if readiness.Responders <= 0 {
+		return fmt.Errorf("%w: no committee evidence for proposal", ErrCommitteeUnavailable)
+	}
+	current := mesh.engine.CurrentRound()
+	height := mesh.engine.Height() + 1
+	if leader := mesh.engine.Leader(height, round); leader.ID == "" {
+		return fmt.Errorf("height %d round %d has no committee leader", height, round)
+	}
+	if round < current {
+		return fmt.Errorf("proposal round %d precedes local round %d", round, current)
+	}
+	if round > current+uint64(mesh.engine.CommitteeParams().Size) {
+		return fmt.Errorf("proposal round %d exceeds local round %d view bound", round, current)
+	}
+	return nil
 }
 
 // SetMetrics attaches optional submit observability after mesh construction.
@@ -329,7 +361,7 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if !ok || senderID != message.Proposal.LeaderID {
 			return
 		}
-		if err := mesh.ensureCommitteeAvailable(); err != nil {
+		if _, err := mesh.ensureCommitteeAvailable(); err != nil {
 			return
 		}
 		vote, err := mesh.engine.ProcessProposal(*message.Proposal)
@@ -347,7 +379,7 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if !ok || senderID != message.Vote.VoterID {
 			return
 		}
-		if err := mesh.ensureCommitteeAvailable(); err != nil {
+		if _, err := mesh.ensureCommitteeAvailable(); err != nil {
 			return
 		}
 		qc, ready, err := mesh.engine.ProcessVote(*message.Vote)
@@ -378,7 +410,7 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if message.Transition == nil {
 			return
 		}
-		if err := mesh.ensureCommitteeAvailable(); err != nil {
+		if _, err := mesh.ensureCommitteeAvailable(); err != nil {
 			return
 		}
 		mesh.proposeLocal(*message.Transition, message.Round)
@@ -576,9 +608,6 @@ func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.Signe
 	transitionHash := bft.TransitionHash(transition)
 	totalTimeout := time.After(30 * time.Second)
 	params := mesh.engine.CommitteeParams()
-	if err := mesh.ensureCommitteeAvailable(); err != nil {
-		return model.SignedSnapshot{}, err
-	}
 	startRound := mesh.engine.CurrentRound()
 	if proposal, ok := mesh.engine.CurrentProposal(); ok && !bytes.Equal(
 		bft.TransitionHash(proposal.Transition), transitionHash,
@@ -586,7 +615,17 @@ func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.Signe
 		startRound++
 	}
 	for attempt := uint64(0); attempt < uint64(params.Size); attempt++ {
+		// Every proposal attempt owns a fresh probe generation and response
+		// channel. A late ack from a prior attempt can neither complete this
+		// readiness check nor leak into a later attempt.
+		readiness, err := mesh.ensureCommitteeAvailable()
+		if err != nil {
+			return model.SignedSnapshot{}, err
+		}
 		round := startRound + attempt
+		if err := mesh.validateProposalRound(round, readiness); err != nil {
+			return model.SignedSnapshot{}, err
+		}
 		height := mesh.engine.Height() + 1
 		leader := mesh.engine.Leader(height, round)
 		if leader.ID == mesh.engine.LocalID() {
