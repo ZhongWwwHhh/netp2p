@@ -1,9 +1,9 @@
 version: 1
-role: node
+role: client
 dataDir: /var/lib/netp2p
 listen: /ip4/0.0.0.0/udp/4001/quic-v1
 webListen: 0.0.0.0:8080
-metricsListen: 127.0.0.1:9100
+metricsListen: 127.0.0.1:9102
 ipc:
   path: /run/netp2p/netp2pd.sock
 
@@ -14,8 +14,9 @@ alert:
   dropCount: 100
   dropRatePercent: 5
 
-# Client-only settings:
-# trust: /etc/netp2p/client-trust.json
+# Client-only settings. Complete these with `netp2p login` or provisioning.
+# network: <network-id>
+# trust: /etc/netp2p/trust.json
 # setupKeyFile: /etc/netp2p/setup-key
 # setupKey: <one-time setup key>
 # tun: netp2p0

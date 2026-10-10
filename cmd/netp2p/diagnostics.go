@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -34,7 +35,7 @@ func runPing(args []string) error {
 	if target == nil {
 		return fmt.Errorf("invalid overlay IP %q", flags.Arg(0))
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
@@ -102,7 +103,7 @@ func runNetcheck(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
@@ -111,18 +112,23 @@ func runNetcheck(args []string) error {
 	defer cancel()
 	var status map[string]any
 	daemonErr := client.call(ctx, "GET", "/v1/status", nil, &status)
+	checkErrors := make([]error, 0, 5)
 	printCheck("version", version.Version, nil)
 	printCheck("daemon", fmt.Sprint(status["state"]), daemonErr)
+	checkErrors = append(checkErrors, daemonErr)
 	if cfg.Manager != "" {
 		printCheck("manager", cfg.Manager, nil)
 	} else {
-		printCheck("manager", "not configured", fmt.Errorf("missing"))
+		managerErr := errors.New("not configured")
+		printCheck("manager", "not configured", managerErr)
+		checkErrors = append(checkErrors, managerErr)
 	}
 	if conn, err := net.ListenPacket("udp", cfg.PacketListen); err == nil {
 		_ = conn.Close()
 		printCheck("packet endpoint", cfg.PacketListen, nil)
 	} else {
 		printCheck("packet endpoint", cfg.PacketListen, err)
+		checkErrors = append(checkErrors, err)
 	}
 	if cfg.NoDNS {
 		printCheck("dns", "disabled", nil)
@@ -131,6 +137,7 @@ func runNetcheck(args []string) error {
 		printCheck("dns", cfg.DNSListen, nil)
 	} else {
 		printCheck("dns", cfg.DNSListen, err)
+		checkErrors = append(checkErrors, err)
 	}
 	if cfg.NoTun {
 		printCheck("tun", "disabled", nil)
@@ -139,8 +146,29 @@ func runNetcheck(args []string) error {
 		printCheck("tun", cfg.TunName, nil)
 	} else {
 		printCheck("tun", cfg.TunName, err)
+		checkErrors = append(checkErrors, err)
 	}
-	return nil
+	return aggregateNetcheckErrors(checkErrors)
+}
+
+func aggregateNetcheckErrors(checks []error) error {
+	failures := make([]string, 0, len(checks))
+	for _, check := range checks {
+		if check != nil {
+			failures = append(failures, check.Error())
+		}
+	}
+	if len(failures) == 0 {
+		return nil
+	}
+	return fmt.Errorf("netcheck failed (%d check%s): %s", len(failures), plural(len(failures)), strings.Join(failures, "; "))
+}
+
+func plural(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func runDoctor(args []string) error {
@@ -149,7 +177,7 @@ func runDoctor(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
@@ -195,7 +223,7 @@ func runDebugBundle(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}

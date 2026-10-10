@@ -1,0 +1,8 @@
+version: 1
+role: client
+dataDir: /var/lib/netp2p
+listen: /ip4/0.0.0.0/udp/0/quic-v1
+network: netp2p-production
+trust: /etc/netp2p/trust.json
+setupKeyFile: /etc/netp2p/setup-key
+packetListen: 127.0.0.1:51820

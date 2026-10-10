@@ -13,26 +13,35 @@ import (
 	"sync"
 	"time"
 
+	"github.com/netp2p/netp2p/internal/runtimeconfig"
 	"github.com/netp2p/netp2p/internal/version"
+	"gopkg.in/yaml.v3"
 )
 
 type ipcState struct {
 	mu         sync.RWMutex
 	cfg        runtimeConfig
+	configPath string
 	started    time.Time
 	state      string
 	lastErr    string
 	supervisor *clientSupervisor
 }
 
-func newIPCState(ctx context.Context, cfg runtimeConfig, startClient func(context.Context) error) *ipcState {
+func newIPCState(ctx context.Context, cfg runtimeConfig, configPath string, startClient func(context.Context, runtimeConfig) error) *ipcState {
 	state := "running"
 	if cfg.Role == "daemon" {
 		state = "idle"
 	}
-	result := &ipcState{cfg: cfg, started: time.Now(), state: state}
+	if (cfg.Role == "client" || cfg.Role == "daemon") && isUnprovisionedClientConfig(cfg) {
+		state = "needs-login"
+	}
+	result := &ipcState{cfg: cfg, configPath: configPath, started: time.Now(), state: state}
 	if cfg.Role == "client" || cfg.Role == "daemon" {
-		result.supervisor = newClientSupervisor(ctx, startClient, result.clientStopped)
+		result.supervisor = newClientSupervisor(ctx, func(clientContext context.Context) error {
+			return startClient(clientContext, result.currentConfig())
+		}, result.clientStopped)
+		_ = os.Remove(result.statusPath())
 	}
 	return result
 }
@@ -46,6 +55,8 @@ func startIPC(ctx context.Context, state *ipcState) (net.Listener, *http.Server,
 	mux.HandleFunc("/v1/status", state.handleStatus)
 	mux.HandleFunc("/v1/up", state.handleUp)
 	mux.HandleFunc("/v1/down", state.handleDown)
+	mux.HandleFunc("/v1/reload", state.handleReload)
+	mux.HandleFunc("/v1/provision", state.handleProvision)
 	mux.HandleFunc("/v1/doctor", state.handleDoctor)
 	mux.HandleFunc("/v1/netcheck", state.handleDoctor)
 	mux.HandleFunc("/v1/ping", state.handlePing)
@@ -53,6 +64,7 @@ func startIPC(ctx context.Context, state *ipcState) (net.Listener, *http.Server,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	server.SetKeepAlivesEnabled(false)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -97,14 +109,18 @@ func (state *ipcState) handleStatus(writer http.ResponseWriter, request *http.Re
 		payload["lastError"] = lastErr
 	}
 	if cfg.Role == "client" {
-		statusPath := cfg.StatusFile
-		if statusPath == "" {
-			statusPath = filepath.Join(cfg.DataDir, "status.json")
-		}
+		statusPath := state.statusPath()
 		if raw, err := os.ReadFile(statusPath); err == nil {
 			var clientStatus map[string]any
 			if json.Unmarshal(raw, &clientStatus) == nil {
 				payload["client"] = clientStatus
+				if ready := processStateForClient(currentState, clientStatus); ready != currentState {
+					state.mu.Lock()
+					state.state = ready
+					state.mu.Unlock()
+					currentState = ready
+					payload["state"] = currentState
+				}
 			}
 		}
 	}
@@ -118,6 +134,13 @@ func (state *ipcState) handleUp(writer http.ResponseWriter, request *http.Reques
 	}
 	if state.supervisor == nil {
 		writeJSON(writer, http.StatusConflict, map[string]any{"error": "up is only supported by client and daemon roles"})
+		return
+	}
+	if state.unprovisioned() {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"error": "client is not provisioned; run netp2p login first",
+			"state": "needs-login",
+		})
 		return
 	}
 	state.mu.Lock()
@@ -141,6 +164,7 @@ func (state *ipcState) handleDown(writer http.ResponseWriter, request *http.Requ
 	state.state = "stopping"
 	state.mu.Unlock()
 	state.supervisor.Stop()
+	_ = os.Remove(state.statusPath())
 	state.mu.Lock()
 	if state.state != "error" {
 		state.state = "stopped"
@@ -158,6 +182,120 @@ func (state *ipcState) clientStopped(err error) {
 		state.state = "stopped"
 	}
 	state.mu.Unlock()
+}
+
+func (state *ipcState) currentConfig() runtimeConfig {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	return state.cfg
+}
+
+func (state *ipcState) statusPath() string {
+	cfg := state.currentConfig()
+	if cfg.StatusFile != "" {
+		return cfg.StatusFile
+	}
+	return filepath.Join(cfg.DataDir, "status.json")
+}
+
+func (state *ipcState) reloadConfig() error {
+	if state.configPath == "" {
+		return fmt.Errorf("daemon config path is unknown")
+	}
+	cfg, err := parseRuntimeConfig(state.configPath)
+	if err != nil {
+		return fmt.Errorf("reload runtime config: %w", err)
+	}
+	if err := validateRuntimeConfig(cfg); err != nil && !runtimeconfig.IsUnprovisionedClientError(err) {
+		return fmt.Errorf("reload runtime config: %w", err)
+	}
+	if cfg.Role == "client" && cfg.StatusFile == "" {
+		cfg.StatusFile = filepath.Join(cfg.DataDir, "status.json")
+	}
+	_ = os.Remove(state.statusPath())
+	_ = state.stopClient()
+	state.mu.Lock()
+	state.cfg = cfg
+	state.state = "stopped"
+	if isUnprovisionedClientConfig(cfg) {
+		state.state = "needs-login"
+	}
+	state.lastErr = ""
+	state.mu.Unlock()
+	return nil
+}
+
+func (state *ipcState) handleReload(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if state.supervisor == nil {
+		writeJSON(writer, http.StatusConflict, map[string]any{"error": "reload is only supported by client and daemon roles"})
+		return
+	}
+	if err := state.reloadConfig(); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	state.mu.RLock()
+	current := state.state
+	state.mu.RUnlock()
+	writeJSON(writer, http.StatusOK, map[string]any{"state": current})
+}
+
+func (state *ipcState) handleProvision(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if state.supervisor == nil || state.configPath == "" {
+		writeJSON(writer, http.StatusConflict, map[string]any{"error": "provisioning is not supported by this daemon"})
+		return
+	}
+	var cfg runtimeConfig
+	decoder := json.NewDecoder(request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("decode runtime config: %v", err)})
+		return
+	}
+	if cfg.Role != "client" {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": "provisioning supports only client profiles"})
+		return
+	}
+	if err := validateRuntimeConfig(cfg); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if cfg.StatusFile == "" {
+		cfg.StatusFile = filepath.Join(cfg.DataDir, "status.json")
+	}
+	encoded, err := yaml.Marshal(cfg)
+	if err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("encode runtime config: %v", err)})
+		return
+	}
+	if err := writeDaemonRuntimeConfig(state.configPath, encoded); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("write runtime config: %v", err)})
+		return
+	}
+	if err := state.reloadConfig(); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"state": "provisioned"})
+}
+
+func (state *ipcState) unprovisioned() bool {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	return isUnprovisionedClientConfig(state.cfg)
+}
+
+func isUnprovisionedClientConfig(cfg runtimeConfig) bool {
+	err := validateRuntimeConfig(cfg)
+	return err != nil && runtimeconfig.IsUnprovisionedClientError(err)
 }
 
 func (state *ipcState) startClient() bool {
@@ -178,6 +316,18 @@ func (state *ipcState) handleDoctor(writer http.ResponseWriter, request *http.Re
 	processState := state.state
 	lastErr := state.lastErr
 	state.mu.RUnlock()
+	var clientStatus map[string]any
+	statusPath := cfg.StatusFile
+	if statusPath == "" {
+		statusPath = filepath.Join(cfg.DataDir, "status.json")
+	}
+	if raw, err := os.ReadFile(statusPath); err == nil {
+		if err := json.Unmarshal(raw, &clientStatus); err != nil {
+			clientStatus = nil
+		}
+	}
+	processState = processStateForClient(processState, clientStatus)
+	clientState, clientNextAction := clientDoctorView(clientStatus)
 	checks := []map[string]any{
 		{"name": "version", "ok": true, "detail": version.Version},
 		{"name": "protocol", "ok": true, "detail": version.ProtocolVersion},
@@ -188,19 +338,47 @@ func (state *ipcState) handleDoctor(writer http.ResponseWriter, request *http.Re
 		checks = append(checks, map[string]any{"name": "manager", "ok": true, "detail": cfg.Manager})
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"version": version.Version, "state": processState, "nextAction": doctorNextAction(processState, lastErr), "checks": checks,
+		"version": version.Version, "state": processState,
+		"nextAction": doctorNextAction(processState, lastErr, clientState, clientNextAction), "checks": checks,
 	})
 }
 
-func doctorNextAction(state, lastErr string) string {
+func processStateForClient(processState string, clientStatus map[string]any) string {
+	if processState != "starting" {
+		return processState
+	}
+	if state, _ := clientStatus["state"].(string); state == "ready" {
+		return "running"
+	}
+	return processState
+}
+
+func clientDoctorView(clientStatus map[string]any) (string, string) {
+	state, _ := clientStatus["state"].(string)
+	nextAction, _ := clientStatus["nextAction"].(string)
+	return state, nextAction
+}
+
+func doctorNextAction(state, lastErr, clientState, clientNextAction string) string {
+	if state == "starting" && clientState == "ready" {
+		state = "running"
+	}
 	switch state {
 	case "running":
+		if clientState == "ready" {
+			return "No action required; use netp2p status --json for live manager state."
+		}
+		if clientNextAction != "" {
+			return clientNextAction
+		}
 		if lastErr != "" {
 			return "Inspect the last error with netp2p status, then rerun netp2p doctor."
 		}
 		return "No action required; use netp2p status --json for live manager state."
 	case "idle", "stopped":
 		return "Run netp2p up to connect using the configured trust bundle and credentials."
+	case "needs-login":
+		return "Run netp2p login with the network manager and setup key, then run netp2p up."
 	case "stopping":
 		return "Wait for the client to stop; run netp2p status if it does not finish."
 	case "error":

@@ -23,6 +23,7 @@ import (
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/packet"
 	"github.com/netp2p/netp2p/internal/protocol"
+	"github.com/netp2p/netp2p/internal/runtimeconfig"
 	"github.com/netp2p/netp2p/internal/tun"
 )
 
@@ -184,6 +185,7 @@ func clientStatus(node *p2p.Node, netClient *client.Client, options clientOption
 		"height": netClient.SnapshotHeight(), "packetListen": options.packetListen,
 		"mode": clientMode(tunDevice), "assignments": paths,
 		"state": string(netClient.State()), "manager": netClient.ManagerStatus().ActiveManager.String(),
+		"nextAction": netClient.NextAction(),
 	})
 }
 
@@ -295,21 +297,10 @@ func startDNS(options clientOptions, upstreams []string, kernelRouting bool, col
 	}
 }
 
-// clientMetricsListen constrains the client metrics endpoint to the IPv4
-// loopback interface. The zero value selects an ephemeral loopback port.
+// clientMetricsListen is shared with semantic runtime-config validation so the
+// daemon and CLI reject the same client metrics endpoints.
 func clientMetricsListen(address string) (string, error) {
-	if address == "" {
-		return "127.0.0.1:0", nil
-	}
-	host, _, err := net.SplitHostPort(address)
-	if err != nil {
-		return "", fmt.Errorf("parse client metrics listen address: %w", err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.Equal(net.IPv4(127, 0, 0, 1)) {
-		return "", fmt.Errorf("client metrics listen address %q must bind 127.0.0.1", address)
-	}
-	return address, nil
+	return runtimeconfig.ClientMetricsListen(address)
 }
 
 // startClientMetrics exposes the client's local registry. A separate listener

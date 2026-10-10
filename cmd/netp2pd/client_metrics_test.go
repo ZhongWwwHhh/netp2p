@@ -17,8 +17,8 @@ import (
 )
 
 func TestClientMetricsListenOnlyAllowsIPv4Loopback(t *testing.T) {
-	if address, err := clientMetricsListen(""); err != nil || address != "127.0.0.1:0" {
-		t.Fatalf("default metrics address = %q, %v; want 127.0.0.1:0, nil", address, err)
+	if address, err := clientMetricsListen(""); err != nil || address != "127.0.0.1:9102" {
+		t.Fatalf("default metrics address = %q, %v; want 127.0.0.1:9102, nil", address, err)
 	}
 	if address, err := clientMetricsListen("127.0.0.1:9100"); err != nil || address != "127.0.0.1:9100" {
 		t.Fatalf("loopback metrics address = %q, %v; want 127.0.0.1:9100, nil", address, err)
@@ -34,7 +34,7 @@ func TestStartClientMetricsBindsLoopbackAndExposesCollectors(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	collector, address, err := startClientMetrics(ctx, clientOptions{})
+	collector, address, err := startClientMetrics(ctx, clientOptions{metricsListen: "127.0.0.1:0"})
 	if err != nil {
 		t.Fatalf("startClientMetrics: %v", err)
 	}

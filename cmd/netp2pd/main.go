@@ -16,6 +16,7 @@ import (
 
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/runtimeconfig"
 	"github.com/netp2p/netp2p/internal/tracing"
 	"github.com/netp2p/netp2p/internal/version"
 )
@@ -77,7 +78,7 @@ func main() {
 		return
 	}
 
-	cfg, err := loadRuntimeConfig(*configFile)
+	cfg, err := parseRuntimeConfig(*configFile)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func main() {
 		alertWebhook: alertWebhook, alertWebhookSecret: alertWebhookSecret, alertAllowInsecure: alertAllowInsecure,
 		alertInterval: alertInterval, alertDropCount: alertDropCount, alertDropRate: alertDropRate, ipcPath: ipcPath,
 	})
-	if err := validateRuntimeConfig(cfg); err != nil {
+	if err := validateRuntimeConfig(cfg); err != nil && !runtimeconfig.IsUnprovisionedClientError(err) {
 		log.Fatal(err)
 	}
 	if cfg.Role == "client" && cfg.StatusFile == "" {
@@ -117,8 +118,8 @@ func main() {
 
 	var daemonState *ipcState
 	if cfg.Role == "node" || cfg.Role == "manager" || cfg.Role == "client" || cfg.Role == "daemon" {
-		state := newIPCState(ctx, cfg, func(clientCtx context.Context) error {
-			options, err := clientOptionsFromRuntimeConfig(cfg)
+		state := newIPCState(ctx, cfg, *configFile, func(clientCtx context.Context, clientCfg runtimeConfig) error {
+			options, err := clientOptionsFromRuntimeConfig(clientCfg)
 			if err != nil {
 				return err
 			}
@@ -156,8 +157,13 @@ func main() {
 			log.Fatal(err)
 		}
 	case "client":
-		if daemonState == nil || !daemonState.startClient() {
+		if daemonState == nil {
 			log.Fatal("client supervisor was not initialised")
+		}
+		if daemonState.unprovisioned() {
+			log.Printf("client is not provisioned; waiting for netp2p login")
+		} else if !daemonState.startClient() {
+			log.Fatal("client supervisor failed to start")
 		}
 		<-ctx.Done()
 		daemonState.stopClient()
@@ -214,9 +220,6 @@ func clientOptionsFromRuntimeConfig(cfg runtimeConfig) (clientOptions, error) {
 		}
 	}
 	metricsListen := cfg.MetricsListen
-	if metricsListen == "" {
-		metricsListen = "127.0.0.1:0"
-	}
 	managerAddr := cfg.Manager
 	managerEndpoints := make([]string, 0)
 	if cfg.TrustPath != "" {

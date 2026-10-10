@@ -52,7 +52,9 @@ func runUp(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	// First login starts from the intentionally incomplete packaged profile.
+	// Validate only after adding the credentials supplied by the user.
+	cfg, err := parseRuntimeConfig(*configPath)
 	if err != nil {
 		return err
 	}
@@ -80,7 +82,7 @@ func runDown(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
@@ -102,7 +104,7 @@ func runStatus(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
@@ -137,7 +139,7 @@ func runIP(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
@@ -160,21 +162,27 @@ func runLogin(args []string) error {
 	flags := flag.NewFlagSet("login", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfigPath(), "runtime config path")
 	manager := flags.String("manager", "", "manager libp2p multiaddr")
+	trust := flags.String("trust", "", "client trust bundle path")
 	setupKey := flags.String("setup-key", "", "setup key")
 	setupKeyFile := flags.String("setup-key-file", "", "file containing the setup key")
+	network := flags.String("network", "", "network identifier")
 	sso := flags.Bool("sso", false, "use OIDC device flow")
 	issuer := flags.String("sso-issuer", "", "OIDC issuer")
 	clientID := flags.String("sso-client-id", "", "OIDC client id")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
 	cfg.Role = "client"
 	if *manager != "" {
 		cfg.Manager = *manager
+	}
+	if *trust != "" {
+		cfg.TrustPath = *trust
+		cfg.Manager = ""
 	}
 	if *setupKey != "" {
 		cfg.SetupKey = *setupKey
@@ -193,8 +201,11 @@ func runLogin(args []string) error {
 	if *clientID != "" {
 		cfg.SSOClientID = *clientID
 	}
-	if cfg.Manager == "" {
-		return fmt.Errorf("--manager is required")
+	if *network != "" {
+		cfg.NetworkID = *network
+	}
+	if cfg.Manager == "" && cfg.TrustPath == "" {
+		return fmt.Errorf("--manager or --trust is required")
 	}
 	if cfg.SetupKey == "" && cfg.SetupKeyFile == "" && !cfg.SSO {
 		return fmt.Errorf("--setup-key, --setup-key-file or --sso is required")
@@ -202,11 +213,10 @@ func runLogin(args []string) error {
 	if cfg.SSO && (cfg.SSOIssuer == "" || cfg.SSOClientID == "") {
 		return fmt.Errorf("--sso-issuer and --sso-client-id are required with --sso")
 	}
-	if err := writeRuntimeConfig(*configPath, cfg); err != nil {
+	if err := validateRuntimeConfig(cfg); err != nil {
 		return err
 	}
-	// Restart so a daemon that is already running picks up the new credentials.
-	if err := runDown([]string{"--config", *configPath}); err != nil {
+	if err := applyRuntimeConfig(*configPath, cfg); err != nil {
 		return err
 	}
 	return runUp([]string{"--config", *configPath})
@@ -218,7 +228,7 @@ func runLogout(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*configPath)
+	cfg, err := loadRuntimeConfigForIPC(*configPath)
 	if err != nil {
 		return err
 	}
@@ -227,10 +237,37 @@ func runLogout(args []string) error {
 	cfg.SSO = false
 	cfg.SSOIssuer = ""
 	cfg.SSOClientID = ""
-	if err := writeRuntimeConfig(*configPath, cfg); err != nil {
+	if err := applyRuntimeConfig(*configPath, cfg); err != nil {
 		return err
 	}
-	return runDown([]string{"--config", *configPath})
+	return nil
+}
+
+func applyRuntimeConfig(path string, cfg runtimeConfig) error {
+	if err := writeRuntimeConfig(path, cfg); err != nil {
+		if !os.IsPermission(err) {
+			return err
+		}
+		// A service-owned profile cannot be modified by an interactive CLI.
+		// The daemon validates and writes the protected file over local IPC.
+		client := newIPCClient(cfg.IPC.Path)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return client.call(ctx, "POST", "/v1/provision", cfg, nil)
+	}
+	return reloadDaemon(path, cfg)
+}
+
+func reloadDaemon(path string, cfg runtimeConfig) error {
+	client := newIPCClient(cfg.IPC.Path)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.call(ctx, "GET", "/v1/ping", nil, nil); err != nil {
+		return nil
+	}
+	reloadContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return client.call(reloadContext, "POST", "/v1/reload", nil, nil)
 }
 
 func writeRuntimeConfig(path string, cfg runtimeConfig) error {

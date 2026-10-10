@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/netp2p/netp2p/internal/config"
+	"github.com/netp2p/netp2p/internal/runtimeconfig"
 )
 
 func TestLoadRuntimeConfigStrictYAML(t *testing.T) {
@@ -47,6 +48,34 @@ alert:
 	}
 }
 
+func TestDaemonEntryAllowsUnprovisionedClientProfile(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "runtime.yaml")
+	body := `version: 1
+role: client
+dataDir: ` + filepath.Join(directory, "data") + `
+ipc:
+  path: /tmp/netp2pd-test.sock
+alert:
+  interval: 15s
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := parseRuntimeConfig(path)
+	if err != nil {
+		t.Fatalf("daemon entry parse: %v", err)
+	}
+	err = validateRuntimeConfig(cfg)
+	if err == nil || !runtimeconfig.IsUnprovisionedClientError(err) {
+		t.Fatalf("daemon entry validation = %v, want an unprovisioned client error", err)
+	}
+	if _, err := loadRuntimeConfig(path); err == nil {
+		t.Fatal("full load unexpectedly accepted an unprovisioned client profile")
+	}
+}
+
 func TestRuntimeConfigMetricsListenReachesClientOptions(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "runtime.yaml")
@@ -82,8 +111,8 @@ func TestClientOptionsFromRuntimeConfigDefaultsMetricsListen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clientOptionsFromRuntimeConfig: %v", err)
 	}
-	if options.metricsListen != "127.0.0.1:0" {
-		t.Fatalf("default client metrics listen = %q, want 127.0.0.1:0", options.metricsListen)
+	if options.metricsListen != "" {
+		t.Fatalf("default client metrics listen = %q, want empty so the client applies its stable loopback default", options.metricsListen)
 	}
 }
 
