@@ -213,7 +213,13 @@ func TestQuorumSurvivesSingleManagerFailure(t *testing.T) {
 	if _, err := meshes[0].Submit(transition); err != nil {
 		t.Fatalf("submit with one manager down: %v", err)
 	}
+	// Snapshot broadcasts are asynchronous; wait for the surviving committee
+	// instead of asserting immediately after Submit returns.
+	deadline := time.Now().Add(5 * time.Second)
 	for index := 0; index < 3; index++ {
+		for engines[index].Height() < 2 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
 		if engines[index].Height() != 2 {
 			t.Fatalf("manager %d height=%d, want 2", index, engines[index].Height())
 		}

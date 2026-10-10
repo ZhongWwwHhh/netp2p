@@ -11,7 +11,7 @@
     "@libp2p/circuit-relay-v2": "^4.2.13",
     "@libp2p/http": "^2.0.6",
     "@libp2p/identify": "^4.1.14",
-    "@libp2p/webrtc": "^6.0.32",
+    "@libp2p/webrtc": "^6.0.33",
     "libp2p": "^3.3.11",
     "multiformats": "^14.0.0"
   },
@@ -24,6 +24,10 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
     "vite": "^7.3.0",
-    "vitest": "^3.2.4"
+    "vitest": "^5.0.3"
+  },
+  "overrides": {
+    "shell-quote": "^1.11.0",
+    "source-map-js": "^1.2.2"
   }
 }

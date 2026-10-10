@@ -861,22 +861,31 @@ func committeeIndex(committee []model.CommitteeMember) map[string]int {
 // it immediately switches to the matching local share.
 func (engine *Engine) SetDKGLoader(loader func(epoch uint64) (*bls.KeySet, bool)) {
 	engine.mu.Lock()
-	defer engine.mu.Unlock()
 	engine.dkgLoader = loader
-	if loader == nil || len(engine.committeeConfig.GroupPublicKey) != bls.PublicKeySize {
+	needsLoad := loader != nil && len(engine.committeeConfig.GroupPublicKey) == bls.PublicKeySize
+	epoch := engine.committeeConfig.CommitteeEpoch
+	groupKey := append([]byte(nil), engine.committeeConfig.GroupPublicKey...)
+	committee := append([]model.CommitteeMember(nil), engine.committee...)
+	engine.mu.Unlock()
+	if !needsLoad {
 		return
 	}
-	keys, ok := loader(engine.committeeConfig.CommitteeEpoch)
-	if !ok || !bytes.Equal(keys.GroupPublicKey, engine.committeeConfig.GroupPublicKey) {
+	// Call the loader without the engine write lock; loaders may inspect public
+	// engine state and persisted shares during startup.
+	keys, ok := loader(epoch)
+	if !ok || !bytes.Equal(keys.GroupPublicKey, groupKey) {
 		return
 	}
-	index := committeeIndex(engine.committee)
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	index := committeeIndex(committee)
 	engine.blsKeys = keys
 	engine.blsIndex = index
-	for position := range engine.committee {
-		engine.committee[position].BLSPublicKey = keys.PublicKeyShare(index[engine.committee[position].ID])
-		engine.byID[engine.committee[position].ID] = engine.committee[position]
+	for position := range committee {
+		committee[position].BLSPublicKey = keys.PublicKeyShare(index[committee[position].ID])
+		engine.byID[committee[position].ID] = committee[position]
 	}
+	engine.committee = committee
 }
 
 func (engine *Engine) verifyQCLocked(qc model.QuorumCertificate) error {

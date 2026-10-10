@@ -1,4 +1,4 @@
-# Four-manager BFT committee plus userspace clients. No TUN and no NET_ADMIN are
+# Three-manager BFT committee plus userspace clients. No TUN and no NET_ADMIN are
 # required: the data plane runs over libp2p QUIC and a local UDP packet endpoint.
 #
 # Build once with:  docker build -t netp2p-test:latest .
@@ -45,16 +45,6 @@ services:
     ports:
       - "8082:8080"
       - "4103:4103/udp"
-  manager-4:
-    image: netp2p-test:latest
-    command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--web-listen", "0.0.0.0:8080"]
-    environment:
-      NETP2P_MANAGER_ID: manager-4
-    volumes: ["./deploy:/config:ro"]
-    ports:
-      - "8083:8080"
-      - "4104:4104/udp"
-
   client-a:
     image: netp2p-test:latest
     depends_on: [manager-1]
