@@ -128,21 +128,46 @@ func TestBootstrapHandlerDeepLinkReturnsSPA(t *testing.T) {
 	}
 }
 
-func TestBootstrapHandlerRejectsUnknownAPI(t *testing.T) {
+func TestBootstrapHandlerServesAuthenticatedAPI(t *testing.T) {
+	server, accounts, _ := newLocalAuthTestServer(t)
+	accounts.users = []model.User{{ID: "owner-1", Email: "owner@example.com", Role: model.RoleOwner}}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/snapshot", nil)
+	request.URL.Path = "/api/v1/users"
+	request.Header.Set("Authorization", "Bearer secret")
+	recorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("authenticated API status %d, body %q, want 200", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"owner@example.com"`) {
+		t.Fatalf("authenticated API body %q missing snapshot state", recorder.Body.String())
+	}
+}
+
+func TestBootstrapHandlerAPIAuthentication(t *testing.T) {
 	server := newTestServer()
 	for _, request := range []struct {
 		method string
 		path   string
+		status int
 	}{
-		{http.MethodGet, "/api/v1/snapshot"},
-		{http.MethodPost, "/api/v1/transitions"},
-		{http.MethodGet, "/api/unknown"},
+		{http.MethodGet, "/api/v1/snapshot", http.StatusUnauthorized},
+		{http.MethodPost, "/api/v1/transitions", http.StatusUnauthorized},
+		{http.MethodGet, "/api/unknown", http.StatusUnauthorized},
 	} {
 		recorder := httptest.NewRecorder()
 		server.BootstrapHandler().ServeHTTP(recorder, httptest.NewRequest(request.method, request.path, nil))
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("%s %s status %d, want 404", request.method, request.path, recorder.Code)
+		if recorder.Code != request.status {
+			t.Fatalf("%s %s status %d, want %d", request.method, request.path, recorder.Code, request.status)
 		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/unknown", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	recorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("authenticated unknown API status %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
 

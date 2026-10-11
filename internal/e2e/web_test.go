@@ -220,8 +220,8 @@ func TestWebSPAFallbackAndActivity(t *testing.T) {
 		t.Fatal(err)
 	}
 	unknownAPI.Body.Close()
-	if unknownAPI.StatusCode != http.StatusNotFound {
-		t.Fatalf("unknown api status %d, want 404", unknownAPI.StatusCode)
+	if unknownAPI.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unknown api status %d, want 401", unknownAPI.StatusCode)
 	}
 
 	go func() { _ = server.HTTPHost().Serve() }()

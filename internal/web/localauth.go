@@ -63,15 +63,6 @@ func (server *Server) handlePublicAuth(writer http.ResponseWriter, request *http
 	return true
 }
 
-func isPublicAuthPath(path string) bool {
-	switch path {
-	case "/api/v1/auth/status", "/api/v1/auth/session", "/api/v1/auth/login", "/api/v1/auth/logout",
-		"/api/v1/bootstrap/status", "/api/v1/bootstrap/owner":
-		return true
-	}
-	return false
-}
-
 func (server *Server) handleAuthSession(writer http.ResponseWriter, request *http.Request) {
 	identity, ok := server.authenticate(request)
 	if !ok {

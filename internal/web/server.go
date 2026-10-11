@@ -756,11 +756,7 @@ func (server *Server) BootstrapHandler() http.Handler {
 			return
 		}
 		if strings.HasPrefix(request.URL.Path, "/api/") {
-			if isPublicAuthPath(strings.TrimSuffix(request.URL.Path, "/")) {
-				server.handleAPI(writer, request)
-				return
-			}
-			writeError(writer, http.StatusNotFound, "not found")
+			server.handleAPI(writer, request)
 			return
 		}
 		// Serve the SPA shell for deep links such as /peers, so client-side
