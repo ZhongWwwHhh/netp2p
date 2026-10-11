@@ -97,7 +97,7 @@ jobs:
           docker run --rm \
             -v "$PWD/dist:/dist:ro" \
             debian:bookworm-slim \
-            /bin/sh -c 'dpkg -i /dist/netp2p_0.0.0~dev_amd64.deb && /usr/bin/netp2p version && test -f /lib/systemd/system/netp2p-client.service'
+            /bin/sh -c 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y /dist/netp2p_0.0.0~dev_amd64.deb && /usr/bin/netp2p version && test -f /lib/systemd/system/netp2p-client.service'
 
   windows:
     runs-on: windows-latest
