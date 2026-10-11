@@ -175,26 +175,35 @@ func (client *Client) forwardLocalPacket(ctx context.Context, raw []byte) {
 
 func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) bool {
 	if !client.admitOutbound(len(raw)) {
+		client.markOutboundDrop("outbound packet exceeded the active quota")
 		return false
 	}
 	target, err := peer.Decode(destination.PeerID)
 	if err != nil {
 		recordDataPlaneDrop()
+		client.markOutboundDrop("outbound destination has an invalid peer identifier")
 		return false
 	}
 	source, err := peer.Decode(client.selfPeerID())
 	if err != nil {
 		recordDataPlaneDrop()
+		client.markOutboundDrop("local peer identifier is invalid")
 		return false
 	}
 	if err := client.syncPathSelector(); err != nil {
 		recordDataPlaneDrop()
+		client.recordPathSelection(target, PathSelectionStatus{
+			State: PathSelectionSyncFailed, Err: err,
+		})
+		client.markOutboundDrop(fmt.Sprintf("path synchronization to %s failed: %v", destination.PeerID, err))
 		debugDrop("path sync from %s to %s: %v", client.selfPeerID(), destination.PeerID, err)
 		return false
 	}
 	assignment, path, status := client.paths.selectWithStatus(source, target)
+	client.recordPathSelection(target, status)
 	if !status.OK {
 		recordDataPlaneDrop()
+		client.markOutboundDrop(fmt.Sprintf("%s to %s: %v", status.State, destination.PeerID, status.Err))
 		debugDrop("path selection from %s to %s state=%s: %v",
 			client.selfPeerID(), destination.PeerID, status.State, status.Err)
 		return false
@@ -202,16 +211,24 @@ func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) bool 
 	if path.Kind == model.PathKindDirect {
 		if !client.directPathsEnabled() {
 			recordDataPlaneDrop()
+			client.markOutboundDrop(fmt.Sprintf("direct path disabled to %s", destination.PeerID))
 			debugDrop("direct path disabled from %s to %s", client.selfPeerID(), destination.PeerID)
 			return false
 		}
-		return client.sendFrame(target, raw)
+		if !client.sendFrame(target, raw) {
+			client.markOutboundDrop(fmt.Sprintf("direct frame delivery to %s failed", destination.PeerID))
+			return false
+		}
+		client.clearOutboundDrop()
+		return true
 	}
 	if err := client.paths.forwarder.Send(source, target, assignment.ID, path.ID, raw); err != nil {
 		recordDataPlaneDrop()
+		client.markOutboundDrop(fmt.Sprintf("forward to %s via %s failed: %v", destination.PeerID, path.ID, err))
 		debugDrop("forward from %s to %s via %s: %v", client.selfPeerID(), destination.PeerID, path.ID, err)
 		return false
 	}
+	client.clearOutboundDrop()
 	return true
 }
 

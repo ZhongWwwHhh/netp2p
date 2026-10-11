@@ -41,6 +41,9 @@ type Client struct {
 	activeManager    int
 	connectionState  ClientState
 	lastManagerError string
+	pathState        PathSelectionState
+	pathError        string
+	outboundDrop     string
 	sink             packet.PacketSink
 	snapshot         model.SignedSnapshot
 	self             model.PeerRecord

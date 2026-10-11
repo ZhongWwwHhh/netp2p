@@ -150,6 +150,12 @@ func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
 // route assignments. Transitions remain quorum-certified.
 func (manager *Manager) RunScheduler(ctx context.Context) {
 	scheduler := link.NewScheduler(manager, manager.engine.CommitteeMembers(), manager.LinkView)
+	scheduler.SetAutomaticLeader(func() bool {
+		height := manager.engine.Height()
+		round := manager.engine.CurrentRound()
+		leader := manager.engine.Leader(height+1, round)
+		return leader.ID != "" && leader.ID == manager.engine.LocalID()
+	})
 	scheduler.Run(ctx, manager.engine.CurrentState)
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -832,31 +833,258 @@ func TestViewChangeRecoversAfterLostRoundZeroVote(t *testing.T) {
 	}
 }
 
-func TestProcessProposalRejectsStaleRoundWithEvidence(t *testing.T) {
+func TestExpectedLeaderProposalAlignsDivergentViews(t *testing.T) {
 	engines, _ := newBFTTestEngines(t)
 	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
 	proposal, _, err := leader.Propose(model.StateTransition{Type: TransitionUpsertGroup, Group: &model.Group{ID: "protected"}}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var follower *Engine
+	// Independent schedulers ran their local timers for a long time while the
+	// round-zero proposal was unavailable. The expected leader's authenticated
+	// proposal is the view authority and must pull all idle views back to zero.
 	for _, engine := range engines {
 		if engine != leader {
-			follower = engine
+			engine.currentRound = 60 + uint64(len(engine.LocalID()))
+		}
+	}
+	for _, engine := range engines {
+		if engine == leader {
+			continue
+		}
+		if _, err := engine.ProcessProposal(proposal); err != nil {
+			t.Fatal(err)
+		}
+		if engine.CurrentRound() != 0 {
+			t.Fatalf("%s round=%d, want aligned round 0", engine.LocalID(), engine.CurrentRound())
+		}
+		retained, ok := engine.CurrentProposal()
+		if !ok || retained.Round != proposal.Round || !sameProposal(retained, proposal) {
+			t.Fatalf("%s did not retain the aligned proposal", engine.LocalID())
+		}
+	}
+}
+
+func TestDelayedOldRoundVotesDoNotCountAfterViewChange(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	for _, engine := range engines {
+		if err := engine.SetRoundTimeout(time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldLeader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	newLeader := engineForMember(t, engines, engines[0].Leader(1, 1).ID)
+	follower := engineForMember(t, engines, engines[0].Leader(1, 2).ID)
+
+	oldProposal, _, err := oldLeader.Propose(model.StateTransition{
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "old-round"},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayedVote, err := follower.ProcessProposal(oldProposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newProposal, newLeaderVote, err := newLeader.Propose(model.StateTransition{
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "new-round"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The expected round-one proposal overtakes the uncommitted round-zero view.
+	for _, engine := range []*Engine{oldLeader, follower} {
+		if _, err := engine.ProcessProposal(newProposal); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := oldLeader.ProcessVote(delayedVote); err == nil {
+		t.Fatal("a delayed vote counted after its view was replaced")
+	}
+	if oldLeader.CurrentRound() != 1 {
+		t.Fatalf("old leader round=%d, want 1", oldLeader.CurrentRound())
+	}
+
+	qc, ready, err := newLeader.ProcessVote(newLeaderVote)
+	if err != nil || ready {
+		t.Fatalf("leader vote: ready=%v err=%v", ready, err)
+	}
+	for _, engine := range []*Engine{oldLeader, follower} {
+		vote, err := engine.ProcessProposal(newProposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qc, ready, err = newLeader.ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
 			break
 		}
 	}
-	if _, err := follower.ProcessProposal(proposal); err != nil {
+	if !ready {
+		t.Fatal("round one did not reach quorum")
+	}
+	if qc.Round != 1 || qc.Height != 1 {
+		t.Fatalf("unexpected QC height=%d round=%d", qc.Height, qc.Round)
+	}
+}
+
+func TestLowerRoundProposalRequiresIdleHigherView(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	for _, engine := range engines {
+		if err := engine.SetRoundTimeout(time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	higherLeader := engineForMember(t, engines, engines[0].Leader(1, 2).ID)
+	lowerLeader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	idleAhead := engineForMember(t, engines, engines[0].Leader(1, 1).ID)
+
+	higherProposal, _, err := higherLeader.Propose(model.StateTransition{
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "higher-evidence"},
+	}, 2)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate only the view number moving forward without expiry clearing the
-	// current proposal. A stale leader proposal must not discard that evidence.
-	follower.currentRound = 1
-	if _, err := follower.ProcessProposal(proposal); err == nil {
-		t.Fatal("stale proposal overwrote a higher view containing evidence")
+	lowerProposal, _, err := lowerLeader.Propose(model.StateTransition{
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "lower-delayed"},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if follower.currentRound != 1 {
-		t.Fatalf("current round changed to %d during rejection", follower.currentRound)
+
+	// One follower is in a live higher view containing evidence. The delayed
+	// expected-leader proposal from round zero cannot discard or replace it.
+	if _, err := idleAhead.ProcessProposal(higherProposal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idleAhead.ProcessProposal(lowerProposal); err == nil {
+		t.Fatal("a delayed lower-round proposal overwrote higher-view evidence")
+	}
+	if idleAhead.CurrentRound() != 2 {
+		t.Fatalf("evidence view moved from round 2 to %d", idleAhead.CurrentRound())
+	}
+	retained, ok := idleAhead.CurrentProposal()
+	if !ok || !sameProposal(retained, higherProposal) {
+		t.Fatal("higher-view proposal was replaced")
+	}
+
+	// A peer whose timer ran ahead while idle has no evidence to protect and
+	// can rejoin the authenticated lower-round leader.
+	for key := range idleAhead.proposals {
+		if key.Height == 1 {
+			delete(idleAhead.proposals, key)
+		}
+	}
+	for key := range idleAhead.votes {
+		if key.Height == 1 {
+			delete(idleAhead.votes, key)
+		}
+	}
+	idleAhead.currentRound = 9
+	idleAhead.roundDeadline = time.Now().Add(time.Minute)
+	if _, err := idleAhead.ProcessProposal(lowerProposal); err != nil {
+		t.Fatalf("idle-ahead peer failed to rejoin: %v", err)
+	}
+	if idleAhead.CurrentRound() != 0 {
+		t.Fatalf("idle-ahead peer round=%d, want 0", idleAhead.CurrentRound())
+	}
+	if _, ok := idleAhead.CurrentProposal(); !ok {
+		t.Fatal("rejoined peer did not retain the lower-round proposal")
+	}
+}
+
+func TestCompetingTransitionsConvergeWithThreeEngines(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	for _, engine := range engines {
+		if err := engine.SetRoundTimeout(time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	roundZeroLeader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	roundOneLeader := engineForMember(t, engines, engines[0].Leader(1, 1).ID)
+
+	var roundZero, roundOne Proposal
+	var leaderVoteOne Vote
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		roundZero, _, _ = roundZeroLeader.Propose(model.StateTransition{
+			Type: TransitionUpsertGroup, Group: &model.Group{ID: "scheduler-a"},
+		}, 0)
+	}()
+	go func() {
+		defer wg.Done()
+		roundOne, leaderVoteOne, _ = roundOneLeader.Propose(model.StateTransition{
+			Type: TransitionUpsertGroup, Group: &model.Group{ID: "scheduler-b"},
+		}, 1)
+	}()
+	wg.Wait()
+	if roundZero.Height != 1 || roundOne.Height != 1 {
+		t.Fatalf("competing proposals: %d/%d", roundZero.Height, roundOne.Height)
+	}
+
+	// Simulate independent retries racing through the mesh. Neither scheduler
+	// has a QC yet; delivery order determines which uncommitted view followers
+	// last observed.
+	for _, engine := range engines {
+		_, _ = engine.ProcessProposal(roundZero)
+	}
+	for _, engine := range engines {
+		_, _ = engine.ProcessProposal(roundOne)
+	}
+
+	// The round-one scheduler wins the next retry race. Every expected-leader
+	// proposal is valid, so all engines align to it rather than accumulating
+	// ever-higher local rounds.
+	for _, engine := range engines {
+		if engine.LocalID() == roundOneLeader.LocalID() {
+			continue
+		}
+		if _, err := engine.ProcessProposal(roundOne); err != nil {
+			t.Fatalf("%s accept winner: %v", engine.LocalID(), err)
+		}
+	}
+	qc, ready, err := roundOneLeader.ProcessVote(leaderVoteOne)
+	if err != nil || ready {
+		t.Fatalf("winner leader vote: ready=%v err=%v", ready, err)
+	}
+	for _, engine := range engines {
+		if engine.LocalID() == roundOneLeader.LocalID() {
+			continue
+		}
+		vote, err := engine.ProcessProposal(roundOne)
+		if err != nil {
+			t.Fatal(err)
+		}
+		qc, ready, err = roundOneLeader.ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			break
+		}
+	}
+	if !ready {
+		t.Fatal("competing schedulers did not converge on a quorum")
+	}
+
+	want := roundOne.State
+	for _, engine := range engines {
+		snapshot, err := engine.Commit(roundOne, qc)
+		if err != nil {
+			t.Fatalf("%s commit: %v", engine.LocalID(), err)
+		}
+		if snapshot.Height != 1 || snapshot.QC.Round != 1 || snapshot.Transition.Group.ID != "scheduler-b" {
+			t.Fatalf("%s committed height=%d round=%d transition=%s", engine.LocalID(), snapshot.Height, snapshot.QC.Round, snapshot.Transition.Group.ID)
+		}
+		got := engine.CurrentState()
+		if !bytes.Equal(StateHash(got), StateHash(want)) {
+			t.Fatalf("%s state diverged", engine.LocalID())
+		}
 	}
 }
 

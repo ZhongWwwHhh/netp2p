@@ -185,7 +185,7 @@ func clientStatus(node *p2p.Node, netClient *client.Client, options clientOption
 		"height": netClient.SnapshotHeight(), "packetListen": options.packetListen,
 		"mode": clientMode(tunDevice), "assignments": paths,
 		"state": string(netClient.State()), "manager": netClient.ManagerStatus().ActiveManager.String(),
-		"nextAction": netClient.NextAction(),
+		"pathDiagnostics": netClient.PathDiagnostics(), "nextAction": netClient.NextAction(),
 	})
 }
 

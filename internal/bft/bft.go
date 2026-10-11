@@ -688,22 +688,24 @@ func (engine *Engine) hasUncommittedHeightLocked(height uint64) bool {
 }
 
 func (engine *Engine) acceptRoundLocked(round uint64) error {
-	switch {
-	case round < engine.currentRound:
-		// A peer whose local timeout ran ahead while its view stayed idle may
-		// rejoin the authenticated leader's round. Never erase a higher view
-		// that already has evidence: a conflicting leader proposal cannot
-		// replace votes that may have accumulated toward a QC.
-		if engine.hasUncommittedHeightLocked(engine.height + 1) {
-			return fmt.Errorf("stale proposal round %d conflicts with current view %d", round, engine.currentRound)
-		}
-		engine.clearUncommittedHeightLocked(engine.height + 1)
-		engine.startRoundLocked(round)
-	case round > engine.currentRound+uint64(engine.params.Size):
-		return fmt.Errorf("proposal round %d skips ahead of current round %d", round, engine.currentRound)
-	case round > engine.currentRound:
-		engine.clearUncommittedHeightLocked(engine.height + 1)
+	return engine.alignRoundLocked(round)
+}
+
+// alignRoundLocked adopts the round carried by an authenticated proposal from
+// the deterministic leader for the next height. Committee transport authenticates
+// the sender; at this layer we additionally require that sender to equal the
+// height/round leader before changing the local view. Higher views are safe to
+// adopt directly. A lower view may discard uncommitted evidence only when the
+// engine is idle; otherwise that evidence may already be accumulating votes.
+func (engine *Engine) alignRoundLocked(round uint64) error {
+	if round == engine.currentRound {
+		return nil
 	}
+	if round < engine.currentRound && engine.hasUncommittedHeightLocked(engine.height+1) {
+		return fmt.Errorf("stale proposal round %d conflicts with current view %d", round, engine.currentRound)
+	}
+	engine.clearUncommittedHeightLocked(engine.height + 1)
+	engine.startRoundLocked(round)
 	return nil
 }
 
@@ -846,25 +848,9 @@ func (engine *Engine) ProcessProposal(proposal Proposal) (Vote, error) {
 	if proposal.LeaderID != engine.Leader(proposal.Height, proposal.Round).ID {
 		return Vote{}, ErrUnknownLeader
 	}
-	// Check view admissibility before the existing-proposal fast path. A lower
-	// round must not silently re-vote for its old proposal after a higher view
-	// has already collected evidence.
-	if proposal.Round < engine.currentRound && engine.hasUncommittedHeightLocked(engine.height+1) {
-		return Vote{}, fmt.Errorf("stale proposal round %d conflicts with current view %d", proposal.Round, engine.currentRound)
-	}
-	if proposal.Round > engine.currentRound+uint64(engine.params.Size) {
-		return Vote{}, fmt.Errorf("proposal round %d skips ahead of current round %d", proposal.Round, engine.currentRound)
-	}
 	key := proposalKey{Height: proposal.Height, Round: proposal.Round}
-	if existing, ok := engine.proposals[key]; ok {
-		if !sameProposal(existing, proposal) {
-			return Vote{}, fmt.Errorf("conflicting proposal at height %d round %d", proposal.Height, proposal.Round)
-		}
-		for _, vote := range engine.votes[key] {
-			if vote.VoterID == engine.localID {
-				return vote, nil
-			}
-		}
+	if existing, ok := engine.proposals[key]; ok && !sameProposal(existing, proposal) {
+		return Vote{}, fmt.Errorf("conflicting proposal at height %d round %d", proposal.Height, proposal.Round)
 	}
 	// Re-derive the proposed state from the leader's transition so a byzantine
 	// leader cannot ship a state that its own decision log does not justify.
@@ -877,15 +863,28 @@ func (engine *Engine) ProcessProposal(proposal Proposal) (Vote, error) {
 	if !bytes.Equal(StateHash(expected), StateHash(proposal.State)) {
 		return Vote{}, fmt.Errorf("proposal state does not match transition")
 	}
+	// A replay can arrive while this engine has already advanced to another
+	// idle view. Validate the proposal first, then let the expected-leader view
+	// win before returning the stored vote.
+	if _, ok := engine.proposals[key]; ok {
+		if err := engine.alignRoundLocked(proposal.Round); err != nil {
+			return Vote{}, err
+		}
+		for _, vote := range engine.votes[key] {
+			if vote.VoterID == engine.localID {
+				return vote, nil
+			}
+		}
+	}
+	// For a new proposal, sign before changing view so a local key failure
+	// leaves the current view and its evidence untouched.
 	vote, err := engine.localVote(proposal)
 	if err != nil {
 		return Vote{}, fmt.Errorf("sign local vote at height %d round %d: %w", proposal.Height, proposal.Round, err)
 	}
-	engine.expireRoundLocked(proposal.Height)
-	if err := engine.acceptRoundLocked(proposal.Round); err != nil {
+	if err := engine.alignRoundLocked(proposal.Round); err != nil {
 		return Vote{}, err
 	}
-	engine.startRoundLocked(proposal.Round)
 	engine.proposals[key] = proposal
 	engine.addVoteLocked(vote)
 	return vote, nil

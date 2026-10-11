@@ -66,6 +66,15 @@ type ClientManagerStatus struct {
 	NextAction      string
 }
 
+// ClientPathDiagnostics summarizes the latest outbound path decision. Values
+// identify peers and failure classes only; they never contain packet payloads
+// or raw packet contents.
+type ClientPathDiagnostics struct {
+	LastState              string `json:"lastState,omitempty"`
+	LastError              string `json:"lastError,omitempty"`
+	LastOutboundDropReason string `json:"lastOutboundDropReason,omitempty"`
+}
+
 // persistedClientState is the local recovery record. The snapshot was fully
 // validated before it was written, so a restart can use it read-only while
 // manager connectivity is re-established.
@@ -470,6 +479,44 @@ func (client *Client) ManagerStatus() ClientManagerStatus {
 	}
 }
 
+// PathDiagnostics returns the latest certified-path decision and outbound drop
+// reason. It is safe for concurrent use with the packet read loop.
+func (client *Client) PathDiagnostics() ClientPathDiagnostics {
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	return ClientPathDiagnostics{
+		LastState: string(client.pathState), LastError: client.pathError,
+		LastOutboundDropReason: client.outboundDrop,
+	}
+}
+
+func (client *Client) recordPathSelection(destination peer.ID, status PathSelectionStatus) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.pathState = status.State
+	if status.OK {
+		client.pathError = ""
+		return
+	}
+	message := "path selection failed"
+	if status.Err != nil {
+		message = status.Err.Error()
+	}
+	client.pathError = fmt.Sprintf("to %s: %s", destination, message)
+}
+
+func (client *Client) markOutboundDrop(reason string) {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.outboundDrop = reason
+}
+
+func (client *Client) clearOutboundDrop() {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	client.outboundDrop = ""
+}
+
 // NextAction gives diagnostics and the doctor a concrete operator-facing next
 // step instead of leaving them to infer one from a warning list.
 func (client *Client) NextAction() string {
@@ -479,6 +526,12 @@ func (client *Client) NextAction() string {
 }
 
 func (client *Client) nextActionLocked() string {
+	if client.outboundDrop != "" {
+		return fmt.Sprintf(
+			"Last data-plane drop: %s. Run netp2p doctor to check assignment state, routes, and manager connectivity.",
+			client.outboundDrop,
+		)
+	}
 	switch client.connectionState {
 	case ClientStateReady:
 		return "No action required."

@@ -39,6 +39,7 @@ func (client *Client) sendViaAssignment(sourceID, destinationID string, raw []by
 		return false
 	}
 	assignment, path, status := client.paths.selectWithStatus(source, destination)
+	client.recordPathSelection(destination, status)
 	if !status.OK {
 		return false
 	}
