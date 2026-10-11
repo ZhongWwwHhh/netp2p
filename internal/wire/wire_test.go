@@ -47,7 +47,7 @@ func sampleState() model.NetworkState {
 		}},
 		Nameservers: []model.Nameserver{{
 			ID: "ns1", Name: "primary", Groups: []string{"clients"},
-			MatchDomains: []string{"corp.internal"}, Servers: []string{"1.1.1.1:53"}, Primary: true, Enabled: true,
+			MatchDomains: []string{"corp.internal"}, Servers: []string{"203.0.113.53:53"}, Primary: true, Enabled: true,
 		}},
 		Zones: []model.DNSZone{{
 			ID: "z1", Domain: "example.test",
@@ -104,7 +104,7 @@ func TestNetworkStateRoundTripIsDeterministic(t *testing.T) {
 func TestControlMessagesRoundTrip(t *testing.T) {
 	login := protocol.LoginRequest{
 		NetworkID: "net-1", SetupKey: "k", JWTToken: "jwt", PeerID: "peer-a",
-		Addresses: []string{"/ip4/1.2.3.4/udp/1/quic-v1"}, Hostname: "alpha", OS: "linux",
+		Addresses: []string{"/ip4/203.0.113.4/udp/1/quic-v1"}, Hostname: "alpha", OS: "linux",
 		ClientVersion: "0.1.0", ProtocolVersion: "2.0.0", Capabilities: []string{"protobuf"},
 	}
 	{

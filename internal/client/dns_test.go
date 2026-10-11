@@ -14,8 +14,8 @@ func TestBuildDNSConfigScopesToPeerGroups(t *testing.T) {
 			{PeerID: "peer-b", OverlayIP: "100.64.0.2", DNSLabel: "peer-b", Groups: []string{"ops"}},
 		},
 		Nameservers: []model.Nameserver{
-			{ID: "ns-all", Servers: []string{"1.1.1.1"}, Enabled: true},
-			{ID: "ns-ops", Groups: []string{"ops"}, Servers: []string{"8.8.8.8"}, Enabled: true},
+			{ID: "ns-all", Servers: []string{"203.0.113.53"}, Enabled: true},
+			{ID: "ns-ops", Groups: []string{"ops"}, Servers: []string{"198.51.100.53"}, Enabled: true},
 		},
 		Zones: []model.DNSZone{
 			{ID: "z-all", Domain: "corp.internal", Enabled: true},
@@ -23,7 +23,7 @@ func TestBuildDNSConfigScopesToPeerGroups(t *testing.T) {
 		},
 	}
 	self := state.Peers[0]
-	config := buildDNSConfig(state, self, []string{"9.9.9.9:53"})
+	config := buildDNSConfig(state, self, []string{"192.0.2.53:53"})
 
 	if config.Domain != "netp2p.internal" {
 		t.Fatalf("domain = %q", config.Domain)
@@ -40,7 +40,7 @@ func TestBuildDNSConfigScopesToPeerGroups(t *testing.T) {
 	if config.Disabled {
 		t.Fatal("dns should be enabled")
 	}
-	if len(config.Upstreams) != 1 || config.Upstreams[0] != "9.9.9.9:53" {
+	if len(config.Upstreams) != 1 || config.Upstreams[0] != "192.0.2.53:53" {
 		t.Fatalf("upstreams = %v", config.Upstreams)
 	}
 }

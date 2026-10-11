@@ -203,7 +203,7 @@ func TestGatewayReturnRejectedWithoutFlowOrCoverage(t *testing.T) {
 	outbound := synthUDPPacket(t, "100.64.0.1", "10.10.4.20", 4000, 4444)
 	flow, _ := packet.IPv4Packet(outbound).Flow()
 	netClient.flows.Observe(conntrack.Key(flow))
-	netClient.handleFrame(remote, synthUDPPacket(t, "8.8.8.8", "100.64.0.1", 4444, 4000))
+	netClient.handleFrame(remote, synthUDPPacket(t, "203.0.113.53", "100.64.0.1", 4444, 4000))
 
 	if len(sink.written) != 0 {
 		t.Fatalf("kernel writes = %d, want none for unverified gateway traffic", len(sink.written))

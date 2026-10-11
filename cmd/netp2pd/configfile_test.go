@@ -118,9 +118,9 @@ func TestClientOptionsFromRuntimeConfigDefaultsMetricsListen(t *testing.T) {
 
 func TestClientOptionsFromRuntimeConfigUsesClientTrustManagers(t *testing.T) {
 	material, err := config.GenerateProductionMaterial("netp2p-production", "100.64.0.0/24", []config.ProductionManagerSpec{
-		{ID: "fr", DNSName: "manager-1.netp2p.example", PublicIPv4: "203.0.113.11", Port: 4001, WebRTCPort: 4101},
-		{ID: "sg", DNSName: "manager-2.netp2p.example", PublicIPv4: "203.0.113.12", Port: 4001, WebRTCPort: 4101},
-		{ID: "us-phx", DNSName: "manager-3.netp2p.example", PublicIPv4: "203.0.113.13", Port: 4001, WebRTCPort: 4101},
+		{ID: "manager-1", DNSName: "manager-1.netp2p.example", PublicIPv4: "203.0.113.11", Port: 4001, WebRTCPort: 4101},
+		{ID: "manager-2", DNSName: "manager-2.netp2p.example", PublicIPv4: "203.0.113.12", Port: 4001, WebRTCPort: 4101},
+		{ID: "manager-3", DNSName: "manager-3.netp2p.example", PublicIPv4: "203.0.113.13", Port: 4001, WebRTCPort: 4101},
 	})
 	if err != nil {
 		t.Fatal(err)

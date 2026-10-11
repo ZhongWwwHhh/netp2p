@@ -1,22 +1,20 @@
 openapi: 3.0.3
 info:
   title: NetP2P Management API
-  version: 0.3.0-draft
+  version: 0.3.1
   description: |
     Contract for the NetP2P manager REST API. Paths with `x-status: planned`
-    do not exist in the current implementation and are reserved for v0.3.0.
+    do not exist in the current implementation and are reserved for v0.3.1.
     The wire protocol is 3.0.0.
   license:
     name: Apache-2.0
 servers:
-  - url: https://console.netp2p.example:9443
-    description: Primary production round-robin endpoint
-  - url: https://manager-1.netp2p.example:9443
-    description: France direct manager
-  - url: https://manager-2.netp2p.example:9443
-    description: Singapore direct manager
-  - url: https://manager-3.netp2p.example:9443
-    description: US Phoenix direct manager
+  - url: https://{managerHost}
+    description: Any NetP2P manager API endpoint
+    variables:
+      managerHost:
+        default: manager-1.netp2p.example:9443
+        description: Manager DNS name and HTTPS port.
 tags:
   - name: Bootstrap
   - name: Auth
@@ -181,7 +179,7 @@ paths:
       tags: [Users]
       summary: Update user email or password
       description: |
-        Implemented in the current working tree and expected in v0.3.0. The
+        Implemented in the current working tree and expected in v0.3.1. The
         server derives the actor, protects owner records, stores an Argon2id
         verifier, records credentialsChangedAt, and rejects older sessions.
         At least one of email and password is required; each may be changed

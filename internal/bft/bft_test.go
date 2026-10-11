@@ -569,7 +569,7 @@ func TestDNSAndPeerTransitions(t *testing.T) {
 
 	nameserver := model.Nameserver{
 		ID: "ns-1", Name: "corp", Groups: []string{"clients-a"},
-		Servers: []string{"1.1.1.1"}, Enabled: true,
+		Servers: []string{"203.0.113.53"}, Enabled: true,
 	}
 	if err := ApplyTransition(&state, model.StateTransition{Type: TransitionUpsertNS, Nameserver: &nameserver}); err != nil {
 		t.Fatalf("upsert nameserver: %v", err)

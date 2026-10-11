@@ -180,7 +180,7 @@ describe('formatting', () => {
 describe('transition payload shapes', () => {
   it('builds the DNS and resource transitions the API expects', () => {
     const transitions: StateTransition[] = [
-      { type: 'upsert_nameserver', nameserver: { id: 'ns', name: 'ns', groups: [], servers: ['1.1.1.1'], enabled: true } },
+      { type: 'upsert_nameserver', nameserver: { id: 'ns', name: 'ns', groups: [], servers: ['203.0.113.53'], enabled: true } },
       { type: 'remove_nameserver', targetId: 'ns' },
       { type: 'upsert_zone', zone: { id: 'z', domain: 'internal', records: [], enabled: true } },
       { type: 'remove_zone', targetId: 'z' },

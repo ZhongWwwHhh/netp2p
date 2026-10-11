@@ -307,9 +307,9 @@ func TestSanitizeLabel(t *testing.T) {
 }
 
 func TestParseNameservers(t *testing.T) {
-	content := "# comment\nnameserver 8.8.8.8\nsearch corp\nnameserver 1.1.1.1:5353\n; ignored\nnameserver\n"
+	content := "# comment\nnameserver 203.0.113.53\nsearch corp\nnameserver 198.51.100.53:5353\n; ignored\nnameserver\n"
 	got := ParseNameservers(content)
-	want := []string{"8.8.8.8:53", "1.1.1.1:5353"}
+	want := []string{"203.0.113.53:53", "198.51.100.53:5353"}
 	if len(got) != len(want) {
 		t.Fatalf("nameservers = %v, want %v", got, want)
 	}
@@ -322,12 +322,12 @@ func TestParseNameservers(t *testing.T) {
 
 func TestTakeoverAndRestore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "resolv.conf")
-	original := "nameserver 8.8.8.8\n"
+	original := "nameserver 203.0.113.53\n"
 	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	resolv, err := Takeover(path, "127.0.0.1:53", []string{"8.8.8.8:53"})
+	resolv, err := Takeover(path, "127.0.0.1:53", []string{"203.0.113.53:53"})
 	if err != nil {
 		t.Fatalf("takeover: %v", err)
 	}

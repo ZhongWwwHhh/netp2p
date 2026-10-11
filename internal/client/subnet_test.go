@@ -45,7 +45,7 @@ func TestSubnetGatewayIgnoresUnroutedDestination(t *testing.T) {
 	netClient := &Client{}
 	netClient.self = model.PeerRecord{PeerID: "self", OverlayIP: "100.64.0.1"}
 	netClient.snapshot = model.SignedSnapshot{State: subnetState()}
-	if _, ok := netClient.subnetGateway(net.ParseIP("8.8.8.8")); ok {
+	if _, ok := netClient.subnetGateway(net.ParseIP("203.0.113.53")); ok {
 		t.Fatal("unrouted destination must not resolve to a gateway")
 	}
 }
@@ -73,7 +73,7 @@ func TestExitNodeForPacketHonoursDistributionGroup(t *testing.T) {
 	if netClient.exitNodeForPacket(outsider, net.ParseIP("10.10.4.20")) {
 		t.Fatal("gateway must reject a source outside the distribution group")
 	}
-	if netClient.exitNodeForPacket(allowed, net.ParseIP("8.8.8.8")) {
+	if netClient.exitNodeForPacket(allowed, net.ParseIP("203.0.113.53")) {
 		t.Fatal("gateway must not forward destinations outside the route")
 	}
 }

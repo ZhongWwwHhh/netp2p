@@ -166,6 +166,24 @@ jobs:
             "dist/netp2p-$VERSION-sbom.cdx.json" \
             "dist/netp2p-$VERSION-image-digest.txt" \
             "dist/netp2p-caddy-$VERSION-image-digest.txt"
+      - name: Scan release artifacts
+        env:
+          RELEASE_DENYLIST: ${{ secrets.RELEASE_DENYLIST }}
+        run: |
+          python scripts/check_docs.py
+          if [ -z "$RELEASE_DENYLIST" ]; then
+            echo "RELEASE_DENYLIST must contain one private deployment value per line" >&2
+            exit 1
+          fi
+          printf '%s\n' "$RELEASE_DENYLIST" > "$RUNNER_TEMP/netp2p-release-denylist"
+          while IFS= read -r value; do
+            [ -z "$value" ] && continue
+            if grep -R -a -F -- "$value" dist >/dev/null 2>&1; then
+              echo "release artifact contains a denied deployment value" >&2
+              exit 1
+            fi
+          done < "$RUNNER_TEMP/netp2p-release-denylist"
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:

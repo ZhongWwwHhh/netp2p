@@ -17,9 +17,9 @@ func TestInitProductionWritesValidatedTrustDocuments(t *testing.T) {
 	args := []string{
 		"--network", "netp2p-production",
 		"--output-dir", outputDir,
-		"--manager", "fr,manager-1.netp2p.example,203.0.113.11,4001",
-		"--manager", "sg,manager-2.netp2p.example,203.0.113.12,4001",
-		"--manager", "us-phx,manager-3.netp2p.example,203.0.113.13,4001",
+		"--manager", "manager-1,manager-1.netp2p.example,203.0.113.11,4001",
+		"--manager", "manager-2,manager-2.netp2p.example,203.0.113.12,4001",
+		"--manager", "manager-3,manager-3.netp2p.example,203.0.113.13,4001",
 	}
 	var err error
 	output := captureInitOutput(t, func() { err = runInitProduction(args) })
@@ -49,9 +49,9 @@ func TestInitProductionWritesValidatedTrustDocuments(t *testing.T) {
 
 	var bundles [3]config.ManagerBundle
 	paths := []string{
-		filepath.Join(outputDir, "manager-fr.json"),
-		filepath.Join(outputDir, "manager-sg.json"),
-		filepath.Join(outputDir, "manager-us-phx.json"),
+		filepath.Join(outputDir, "manager-manager-1.json"),
+		filepath.Join(outputDir, "manager-manager-2.json"),
+		filepath.Join(outputDir, "manager-manager-3.json"),
 	}
 	for index, path := range paths {
 		bundle, loadErr := config.LoadManagerBundle(path, manifest)
@@ -123,8 +123,8 @@ func TestInitProductionWritesValidatedTrustDocuments(t *testing.T) {
 func TestInitProductionRequiresThreeManagers(t *testing.T) {
 	err := runInitProduction([]string{
 		"--output-dir", filepath.Join(t.TempDir(), "bootstrap"),
-		"--manager", "fr,manager-1.netp2p.example,203.0.113.11,4001",
-		"--manager", "sg,manager-2.netp2p.example,203.0.113.12,4001",
+		"--manager", "manager-1,manager-1.netp2p.example,203.0.113.11,4001",
+		"--manager", "manager-2,manager-2.netp2p.example,203.0.113.12,4001",
 	})
 	if err == nil || !strings.Contains(err.Error(), "exactly three") {
 		t.Fatalf("two-manager input error = %v", err)
@@ -137,9 +137,9 @@ func TestInitProductionShowSecretsPrintsOnce(t *testing.T) {
 	output := captureInitOutput(t, func() {
 		err = runInitProduction([]string{
 			"--output-dir", outputDir,
-			"--manager", "fr,manager-1.netp2p.example,203.0.113.11,4001",
-			"--manager", "sg,manager-2.netp2p.example,203.0.113.12,4001",
-			"--manager", "us-phx,manager-3.netp2p.example,203.0.113.13,4001",
+			"--manager", "manager-1,manager-1.netp2p.example,203.0.113.11,4001",
+			"--manager", "manager-2,manager-2.netp2p.example,203.0.113.12,4001",
+			"--manager", "manager-3,manager-3.netp2p.example,203.0.113.13,4001",
 			"--show-secrets",
 		})
 	})
@@ -150,7 +150,7 @@ func TestInitProductionShowSecretsPrintsOnce(t *testing.T) {
 		t.Fatalf("show-secrets output is missing tokens:\n%s", output)
 	}
 	var bundle config.ManagerBundle
-	raw, err := os.ReadFile(filepath.Join(outputDir, "manager-fr.json"))
+	raw, err := os.ReadFile(filepath.Join(outputDir, "manager-manager-1.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
