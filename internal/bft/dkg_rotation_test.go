@@ -91,7 +91,9 @@ func TestDKGKeyRotation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("key set %d: %v", index, err)
 		}
-		engine.SetDKGLoader(func(epoch uint64) (*bls.KeySet, bool) {
+		engine.SetDKGLoader(func(epoch uint64, committee []model.CommitteeMember, params model.CommitteeParams) (*bls.KeySet, bool) {
+			_ = committee
+			_ = params
 			if epoch == 1 {
 				return keySet, true
 			}

@@ -20,6 +20,7 @@ import (
 // transitions. Aggregating client reports for this long prevents per-packet
 // accounting from churning consensus.
 const quotaSettlementInterval = 60 * time.Second
+const maxQuotaReportIncrements = 1024
 
 // handleQuotaReport aggregates a client's usage increments. Reports are
 // non-certified input: the manager only turns them into a transition, which the
@@ -41,6 +42,10 @@ func (manager *Manager) handleQuotaReport(stream network.Stream) {
 	if report.ProtocolVersion != version.ProtocolVersion {
 		return
 	}
+	if len(report.Increments) > maxQuotaReportIncrements {
+		return
+	}
+	state := manager.engine.CurrentState()
 	manager.mu.Lock()
 	if manager.quotaPending == nil {
 		manager.quotaPending = make(map[string]uint64)
@@ -49,7 +54,14 @@ func (manager *Manager) handleQuotaReport(stream network.Stream) {
 		if increment.BudgetID == "" || increment.Bytes == 0 {
 			continue
 		}
-		manager.quotaPending[increment.BudgetID] += increment.Bytes
+		if !budgetAppliesToPeer(state, increment.BudgetID, report.PeerID) {
+			continue
+		}
+		current := manager.quotaPending[increment.BudgetID]
+		if increment.Bytes > ^uint64(0)-current {
+			continue
+		}
+		manager.quotaPending[increment.BudgetID] = current + increment.Bytes
 	}
 	manager.mu.Unlock()
 }
@@ -104,8 +116,8 @@ func (manager *Manager) SettleQuota(now time.Time) {
 		if !sameUTCMonth(budget.UpdatedAt, now) {
 			monthly = 0
 		}
-		daily += pending[id]
-		monthly += pending[id]
+		daily = saturatingAdd(daily, pending[id])
+		monthly = saturatingAdd(monthly, pending[id])
 		transition := model.StateTransition{
 			Type: bft.TransitionUpdateBudgetUse,
 			BudgetUsage: &model.BudgetUsage{
@@ -139,11 +151,88 @@ func (manager *Manager) QuotaUsage() []model.TrafficBudget {
 	manager.mu.RUnlock()
 	result := make([]model.TrafficBudget, 0, len(state.Budgets))
 	for _, budget := range state.Budgets {
-		budget.UsedDailyBytes += pending[budget.ID]
-		budget.UsedMonthlyBytes += pending[budget.ID]
+		budget.UsedDailyBytes = saturatingAdd(budget.UsedDailyBytes, pending[budget.ID])
+		budget.UsedMonthlyBytes = saturatingAdd(budget.UsedMonthlyBytes, pending[budget.ID])
 		result = append(result, budget)
 	}
 	return result
+}
+
+func saturatingAdd(value, increment uint64) uint64 {
+	if increment > ^uint64(0)-value {
+		return ^uint64(0)
+	}
+	return value + increment
+}
+
+func budgetAppliesToPeer(state model.NetworkState, budgetID, peerID string) bool {
+	if !certifiedPeer(state, peerID) {
+		return false
+	}
+	var budget *model.TrafficBudget
+	for index := range state.Budgets {
+		if state.Budgets[index].ID == budgetID {
+			budget = &state.Budgets[index]
+			break
+		}
+	}
+	if budget == nil || peerID == "" {
+		return false
+	}
+	switch budget.SubjectType {
+	case "peer":
+		return budget.SubjectID == peerID
+	case "group":
+		return peerInCertifiedGroup(state, budget.SubjectID, peerID)
+	case "route":
+		for _, route := range state.Routes {
+			if route.ID != budget.SubjectID {
+				continue
+			}
+			if len(route.DistributionGroup) == 0 {
+				return true
+			}
+			for _, groupID := range route.DistributionGroup {
+				if peerInCertifiedGroup(state, groupID, peerID) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func certifiedPeer(state model.NetworkState, peerID string) bool {
+	for _, peer := range state.Peers {
+		if peer.PeerID == peerID {
+			return true
+		}
+	}
+	return false
+}
+
+func peerInCertifiedGroup(state model.NetworkState, groupID, peerID string) bool {
+	for _, peer := range state.Peers {
+		if peer.PeerID != peerID {
+			continue
+		}
+		for _, candidate := range peer.Groups {
+			if candidate == groupID {
+				return true
+			}
+		}
+	}
+	for _, group := range state.Groups {
+		if group.ID != groupID {
+			continue
+		}
+		for _, member := range group.PeerIDs {
+			if member == peerID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func findBudget(state model.NetworkState, id string) (model.TrafficBudget, bool) {

@@ -75,7 +75,7 @@ func TestStartClientMetricsBindsLoopbackAndExposesCollectors(t *testing.T) {
 
 func TestStartDNSUsesClientMetricsCollector(t *testing.T) {
 	collector := metrics.New()
-	resolver, restoreDNS := startDNS(clientOptions{dnsListen: "127.0.0.1:0"}, []string{"127.0.0.1:1"}, false, collector)
+	resolver, restoreDNS := startDNS(clientOptions{dnsListen: testDNSListenAddress(t)}, []string{"127.0.0.1:1"}, false, collector)
 	if resolver == nil {
 		t.Fatal("dns resolver was not started")
 	}
@@ -99,11 +99,41 @@ func TestStartDNSUsesClientMetricsCollector(t *testing.T) {
 	}
 }
 
+func testDNSListenAddress(t *testing.T) string {
+	t.Helper()
+	for port := 20000; port < 25000; port++ {
+		address := fmt.Sprintf("127.0.0.1:%d", port)
+		listener, err := net.ListenPacket("udp", address)
+		if err == nil {
+			_ = listener.Close()
+			return address
+		}
+	}
+	t.Fatal("no UDP test port is available")
+	return ""
+}
+
 func TestUpdateClientMetricsPublishesQueueDepth(t *testing.T) {
 	collector := metrics.New()
 	updateClientMetrics(client.DataPlaneStats{OutboundQueueDepth: 7}, collector)
 	if exposition := metricsExposition(t, collector); !strings.Contains(exposition, "netp2p_forward_queue_depth 7") {
 		t.Fatalf("forward queue depth metric missing from exposition:\n%s", exposition)
+	}
+}
+
+func TestPublishClientMetricsAddsOutboundDropDelta(t *testing.T) {
+	collector := metrics.New()
+	publishClientMetrics(
+		client.DataPlaneStats{OutboundQueueDepth: 1, OutboundDrops: 4},
+		client.DataPlaneStats{OutboundQueueDepth: 2, OutboundDrops: 7},
+		collector,
+	)
+	exposition := metricsExposition(t, collector)
+	if !strings.Contains(exposition, "netp2p_forward_queue_depth 2") {
+		t.Fatalf("queue depth missing from metrics:\n%s", exposition)
+	}
+	if !strings.Contains(exposition, "netp2p_forward_dropped_total 3") {
+		t.Fatalf("outbound drop delta missing from metrics:\n%s", exposition)
 	}
 }
 

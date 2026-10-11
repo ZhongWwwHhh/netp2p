@@ -1,15 +1,16 @@
 # Install NetP2P managers
 
-Deploy a three-manager committee with Docker Compose and enroll your first client.
+Deploy a multi-manager committee with Docker Compose and enroll your first client.
 
 ## Outcome
 
-Three manager containers running behind Caddy, a certified network, and a working
-owner account on the web console.
+A committee of three or more manager containers running behind Caddy, a certified
+network, and a working owner account on the web console.
 
 ## Prerequisites
 
-- Three Linux hosts (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
+- At least three Linux hosts (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
+  Four managers are recommended when you want one-manager fault tolerance.
 - Enough disk for the SQLite ledger, DKG shares, logs, and backup retention on
   every manager; the exact size depends on peer and event volume.
 - DNS A records pointing each manager hostname to its public IPv4, and a round-robin
@@ -45,7 +46,7 @@ sudo chown 999:999 /var/lib/netp2p
 ### 2. Render configuration
 
 Generate production material on a trusted administrator machine. The command
-requires exactly three managers:
+accepts three or more managers:
 
 ```bash
 mkdir -p ./netp2p-bootstrap
@@ -57,7 +58,8 @@ netp2p init production \
   --output-dir ./netp2p-bootstrap \
   --manager manager-1,manager-1.netp2p.example,203.0.113.11,4001 \
   --manager manager-2,manager-2.netp2p.example,203.0.113.12,4001 \
-  --manager manager-3,manager-3.netp2p.example,203.0.113.13,4001
+  --manager manager-3,manager-3.netp2p.example,203.0.113.13,4001 \
+  --manager manager-4,manager-4.netp2p.example,203.0.113.14,4001
 ```
 
 The output contains:
@@ -79,7 +81,8 @@ Use this mapping on each manager host:
 | Caddy configuration | `/etc/netp2p/Caddyfile` | `0644` |
 
 Keep `client-trust.json` with your client-distribution process. Never copy a
-manager bundle, session secret, admin token, or DKG share to a client.
+manager bundle, session secret, admin token, manager join token, or DKG share to
+a client.
 
 Copy only the matching private bundle to each host. Never place the whole
 bootstrap directory on every manager, in source control, or in an unencrypted
@@ -98,8 +101,10 @@ image: ghcr.io/zhongwwwhhh/netp2p-manager@sha256:<digest>
 
 ### 3. Pre-pull and start all together
 
-Because a 3-of-3 committee needs every member to accept writes, start all three
-at the same time:
+For a 3-of-3 committee, every member must be online to accept writes. For a
+4-of-4 committee with one fault slot, three of four members are enough for
+writes. In both cases start or upgrade all managers inside one maintenance
+window so the committee does not run with mixed versions:
 
 ```bash
 # on each host
@@ -107,7 +112,7 @@ docker compose pull
 docker compose create --force-recreate
 ```
 
-Then start all three within your maintenance window:
+Then start all managers within your maintenance window:
 
 ```bash
 docker compose start
@@ -135,9 +140,11 @@ Check readiness on each manager:
 curl -fsS https://manager-1.netp2p.example:9443/readyz
 curl -fsS https://manager-2.netp2p.example:9443/readyz
 curl -fsS https://manager-3.netp2p.example:9443/readyz
+curl -fsS https://manager-4.netp2p.example:9443/readyz
 ```
 
-Require HTTP 200, `ready`, equal BFT heights, and `3/3` committee connectivity.
+Require HTTP 200, `ready`, equal BFT heights, and the configured committee
+connectivity (`3/3` for three managers, `3/4` for four managers).
 `/healthz` only proves the process is alive.
 
 Then enroll a client per the [client guides](../clients/index.md) and verify
@@ -146,7 +153,7 @@ bidirectional connectivity with `netp2p ping`.
 ## Troubleshooting
 
 - **Bootstrap generation fails with the wrong manager count**: the production
-  generator requires exactly three `--manager` inputs.
+  generator requires at least three `--manager` inputs.
 - **A manager rejects its bundle**: confirm the bundle's manager ID matches the
   host and that the public manifest is the same on all three hosts.
 - **Certificate or console errors**: use the DNS names in the manifest and check

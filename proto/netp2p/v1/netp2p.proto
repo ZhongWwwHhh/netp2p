@@ -224,6 +224,50 @@ message TrafficBudget {
   uint64 peak_burst_bytes = 12;
 }
 
+message RoutingDomainKey {
+  string source_manager_id = 1;
+  string source_group_id = 2;
+  string destination_scope = 3;
+  string flow_class = 4;
+}
+
+message PathFamily {
+  string id = 1;
+  string kind = 2;
+  repeated string manager_hops = 3;
+  repeated string source_groups = 4;
+  repeated string destination_scopes = 5;
+  repeated string flow_classes = 6;
+  double max_rtt_milliseconds = 7;
+  double max_jitter_milliseconds = 8;
+  double max_loss_percent = 9;
+  double min_bandwidth_mbps = 10;
+}
+
+message RoutingDomainAuthorization {
+  string id = 1;
+  RoutingDomainKey key = 2;
+  repeated string path_family_ids = 3;
+  repeated string policy_ids = 4;
+  repeated Service services = 5;
+  int32 max_hops = 6;
+  bool requires_admission = 7;
+}
+
+message ManagerJoinRequest {
+  string id = 1;
+  string manager_id = 2;
+  string peer_id = 3;
+  string address = 4;
+  string listen_addr = 5;
+  bytes public_key = 6;
+  string requested_at = 7;
+  string status = 8;
+  string reviewed_by = 9;
+  string reviewed_at = 10;
+  string reason = 11;
+}
+
 message NetworkState {
   string network_id = 1;
   string overlay_cidr = 2;
@@ -241,6 +285,9 @@ message NetworkState {
   repeated RouteAssignment assignments = 14;
   uint32 next_ip_offset = 15;
   CommitteeConfig committee_config = 16;
+  repeated PathFamily path_families = 17;
+  repeated RoutingDomainAuthorization routing_domains = 18;
+  repeated ManagerJoinRequest manager_joins = 19;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +316,9 @@ message StateTransition {
   BudgetUsage budget_usage = 19;
   Actor actor = 20;
   bytes user_password_verifier = 21;
+  PathFamily path_family = 22;
+  RoutingDomainAuthorization routing_domain = 23;
+  ManagerJoinRequest manager_join = 24;
 }
 
 message BudgetUsage {

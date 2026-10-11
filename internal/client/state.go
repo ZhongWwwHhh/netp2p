@@ -77,6 +77,19 @@ type ClientPathDiagnostics struct {
 	LastOutboundDropReason string `json:"lastOutboundDropReason,omitempty"`
 }
 
+type ClientFlowDiagnostics struct {
+	ActiveFlows          int    `json:"activeFlows"`
+	Capacity             int    `json:"capacity"`
+	Evictions            uint64 `json:"evictions"`
+	Migrations           uint64 `json:"migrations"`
+	Bytes                uint64 `json:"bytes"`
+	Packets              uint64 `json:"packets"`
+	LastFlowClass        string `json:"lastFlowClass,omitempty"`
+	LastPathID           string `json:"lastPathId,omitempty"`
+	LastMigrationReason  string `json:"lastMigrationReason,omitempty"`
+	RoutingEpochSequence uint64 `json:"routingEpochSequence,omitempty"`
+}
+
 // persistedClientState is the local recovery record. The snapshot was fully
 // validated before it was written, so a restart can use it read-only while
 // manager connectivity is re-established.
@@ -539,6 +552,21 @@ func (client *Client) PathDiagnostics() ClientPathDiagnostics {
 	return ClientPathDiagnostics{
 		LastState: string(client.pathState), LastError: client.pathError,
 		LastOutboundDropReason: client.outboundDrop,
+	}
+}
+
+// FlowDiagnostics exposes the bounded flow table and path-selection decisions
+// without packet payloads or endpoint addresses.
+func (client *Client) FlowDiagnostics() ClientFlowDiagnostics {
+	if client.paths == nil {
+		return ClientFlowDiagnostics{}
+	}
+	view := client.paths.flowSelectionDiagnostics()
+	return ClientFlowDiagnostics{
+		ActiveFlows: view.ActiveFlows, Capacity: view.Capacity, Evictions: view.Evictions,
+		Migrations: view.Migrations, Bytes: view.Bytes, Packets: view.Packets,
+		LastFlowClass: view.LastFlowClass, LastPathID: view.LastPathID,
+		LastMigrationReason: view.LastMigration, RoutingEpochSequence: view.RoutingEpochSeq,
 	}
 }
 

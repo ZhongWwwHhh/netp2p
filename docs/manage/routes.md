@@ -17,6 +17,16 @@ routing peer.
 
 A route alone does not authorize users. Pair it with a policy.
 
+## Choose a flow class
+
+Routes and policies can select `latency`, `throughput`, `cost`,
+`reliability`, or `realtime`. Empty inherits the network default. Use
+`realtime` only for traffic that needs bounded RTT, jitter, and loss; it stays
+pinned unless its SLA or path hard-fails.
+
+After committing a route, inspect the resulting domain and candidate paths in
+[Global routing](global-routing.md).
+
 ## Publish a subnet
 
 Create a route with a shape like:

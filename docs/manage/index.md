@@ -12,6 +12,7 @@ height.
 | Control who can manage and connect | [Users and groups](users-and-groups.md) |
 | Allow or deny traffic | [Policies](policies.md) |
 | Publish subnets or exit access | [Routes](routes.md) |
+| Inspect global routing and load balancing | [Global routing](global-routing.md) |
 | Resolve overlay names and private records | [DNS](dns.md) |
 | Enroll machines safely | [Setup keys](setup-keys.md) |
 | Inspect peers, health, events, and audit | [Peers and diagnostics](peers-and-diagnostics.md) |

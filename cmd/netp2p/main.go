@@ -10,6 +10,7 @@ const usage = `NetP2P client CLI
 Usage:
   netp2p init network [flags]
   netp2p init production [flags]
+  netp2p init manager-join [flags]
   netp2p up [flags]
   netp2p down [flags]
   netp2p status [--json]
@@ -35,14 +36,16 @@ func main() {
 	var err error
 	switch command {
 	case "init":
-		if len(args) == 0 || (args[0] != "network" && args[0] != "production") {
-			fmt.Fprintln(os.Stderr, "usage: netp2p init network [flags]\n       netp2p init production [flags]")
+		if len(args) == 0 || (args[0] != "network" && args[0] != "production" && args[0] != "manager-join") {
+			fmt.Fprintln(os.Stderr, "usage: netp2p init network [flags]\n       netp2p init production [flags]\n       netp2p init manager-join [flags]")
 			os.Exit(2)
 		}
 		if args[0] == "network" {
 			err = runInitNetwork(args[1:])
-		} else {
+		} else if args[0] == "production" {
 			err = runInitProduction(args[1:])
+		} else {
+			err = runInitManagerJoin(args[1:])
 		}
 	case "up":
 		err = runUp(args)

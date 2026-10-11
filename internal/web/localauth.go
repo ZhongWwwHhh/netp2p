@@ -3,7 +3,6 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -315,7 +314,7 @@ func (server *Server) handleOwnerBootstrap(writer http.ResponseWriter, request *
 }
 
 func (server *Server) decodeAuthBody(writer http.ResponseWriter, request *http.Request, target any) bool {
-	if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 16<<10)).Decode(target); err != nil {
+	if err := decodeJSONBody(writer, request, 16<<10, target); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid request")
 		return false
 	}

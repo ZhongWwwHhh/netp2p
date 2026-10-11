@@ -5,8 +5,9 @@
   import StatusDot from '../components/StatusDot.svelte';
   import TrustBadge from '../components/TrustBadge.svelte';
   import { shortHash, shortPeerId } from '../format';
-  import { network, presenceFor } from '../stores/network.svelte';
-  import type { CommitteeMember } from '../types';
+  import { network, presenceFor, submit } from '../stores/network.svelte';
+  import { session, can } from '../stores/session.svelte';
+  import type { CommitteeMember, ManagerJoinRequest, ManagerJoinStatus } from '../types';
 
   const snapshot = $derived(network.snapshot);
   const committee = $derived(snapshot?.committee ?? []);
@@ -31,6 +32,21 @@
     return ordered[(snapshot.height + 1) % ordered.length]?.id ?? '';
   });
   const quorumSize = $derived(snapshot?.committeeConfig?.threshold ?? committee.length);
+  const managerJoins = $derived(snapshot?.state?.managerJoins ?? []);
+  const canReviewJoins = $derived(can('settings', 'update'));
+
+  async function reviewManagerJoin(request: ManagerJoinRequest, status: Extract<ManagerJoinStatus, 'approved' | 'rejected'>) {
+    await submit({
+      type: 'review_manager_join',
+      managerJoin: {
+        ...request,
+        status,
+        reviewedBy: session.identity?.email ?? 'web console',
+        reviewedAt: new Date().toISOString(),
+        reason: status === 'rejected' ? 'Rejected from Web Console' : request.reason ?? '',
+      },
+    });
+  }
 </script>
 
 <div class="space-y-5">
@@ -107,4 +123,62 @@
       {/snippet}
     </DataTable>
   </div>
+
+  {#if managerJoins.length > 0}
+    <div class="surface">
+      <div class="mb-3 flex items-center justify-between">
+        <div>
+          <h2 class="text-sm font-semibold text-slate-900">Manager join requests</h2>
+          <p class="text-xs text-slate-500">Approve a candidate before it can enter the next committee epoch.</p>
+        </div>
+      </div>
+      <DataTable
+        rows={managerJoins}
+        columns={[
+          { key: 'managerId', label: 'Manager' },
+          { key: 'peerId', label: 'Peer ID' },
+          { key: 'address', label: 'Transport' },
+          { key: 'status', label: 'Status' },
+          { key: 'actions', label: 'Actions' },
+        ]}
+        rowKey={(request) => request.id}
+        emptyTitle="No join requests"
+        emptyHint="Candidate managers that present a valid join token appear here."
+      >
+        {#snippet cell(request: ManagerJoinRequest, key: string)}
+          {#if key === 'managerId'}
+            <span class="font-medium text-slate-900">{request.managerId}</span>
+          {:else if key === 'peerId'}
+            <span class="font-mono text-xs text-slate-600">{shortPeerId(request.peerId, 18)}</span>
+          {:else if key === 'address'}
+            <span class="font-mono text-xs text-slate-600">{request.address}</span>
+          {:else if key === 'status'}
+            <Badge
+              tone={request.status === 'approved' ? 'emerald' : request.status === 'rejected' ? 'rose' : 'slate'}
+              label={request.status}
+            />
+          {:else if key === 'actions'}
+            {#if canReviewJoins && request.status === 'pending'}
+              <div class="flex gap-2">
+                <button
+                  class="btn btn-primary"
+                  onclick={() => reviewManagerJoin(request, 'approved')}
+                >
+                  Approve
+                </button>
+                <button
+                  class="btn btn-ghost"
+                  onclick={() => reviewManagerJoin(request, 'rejected')}
+                >
+                  Reject
+                </button>
+              </div>
+            {:else}
+              <span class="text-xs text-slate-500">{request.reviewedBy ? `reviewed by ${request.reviewedBy}` : 'waiting for review'}</span>
+            {/if}
+          {/if}
+        {/snippet}
+      </DataTable>
+    </div>
+  {/if}
 </div>

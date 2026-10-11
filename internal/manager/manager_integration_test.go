@@ -449,7 +449,7 @@ func TestAdminSubmitRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		RegisterAdminHandler(node, mesh, "test-token")
+		RegisterAdminHandler(node, mesh, "test-token", nil)
 		meshes[index] = mesh
 		nodes[index] = node
 	}

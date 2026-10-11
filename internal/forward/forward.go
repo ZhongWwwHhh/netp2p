@@ -8,10 +8,12 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/path"
 	"github.com/netp2p/netp2p/internal/quota"
 	"github.com/netp2p/netp2p/internal/tracing"
 	"go.opentelemetry.io/otel"
@@ -44,21 +46,26 @@ type Envelope struct {
 
 type Sender func(remote peer.ID, envelope Envelope) error
 
+type ScaleSender func(remote peer.ID, envelope ScaleEnvelope) error
+
 type Table struct {
-	mu           sync.RWMutex
-	state        model.NetworkState
-	sender       Sender
-	localID      string
-	quota        *quota.Enforcer
-	connections  map[string]struct{}
-	sequence     atomic.Uint64
-	forwarded    atomic.Uint64
-	dropped      atomic.Uint64
-	quotaBlocked atomic.Uint64
-	queueDepth   atomic.Int64
-	reservations atomic.Uint64
-	bytes        atomic.Uint64
-	metrics      *metrics.Metrics
+	mu              sync.RWMutex
+	state           model.NetworkState
+	sender          Sender
+	localID         string
+	quota           *quota.Enforcer
+	connections     map[string]struct{}
+	sequence        atomic.Uint64
+	forwarded       atomic.Uint64
+	dropped         atomic.Uint64
+	quotaBlocked    atomic.Uint64
+	queueDepth      atomic.Int64
+	reservations    atomic.Uint64
+	bytes           atomic.Uint64
+	metrics         *metrics.Metrics
+	faceBudgets     *quota.FaceBudgetSet
+	scaleAuthorizer ScaleAuthorizer
+	scaleSender     ScaleSender
 }
 
 func NewTable(state model.NetworkState, localID string, sender Sender) *Table {
@@ -74,6 +81,19 @@ func NewTableWithMetrics(state model.NetworkState, localID string, sender Sender
 		connections: make(map[string]struct{}),
 		metrics:     collector,
 	}
+}
+
+func (table *Table) SetFaceBudgets(budgets *quota.FaceBudgetSet) {
+	table.mu.Lock()
+	table.faceBudgets = budgets
+	table.mu.Unlock()
+}
+
+func (table *Table) SetScaleRouting(authorizer ScaleAuthorizer, sender ScaleSender) {
+	table.mu.Lock()
+	table.scaleAuthorizer = authorizer
+	table.scaleSender = sender
+	table.mu.Unlock()
 }
 
 // Replace atomically applies a certified snapshot's assignment table.
@@ -205,6 +225,100 @@ func (table *Table) Send(source, destination peer.ID, assignmentID, pathID strin
 	return nil
 }
 
+// SendScale emits a domain-scoped envelope without requiring a per-peer-pair
+// assignment. Authorization is supplied by the compiled certified network map.
+func (table *Table) SendScale(source, destination peer.ID, envelope ScaleEnvelope) error {
+	if envelope.Header.SourcePeerID != source.String() || envelope.Header.DestinationPeerID != destination.String() {
+		return ErrScaleUnauthorized
+	}
+	table.mu.RLock()
+	authorizer := table.scaleAuthorizer
+	sender := table.scaleSender
+	table.mu.RUnlock()
+	if authorizer == nil || sender == nil {
+		return ErrScaleUnauthorized
+	}
+	authorization, err := authorizer(envelope.Header.SourcePeerID, envelope.Header.DestinationPeerID,
+		envelope.Header.RoutingDomainID, envelope.Header.PathFamilyID, envelope.Header.FlowClass)
+	if err != nil {
+		return err
+	}
+	if authorization.Destination || authorization.NextHop == "" {
+		return ErrScaleUnauthorized
+	}
+	next, err := peer.Decode(authorization.NextHop)
+	if err != nil {
+		return err
+	}
+	if err := table.sendScale(next, envelope); err != nil {
+		return err
+	}
+	table.reservations.Add(1)
+	table.bytes.Add(uint64(len(envelope.Payload)))
+	return nil
+}
+
+// AcceptScale validates and forwards a scale envelope. The remote transport
+// identity must equal the authorization's expected predecessor.
+func (table *Table) AcceptScale(remote peer.ID, envelope ScaleEnvelope) (bool, error) {
+	if envelope.Header.TTL == 0 {
+		table.recordDrop()
+		return false, ErrTTLExceeded
+	}
+	table.mu.RLock()
+	authorizer := table.scaleAuthorizer
+	sender := table.scaleSender
+	faceBudgets := table.faceBudgets
+	table.mu.RUnlock()
+	if authorizer == nil {
+		table.recordDrop()
+		return false, ErrScaleUnauthorized
+	}
+	authorization, err := authorizer(envelope.Header.SourcePeerID, envelope.Header.DestinationPeerID,
+		envelope.Header.RoutingDomainID, envelope.Header.PathFamilyID, envelope.Header.FlowClass)
+	if err != nil {
+		table.recordDrop()
+		return false, err
+	}
+	if authorization.ExpectedPredecessor != remote.String() {
+		table.recordDrop()
+		return false, ErrScaleUnauthorized
+	}
+	if authorization.Destination {
+		table.observeConnection(remote)
+		table.bytes.Add(uint64(len(envelope.Payload)))
+		return true, nil
+	}
+	if authorization.NextHop == "" || sender == nil {
+		table.recordDrop()
+		return false, ErrScaleUnauthorized
+	}
+	if faceBudgets != nil && authorization.FaceID != "" {
+		table.observeFaceQueue(authorization.FaceID)
+		decision := faceBudgets.Admit(authorization.FaceID, path.FlowClass(envelope.Header.FlowClass), uint64(len(envelope.Payload)), time.Now().UTC())
+		if !decision.Allowed || decision.Delay > 0 {
+			table.recordQuotaBlocked()
+			table.recordDrop()
+			return false, ErrFaceBudgetExceeded
+		}
+	}
+	next, err := peer.Decode(authorization.NextHop)
+	if err != nil {
+		table.recordDrop()
+		return false, err
+	}
+	forwarded := envelope
+	forwarded.Header.TTL--
+	if err := table.sendScale(next, forwarded); err != nil {
+		table.recordDrop()
+		return false, err
+	}
+	table.observeConnection(remote)
+	table.bytes.Add(uint64(len(envelope.Payload)))
+	table.recordForwarded()
+	return false, nil
+}
+
 func (table *Table) Dropped() uint64 { return table.dropped.Load() }
 
 // Stats reports how many frames this table forwarded onward and how many it
@@ -225,6 +339,39 @@ func (table *Table) send(remote peer.ID, envelope Envelope) error {
 	table.enterSend()
 	defer table.exitSend()
 	return table.sender(remote, envelope)
+}
+
+func (table *Table) sendScale(remote peer.ID, envelope ScaleEnvelope) error {
+	table.mu.RLock()
+	sender := table.scaleSender
+	table.mu.RUnlock()
+	if sender == nil {
+		return ErrScaleUnauthorized
+	}
+	table.enterSend()
+	defer table.exitSend()
+	return sender(remote, envelope)
+}
+
+func (table *Table) observeFaceQueue(faceID string) {
+	table.mu.RLock()
+	budgets := table.faceBudgets
+	table.mu.RUnlock()
+	if budgets == nil {
+		return
+	}
+	const queueCapacity = 1024
+	_, _ = budgets.ObserveQueue(faceID, uint64(table.queueDepth.Load()), queueCapacity, time.Now().UTC())
+}
+
+func (table *Table) ScaleFeedback(faceID string) (quota.FaceFeedback, error) {
+	table.mu.RLock()
+	budgets := table.faceBudgets
+	table.mu.RUnlock()
+	if budgets == nil {
+		return quota.FaceFeedback{}, ErrFaceBudgetExceeded
+	}
+	return budgets.Feedback(faceID)
 }
 
 func (table *Table) enterSend() {

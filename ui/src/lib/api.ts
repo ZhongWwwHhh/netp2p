@@ -1,7 +1,8 @@
 import { apiClient } from './libp2p';
 import type {
   ActivityEntry, AdmissionReport, Alert, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
-  SessionInfo, SetupKeyCreateInput, SetupKeyCreation, Snapshot, StateTransition, User,
+  DemandSample, EdgeTelemetry, FECDiagnostics, ManagerCapacityStatus, PathFamily, RoutingDomain, RoutingEpoch,
+  RoutingStatus, SessionInfo, SetupKeyCreateInput, SetupKeyCreation, Snapshot, StateTransition, User,
 } from './types';
 
 export { apiClient };
@@ -27,6 +28,14 @@ export interface ApiClient {
   events(limit?: number): Promise<AuditEvent[]>;
   diagnostics(): Promise<Diagnostics>;
   assignments(): Promise<AssignmentsView>;
+  routingStatus(): Promise<RoutingStatus>;
+  routingDomains(): Promise<RoutingDomain[]>;
+  pathFamilies(): Promise<PathFamily[]>;
+  routingTelemetry(): Promise<EdgeTelemetry[]>;
+  routingDemand(): Promise<DemandSample[]>;
+  routingEpoch(): Promise<RoutingEpoch | null>;
+  routingFec(): Promise<FECDiagnostics>;
+  managerCapacity(): Promise<ManagerCapacityStatus[]>;
   quota(): Promise<Budget[]>;
   alerts(): Promise<Alert[]>;
 }

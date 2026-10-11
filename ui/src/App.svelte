@@ -8,6 +8,7 @@
   import Diagnostics from './lib/pages/Diagnostics.svelte';
   import DnsSettings from './lib/pages/DnsSettings.svelte';
   import Groups from './lib/pages/Groups.svelte';
+  import GlobalRouting from './lib/pages/GlobalRouting.svelte';
   import Login from './lib/pages/Login.svelte';
   import Nameservers from './lib/pages/Nameservers.svelte';
   import Paths from './lib/pages/Paths.svelte';
@@ -41,6 +42,7 @@
     '/routes': Routes,
     '/budgets': Budgets,
     '/paths': Paths,
+    '/routing': GlobalRouting,
     '/dns/nameservers': Nameservers,
     '/dns/zones': Zones,
     '/dns/settings': DnsSettings,

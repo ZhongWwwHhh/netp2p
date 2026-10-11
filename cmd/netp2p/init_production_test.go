@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -120,14 +121,45 @@ func TestInitProductionWritesValidatedTrustDocuments(t *testing.T) {
 	}
 }
 
-func TestInitProductionRequiresThreeManagers(t *testing.T) {
+func TestInitProductionRequiresAtLeastThreeManagers(t *testing.T) {
 	err := runInitProduction([]string{
 		"--output-dir", filepath.Join(t.TempDir(), "bootstrap"),
 		"--manager", "manager-1,manager-1.netp2p.example,203.0.113.11,4001",
 		"--manager", "manager-2,manager-2.netp2p.example,203.0.113.12,4001",
 	})
-	if err == nil || !strings.Contains(err.Error(), "exactly three") {
+	if err == nil || !strings.Contains(err.Error(), "at least three") {
 		t.Fatalf("two-manager input error = %v", err)
+	}
+}
+
+func TestInitProductionSupportsSevenManagers(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "bootstrap")
+	args := append([]string{
+		"--network", "netp2p-production",
+		"--output-dir", outputDir,
+	}, productionManagerArgs(7)...)
+	var err error
+	output := captureInitOutput(t, func() { err = runInitProduction(args) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "committee 7/2/5") {
+		t.Fatalf("seven-manager init output is missing committee parameters:\n%s", output)
+	}
+	manifest, loadErr := config.LoadNetworkManifest(filepath.Join(outputDir, "network.json"))
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	want := model.CommitteeParams{Size: 7, FaultLimit: 2, QuorumSize: 5}
+	if manifest.CommitteeParams != want {
+		t.Fatalf("committee params = %+v, want %+v", manifest.CommitteeParams, want)
+	}
+	instructions, readErr := os.ReadFile(filepath.Join(outputDir, "README.txt"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(instructions), "The committee is 7/2/5") {
+		t.Fatalf("deployment instructions do not describe the seven-manager committee")
 	}
 }
 
@@ -171,4 +203,15 @@ func assertProductionMode(t *testing.T, path string, want os.FileMode) {
 	if info.Mode().Perm() != want {
 		t.Fatalf("%s mode = %o, want %o", path, info.Mode().Perm(), want)
 	}
+}
+
+func productionManagerArgs(count int) []string {
+	args := make([]string, 0, count*2)
+	for index := 1; index <= count; index++ {
+		args = append(args, "--manager", fmt.Sprintf(
+			"manager-%d,manager-%d.netp2p.example,203.0.113.%d,4001",
+			index, index, 10+index,
+		))
+	}
+	return args
 }

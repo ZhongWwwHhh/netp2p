@@ -4,10 +4,11 @@ import { identify } from '@libp2p/identify';
 import { http } from '@libp2p/http';
 import { webRTCDirect } from '@libp2p/webrtc';
 import { multiaddr, type Multiaddr } from '@multiformats/multiaddr';
-import { normalizePresence, normalizeSnapshot } from './normalize';
+import { normalizePresence, normalizeRoutingStatus, normalizeSnapshot } from './normalize';
 import { httpResource, joinProtocolPath, resolveProtocolBasePath } from './paths';
 import type {
   ActivityEntry, AdmissionReport, Alert, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
+  DemandSample, EdgeTelemetry, FECDiagnostics, ManagerCapacityStatus, PathFamily, RoutingDomain, RoutingEpoch, RoutingStatus,
   SessionInfo, SetupKeyCreateInput, SetupKeyCreation, Snapshot, StateTransition, User,
 } from './types';
 
@@ -89,6 +90,22 @@ export async function apiClient(bootstrap: Bootstrap) {
         const payload = body as { assignments?: RouteAssignment[]; admissions?: Record<string, Record<string, AdmissionReport>> } | null;
         return { assignments: payload?.assignments ?? [], admissions: payload?.admissions ?? {} };
       }),
+      routingStatus: () => request('/api/v1/routing/status').then((body) =>
+        normalizeRoutingStatus((body as { routing?: RoutingStatus } | null)?.routing)),
+      routingDomains: () => request('/api/v1/routing/domains').then((body) =>
+        ((body as { domains?: RoutingDomain[] } | null)?.domains ?? [])),
+      pathFamilies: () => request('/api/v1/routing/path-families').then((body) =>
+        ((body as { pathFamilies?: PathFamily[] } | null)?.pathFamilies ?? [])),
+      routingTelemetry: () => request('/api/v1/routing/telemetry').then((body) =>
+        ((body as { telemetry?: EdgeTelemetry[] } | null)?.telemetry ?? [])),
+      routingDemand: () => request('/api/v1/routing/demand').then((body) =>
+        ((body as { demand?: DemandSample[] } | null)?.demand ?? [])),
+      routingEpoch: () => request('/api/v1/routing/epoch/current').then((body) =>
+        ((body as { epoch?: RoutingEpoch | null } | null)?.epoch ?? null)),
+      routingFec: () => request('/api/v1/routing/fec').then((body) =>
+        ((body as { fec?: FECDiagnostics } | null)?.fec ?? { enabled: false, defaultCodec: '', maxRedundancyPercent: 0, classes: [] })),
+      managerCapacity: () => request('/api/v1/managers/capacity').then((body) =>
+        ((body as { managers?: ManagerCapacityStatus[] } | null)?.managers ?? [])),
       quota: () => request('/api/v1/quota').then((body) =>
         ((body as { usage?: Budget[] } | null)?.usage ?? [])),
       alerts: () => request('/api/v1/alerts').then((body) =>

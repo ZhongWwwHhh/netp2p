@@ -21,6 +21,7 @@ const (
 	FlowThroughput  FlowClass = "throughput"
 	FlowCost        FlowClass = "cost"
 	FlowReliability FlowClass = "reliability"
+	FlowRealtime    FlowClass = "realtime"
 )
 
 type LinkProfile struct {
@@ -37,13 +38,14 @@ type LinkProfile struct {
 }
 
 type Constraints struct {
-	FlowClass            FlowClass  `json:"flowClass"`
-	AllowedTypes         []PathType `json:"allowedTypes"`
-	MaxRTTMilliseconds   float64    `json:"maxRttMilliseconds"`
-	MaxLossPercent       float64    `json:"maxLossPercent"`
-	MinBandwidthMbps     float64    `json:"minBandwidthMbps"`
-	MaxForwardingCost    float64    `json:"maxForwardingCost"`
-	SwitchLatencyPenalty float64    `json:"switchLatencyPenalty"`
+	FlowClass             FlowClass  `json:"flowClass"`
+	AllowedTypes          []PathType `json:"allowedTypes"`
+	MaxRTTMilliseconds    float64    `json:"maxRttMilliseconds"`
+	MaxJitterMilliseconds float64    `json:"maxJitterMilliseconds"`
+	MaxLossPercent        float64    `json:"maxLossPercent"`
+	MinBandwidthMbps      float64    `json:"minBandwidthMbps"`
+	MaxForwardingCost     float64    `json:"maxForwardingCost"`
+	SwitchLatencyPenalty  float64    `json:"switchLatencyPenalty"`
 	// ViaManagerLatencyAdvantageMs and ViaManagerLossAdvantagePct define the
 	// normalisation window: a via-manager path must be measurably better than
 	// direct within these thresholds before the score favours it.
@@ -79,6 +81,8 @@ func weights(class FlowClass) (latency, throughput, reliability, cost float64) {
 		return .2, .15, .15, .5
 	case FlowReliability:
 		return .25, .2, .4, .15
+	case FlowRealtime:
+		return .55, .05, .3, .1
 	default:
 		return .5, .15, .25, .1
 	}
@@ -92,6 +96,7 @@ func weights(class FlowClass) (latency, throughput, reliability, cost float64) {
 func Score(candidate LinkProfile, constraints Constraints) float64 {
 	if !typeAllowed(candidate, constraints) ||
 		(constraints.MaxRTTMilliseconds > 0 && candidate.RTTMilliseconds > constraints.MaxRTTMilliseconds) ||
+		(constraints.MaxJitterMilliseconds > 0 && candidate.JitterMilliseconds > constraints.MaxJitterMilliseconds) ||
 		(constraints.MaxLossPercent > 0 && candidate.LossPercent > constraints.MaxLossPercent) ||
 		(constraints.MinBandwidthMbps > 0 && candidate.BandwidthMbps > 0 && candidate.BandwidthMbps < constraints.MinBandwidthMbps) ||
 		(constraints.MaxForwardingCost > 0 && candidate.ForwardingCost > constraints.MaxForwardingCost) {

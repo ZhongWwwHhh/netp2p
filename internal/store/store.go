@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE INDEX IF NOT EXISTS decision_log_height_idx ON decision_log(height);
 CREATE INDEX IF NOT EXISTS transitions_height_idx ON transitions(height);
+CREATE INDEX IF NOT EXISTS certified_snapshots_certified_at_idx ON certified_snapshots(certified_at);
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS audit_events_height_idx ON audit_events(height);
 
@@ -128,11 +129,56 @@ CREATE TABLE IF NOT EXISTS auth_events (
 CREATE INDEX IF NOT EXISTS auth_events_recorded_idx ON auth_events(recorded_at);
 `
 
+const (
+	DefaultLedgerMaxAge      = 14 * 24 * time.Hour
+	DefaultLedgerMaxBytes    = int64(20 << 20)
+	DefaultLedgerTargetBytes = int64(18 << 20)
+)
+
+type LedgerRetention struct {
+	MaxAge      time.Duration
+	MaxBytes    int64
+	TargetBytes int64
+	MinHeights  int
+}
+
+func DefaultLedgerRetention() LedgerRetention {
+	return LedgerRetention{
+		MaxAge:      DefaultLedgerMaxAge,
+		MaxBytes:    DefaultLedgerMaxBytes,
+		TargetBytes: DefaultLedgerTargetBytes,
+		MinHeights:  1,
+	}
+}
+
+func (policy LedgerRetention) Validate() error {
+	if policy.MaxAge <= 0 {
+		return fmt.Errorf("ledger max age must be positive")
+	}
+	if policy.MaxBytes <= 0 || policy.TargetBytes <= 0 {
+		return fmt.Errorf("ledger byte limits must be positive")
+	}
+	if policy.TargetBytes > policy.MaxBytes {
+		return fmt.Errorf("ledger target bytes cannot exceed max bytes")
+	}
+	if policy.MinHeights < 1 {
+		return fmt.Errorf("ledger minimum retained heights must be at least 1")
+	}
+	return nil
+}
+
+type LedgerPruneResult struct {
+	RemovedSnapshots  int   `json:"removedSnapshots"`
+	RetainedSnapshots int   `json:"retainedSnapshots"`
+	DatabaseBytes     int64 `json:"databaseBytes"`
+}
+
 // Store is a durable SQLite ledger and certified-state projection. A single
 // connection serializes writers and keeps SQLite transaction semantics simple.
 type Store struct {
-	db   *sql.DB
-	path string
+	db        *sql.DB
+	path      string
+	retention LedgerRetention
 }
 
 // Open creates or opens the database with WAL and full fsync durability.
@@ -183,7 +229,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialize sqlite schema: %w", err)
 	}
-	return &Store{db: db, path: path}, nil
+	return &Store{db: db, path: path, retention: DefaultLedgerRetention()}, nil
 }
 
 // Close closes the database and checkpoints its WAL.
@@ -294,6 +340,9 @@ func (store *Store) RecordCommit(snapshot model.SignedSnapshot) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit snapshot transaction: %w", err)
 	}
+	if _, err := store.PruneLedger(time.Now().UTC()); err != nil {
+		return fmt.Errorf("apply ledger retention: %w", err)
+	}
 	return nil
 }
 
@@ -382,6 +431,189 @@ func (store *Store) HasLedger() (bool, error) {
 	return count > 0, nil
 }
 
+// SetLedgerRetention changes the retention policy used after subsequent
+// commits and by explicit PruneLedger calls.
+func (store *Store) SetLedgerRetention(policy LedgerRetention) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("store is closed")
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	store.retention = policy
+	return nil
+}
+
+// PruneLedger applies the age and size limits, whichever is reached first. The
+// newest snapshot is always retained as the compact recovery checkpoint.
+func (store *Store) PruneLedger(now time.Time) (LedgerPruneResult, error) {
+	if store == nil || store.db == nil {
+		return LedgerPruneResult{}, fmt.Errorf("store is closed")
+	}
+	policy := store.retention
+	if err := policy.Validate(); err != nil {
+		return LedgerPruneResult{}, err
+	}
+	var count, latest int
+	if err := store.db.QueryRow(`
+		SELECT COUNT(*), COALESCE(MAX(height), 0) FROM certified_snapshots`,
+	).Scan(&count, &latest); err != nil {
+		return LedgerPruneResult{}, fmt.Errorf("query ledger bounds: %w", err)
+	}
+	if count == 0 {
+		return LedgerPruneResult{}, nil
+	}
+	databaseBytes, err := store.databaseSize()
+	if err != nil {
+		return LedgerPruneResult{}, err
+	}
+	remove := make(map[uint64]struct{})
+
+	ageRows, err := store.db.Query(`
+		SELECT height FROM certified_snapshots
+		WHERE height < ? AND certified_at < ?
+		ORDER BY height`, latest, now.Add(-policy.MaxAge).Format(time.RFC3339Nano))
+	if err != nil {
+		return LedgerPruneResult{}, fmt.Errorf("query aged ledger rows: %w", err)
+	}
+	for ageRows.Next() {
+		var height uint64
+		if err := ageRows.Scan(&height); err != nil {
+			_ = ageRows.Close()
+			return LedgerPruneResult{}, fmt.Errorf("scan aged ledger height: %w", err)
+		}
+		remove[height] = struct{}{}
+	}
+	if err := ageRows.Err(); err != nil {
+		_ = ageRows.Close()
+		return LedgerPruneResult{}, fmt.Errorf("iterate aged ledger rows: %w", err)
+	}
+	if err := ageRows.Close(); err != nil {
+		return LedgerPruneResult{}, fmt.Errorf("close aged ledger rows: %w", err)
+	}
+
+	if databaseBytes >= policy.MaxBytes {
+		sizeRows, err := store.db.Query(`
+			SELECT height, LENGTH(snapshot_json) FROM certified_snapshots
+			ORDER BY height`)
+		if err != nil {
+			return LedgerPruneResult{}, fmt.Errorf("query ledger sizes: %w", err)
+		}
+		var total int64
+		type row struct {
+			height uint64
+			size   int64
+		}
+		rows := make([]row, 0, count)
+		for sizeRows.Next() {
+			var item row
+			if err := sizeRows.Scan(&item.height, &item.size); err != nil {
+				_ = sizeRows.Close()
+				return LedgerPruneResult{}, fmt.Errorf("scan ledger size: %w", err)
+			}
+			total += item.size
+			rows = append(rows, item)
+		}
+		if err := sizeRows.Err(); err != nil {
+			_ = sizeRows.Close()
+			return LedgerPruneResult{}, fmt.Errorf("iterate ledger sizes: %w", err)
+		}
+		if err := sizeRows.Close(); err != nil {
+			return LedgerPruneResult{}, fmt.Errorf("close ledger sizes: %w", err)
+		}
+		for _, item := range rows {
+			if total <= policy.TargetBytes {
+				break
+			}
+			if item.height == uint64(latest) {
+				continue
+			}
+			remove[item.height] = struct{}{}
+			total -= item.size
+		}
+	}
+
+	retained := count - len(remove)
+	for retained < policy.MinHeights && len(remove) > 0 {
+		var newest uint64
+		found := false
+		for height := range remove {
+			if !found || height > newest {
+				newest = height
+				found = true
+			}
+		}
+		if !found {
+			break
+		}
+		delete(remove, newest)
+		retained++
+	}
+	if len(remove) == 0 {
+		return LedgerPruneResult{
+			RemovedSnapshots:  0,
+			RetainedSnapshots: count,
+			DatabaseBytes:     databaseBytes,
+		}, nil
+	}
+
+	tx, err := store.db.Begin()
+	if err != nil {
+		return LedgerPruneResult{}, fmt.Errorf("begin ledger prune: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for height := range remove {
+		if _, err := tx.Exec(`DELETE FROM audit_events WHERE height = ?`, height); err != nil {
+			return LedgerPruneResult{}, fmt.Errorf("delete audit events at height %d: %w", height, err)
+		}
+		if _, err := tx.Exec(`DELETE FROM decision_log WHERE height = ?`, height); err != nil {
+			return LedgerPruneResult{}, fmt.Errorf("delete decision at height %d: %w", height, err)
+		}
+		if _, err := tx.Exec(`DELETE FROM transitions WHERE height = ?`, height); err != nil {
+			return LedgerPruneResult{}, fmt.Errorf("delete transition at height %d: %w", height, err)
+		}
+		if _, err := tx.Exec(`DELETE FROM certified_snapshots WHERE height = ?`, height); err != nil {
+			return LedgerPruneResult{}, fmt.Errorf("delete snapshot at height %d: %w", height, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return LedgerPruneResult{}, fmt.Errorf("commit ledger prune: %w", err)
+	}
+	if _, err := store.db.Exec(`VACUUM`); err != nil {
+		return LedgerPruneResult{}, fmt.Errorf("vacuum ledger: %w", err)
+	}
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return LedgerPruneResult{}, fmt.Errorf("checkpoint ledger after prune: %w", err)
+	}
+	databaseBytes, err = store.databaseSize()
+	if err != nil {
+		return LedgerPruneResult{}, err
+	}
+	result := LedgerPruneResult{
+		RemovedSnapshots:  len(remove),
+		RetainedSnapshots: count - len(remove),
+		DatabaseBytes:     databaseBytes,
+	}
+	if databaseBytes > policy.MaxBytes {
+		return result, fmt.Errorf("ledger remains %d bytes after pruning, exceeding %d bytes", databaseBytes, policy.MaxBytes)
+	}
+	return result, nil
+}
+
+func (store *Store) databaseSize() (int64, error) {
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`); err != nil {
+		return 0, fmt.Errorf("checkpoint sqlite WAL before sizing: %w", err)
+	}
+	var pageCount, pageSize int64
+	if err := store.db.QueryRow(`PRAGMA page_count`).Scan(&pageCount); err != nil {
+		return 0, fmt.Errorf("read sqlite page count: %w", err)
+	}
+	if err := store.db.QueryRow(`PRAGMA page_size`).Scan(&pageSize); err != nil {
+		return 0, fmt.Errorf("read sqlite page size: %w", err)
+	}
+	return pageCount * pageSize, nil
+}
+
 // RestoreEngine replays the decision log through the existing BFT catch-up
 // path. Every snapshot is cryptographically validated before adoption.
 func (store *Store) RestoreEngine(engine *bft.Engine) error {
@@ -419,6 +651,127 @@ func (store *Store) Backup(path string) error {
 		return fmt.Errorf("create sqlite backup: %w", err)
 	}
 	return nil
+}
+
+// RestoreFrom validates a backup and atomically replaces this store's SQLite
+// database with it. The previous database is retained beside the new file until
+// the replacement succeeds.
+func (store *Store) RestoreFrom(backupPath string) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("store is closed")
+	}
+	if backupPath == "" {
+		return fmt.Errorf("backup path is required")
+	}
+	absoluteBackup, err := filepath.Abs(backupPath)
+	if err != nil {
+		return fmt.Errorf("resolve backup path: %w", err)
+	}
+	absoluteCurrent, err := filepath.Abs(store.path)
+	if err != nil {
+		return fmt.Errorf("resolve store path: %w", err)
+	}
+	if strings.EqualFold(absoluteBackup, absoluteCurrent) {
+		return fmt.Errorf("backup path must differ from the active store path")
+	}
+
+	source, err := Open(absoluteBackup)
+	if err != nil {
+		return fmt.Errorf("open backup: %w", err)
+	}
+	snapshots, err := source.Snapshots()
+	if err != nil {
+		_ = source.Close()
+		return err
+	}
+	if len(snapshots) == 0 {
+		_ = source.Close()
+		return fmt.Errorf("backup contains no certified snapshots")
+	}
+	for index, snapshot := range snapshots {
+		if err := bft.ValidateSnapshot(snapshot); err != nil {
+			_ = source.Close()
+			return fmt.Errorf("invalid backup snapshot at height %d: %w", snapshot.Height, err)
+		}
+		if index > 0 && snapshot.Height != snapshots[index-1].Height+1 {
+			_ = source.Close()
+			return fmt.Errorf("backup has a height gap from %d to %d", snapshots[index-1].Height, snapshot.Height)
+		}
+	}
+
+	directory := filepath.Dir(absoluteCurrent)
+	temp, err := os.CreateTemp(directory, ".netp2p-restore-*")
+	if err != nil {
+		_ = source.Close()
+		return fmt.Errorf("create restore staging file: %w", err)
+	}
+	tempPath := temp.Name()
+	if err := temp.Close(); err != nil {
+		_ = source.Close()
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("close restore staging file: %w", err)
+	}
+	if err := os.Remove(tempPath); err != nil {
+		_ = source.Close()
+		return fmt.Errorf("clear restore staging file: %w", err)
+	}
+	escapedTemp := strings.ReplaceAll(filepath.ToSlash(tempPath), "'", "''")
+	if _, err := source.db.Exec("VACUUM INTO '" + escapedTemp + "'"); err != nil {
+		_ = source.Close()
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("materialize validated backup: %w", err)
+	}
+	if err := source.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("close backup: %w", err)
+	}
+
+	retention := store.retention
+	if err := store.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return fmt.Errorf("close active store before restore: %w", err)
+	}
+	store.db = nil
+	_ = os.Remove(absoluteCurrent + "-wal")
+	_ = os.Remove(absoluteCurrent + "-shm")
+	previous := absoluteCurrent + ".pre-restore"
+	_ = os.Remove(previous)
+	if err := os.Rename(absoluteCurrent, previous); err != nil {
+		_ = os.Remove(tempPath)
+		store.restoreFallback(absoluteCurrent, previous, retention)
+		return fmt.Errorf("move active store aside: %w", err)
+	}
+	if err := os.Rename(tempPath, absoluteCurrent); err != nil {
+		_ = os.Rename(previous, absoluteCurrent)
+		_ = os.Remove(tempPath)
+		store.restoreFallback(absoluteCurrent, previous, retention)
+		return fmt.Errorf("install restored store: %w", err)
+	}
+	reopened, err := Open(absoluteCurrent)
+	if err != nil {
+		_ = os.Remove(absoluteCurrent)
+		_ = os.Rename(previous, absoluteCurrent)
+		_ = os.Remove(tempPath)
+		store.restoreFallback(absoluteCurrent, previous, retention)
+		return fmt.Errorf("reopen restored store: %w", err)
+	}
+	reopened.retention = retention
+	store.db = reopened.db
+	store.path = reopened.path
+	store.retention = reopened.retention
+	_ = os.Remove(previous)
+	return nil
+}
+
+func (store *Store) restoreFallback(path, previous string, retention LedgerRetention) {
+	reopened, err := Open(path)
+	if err != nil {
+		return
+	}
+	reopened.retention = retention
+	store.db = reopened.db
+	store.path = reopened.path
+	store.retention = reopened.retention
 }
 
 type AuthLockState struct {

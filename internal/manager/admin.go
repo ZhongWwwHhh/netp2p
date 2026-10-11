@@ -3,6 +3,7 @@ package manager
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -22,8 +23,10 @@ type AdminResponse struct {
 }
 
 // RegisterAdminHandler installs the admin stream handler. The manager verifies
-// the admin token from the static seed before forwarding the transition to BFT.
-func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string) {
+// the admin token before forwarding a transition to BFT. A separate Argon2id
+// manager-join verifier admits only submit_manager_join and read-only snapshot
+// queries from a candidate manager.
+func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string, managerJoinTokenHash []byte) {
 	node.Handle(p2p.AdminProtocol, func(stream network.Stream) {
 		defer stream.Close()
 		envelope, err := p2p.DecodeEnvelope(stream)
@@ -37,12 +40,26 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 			return
 		}
 		token, transition, query := wire.AdminRequestFromProto(&message)
-		if adminToken == "" || token != adminToken {
+		adminAuthenticated := adminToken != "" &&
+			subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1
+		joinAuthenticated := len(managerJoinTokenHash) > 0 &&
+			subtle.ConstantTimeCompare(model.ManagerJoinTokenHash(token), managerJoinTokenHash) == 1
+		if !adminAuthenticated && !joinAuthenticated {
 			respondAdmin(stream, AdminResponse{Error: "forbidden"})
 			return
 		}
+		if joinAuthenticated && !adminAuthenticated {
+			if query != "" && query != "snapshot" && query != "manager-snapshot" {
+				respondAdmin(stream, AdminResponse{Error: "forbidden join query"})
+				return
+			}
+			if query == "" && transition.Type != bft.TransitionSubmitManagerJoin {
+				respondAdmin(stream, AdminResponse{Error: "forbidden join transition"})
+				return
+			}
+		}
 		if query != "" {
-			payload, err := adminQuery(mesh, query)
+			payload, err := adminQuery(mesh, query, stream.Conn().RemotePeer())
 			if err != nil {
 				respondAdminQuery(stream, nil, err.Error())
 				return
@@ -50,14 +67,16 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 			respondAdminQuery(stream, payload, "")
 			return
 		}
-		if err := auth.AuthorizeTransition(auth.BreakGlass(), transition.Type); err != nil {
+		identity := auth.BreakGlass()
+		actor := auth.ActorOf(identity)
+		if joinAuthenticated && !adminAuthenticated {
+			actor = model.Actor{ID: "system:manager-join", Name: "manager join", Role: "system"}
+		} else if err := auth.AuthorizeTransition(identity, transition.Type); err != nil {
 			respondAdmin(stream, AdminResponse{Error: err.Error()})
 			return
 		}
-		// The admin stream cannot carry a structured identity, so every admin
-		// transition is attributed to the break-glass token. Any actor sent on
+		// The stream cannot carry a structured identity, so any actor sent on
 		// the wire is discarded here.
-		actor := auth.ActorOf(auth.BreakGlass())
 		transition.Actor = &actor
 		snapshot, err := mesh.Submit(transition)
 		if err != nil {
@@ -75,7 +94,7 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 // adminQuery answers read-only admin inspections from certified local state.
 // Queries never touch BFT and never mutate anything, so a manager can serve
 // them even while the committee is degraded.
-func adminQuery(mesh *CommitteeMesh, query string) ([]byte, error) {
+func adminQuery(mesh *CommitteeMesh, query string, remote peer.ID) ([]byte, error) {
 	switch query {
 	case "snapshot":
 		snapshot, ok := mesh.engine.LatestSnapshot()
@@ -86,6 +105,26 @@ func adminQuery(mesh *CommitteeMesh, query string) ([]byte, error) {
 			return nil, err
 		}
 		return json.Marshal(model.ClientSnapshot(snapshot))
+	case "manager-snapshot":
+		snapshot, ok := mesh.engine.LatestSnapshot()
+		if !ok {
+			return nil, &AdminError{Message: "no certified snapshot"}
+		}
+		approved := false
+		for _, request := range snapshot.State.ManagerJoins {
+			if request.PeerID == remote.String() &&
+				(request.Status == model.ManagerJoinApproved || request.Status == model.ManagerJoinActivated) {
+				approved = true
+				break
+			}
+		}
+		if !approved {
+			return nil, &AdminError{Message: "candidate manager is not approved"}
+		}
+		if err := bft.ValidateSnapshot(snapshot); err != nil {
+			return nil, err
+		}
+		return json.Marshal(snapshot)
 	default:
 		return nil, &AdminError{Message: "unknown query " + query}
 	}

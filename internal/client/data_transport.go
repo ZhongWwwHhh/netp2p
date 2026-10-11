@@ -33,6 +33,9 @@ const (
 type DataPlaneStats struct {
 	OutboundQueueDepth int64
 	OutboundDrops      uint64
+	ActiveFlows        int
+	FlowEvictions      uint64
+	FlowMigrations     uint64
 }
 
 var dataPlaneStats struct {
@@ -41,9 +44,13 @@ var dataPlaneStats struct {
 }
 
 func (client *Client) DataPlaneStats() DataPlaneStats {
+	flows := client.FlowDiagnostics()
 	return DataPlaneStats{
 		OutboundQueueDepth: dataPlaneStats.outboundQueueDepth.Load(),
 		OutboundDrops:      dataPlaneStats.outboundDrops.Load(),
+		ActiveFlows:        flows.ActiveFlows,
+		FlowEvictions:      flows.Evictions,
+		FlowMigrations:     flows.Migrations,
 	}
 }
 
@@ -199,7 +206,17 @@ func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) bool 
 		debugDrop("path sync from %s to %s: %v", client.selfPeerID(), destination.PeerID, err)
 		return false
 	}
-	assignment, path, status := client.paths.selectWithStatus(source, target)
+	ipPacket := packet.IPv4Packet(raw)
+	flow, hasFlow := ipPacket.Flow()
+	flowClass := FlowClassLatency
+	if !hasFlow {
+		flowClass = client.flowClassFor(destination, ipPacket)
+	} else if cached, ok := client.paths.cachedFlowClass(conntrack.Key(flow)); ok {
+		flowClass = cached
+	} else {
+		flowClass = client.flowClassFor(destination, ipPacket)
+	}
+	assignment, path, status := client.paths.selectFlowWithStatus(source, target, conntrack.Key(flow), hasFlow, flowClass, len(raw))
 	client.recordPathSelection(target, status)
 	if !status.OK {
 		recordDataPlaneDrop()
@@ -215,7 +232,12 @@ func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) bool 
 			debugDrop("direct path disabled from %s to %s", client.selfPeerID(), destination.PeerID)
 			return false
 		}
+		if !client.admitDirectDestination(destination, len(raw)) {
+			client.markOutboundDrop(fmt.Sprintf("direct destination %s exceeded its traffic budget", destination.PeerID))
+			return false
+		}
 		if !client.sendFrame(target, raw) {
+			client.paths.recordHardFailure(path.ID)
 			client.markOutboundDrop(fmt.Sprintf("direct frame delivery to %s failed", destination.PeerID))
 			return false
 		}
@@ -223,12 +245,33 @@ func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) bool 
 		return true
 	}
 	if err := client.paths.forwarder.Send(source, target, assignment.ID, path.ID, raw); err != nil {
+		client.paths.recordHardFailure(path.ID)
 		recordDataPlaneDrop()
 		client.markOutboundDrop(fmt.Sprintf("forward to %s via %s failed: %v", destination.PeerID, path.ID, err))
 		debugDrop("forward from %s to %s via %s: %v", client.selfPeerID(), destination.PeerID, path.ID, err)
 		return false
 	}
 	client.clearOutboundDrop()
+	return true
+}
+
+// admitDirectDestination enforces the remote peer's budget for a direct frame.
+// Via-manager traffic is charged by the first manager hop, but a direct packet
+// never passes that enforcement point.
+func (client *Client) admitDirectDestination(destination model.PeerRecord, size int) bool {
+	client.mu.RLock()
+	enforcer := client.quota
+	enforced := client.snapshot.State.Settings.QuotaEnforcementEnabled
+	client.mu.RUnlock()
+	if enforcer == nil || !enforced {
+		return true
+	}
+	decision := enforcer.Check(destination.PeerID, destination.Groups, "", uint64(size))
+	if !decision.Allowed || decision.Delay > 0 {
+		recordDataPlaneDrop()
+		debugDrop("quota: direct destination %s blocked by budget %s (%s)", destination.PeerID, decision.BudgetID, decision.Action)
+		return false
+	}
 	return true
 }
 

@@ -19,7 +19,7 @@
   let busy = $state(false);
 
   const budgets = $derived(network.snapshot?.state.budgets ?? []);
-  const subjectTypes = ['user', 'group', 'peer', 'route', 'service'];
+  const subjectTypes = ['user', 'group', 'peer', 'route', 'service', 'manager'];
   const exhaustActions = ['block', 'throttle', 'degrade', 'switch-path'];
 
   const filtered = $derived(

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +23,11 @@ import (
 )
 
 var activeClient atomic.Pointer[client.Client]
+
+// maxIPCJSONBody bounds the locally submitted client profile. It is larger
+// than any generated runtime profile but small enough to contain a hostile
+// local request before it can exhaust daemon memory.
+const maxIPCJSONBody = 1 << 20
 
 type ipcState struct {
 	mu         sync.RWMutex
@@ -259,10 +265,15 @@ func (state *ipcState) handleProvision(writer http.ResponseWriter, request *http
 		return
 	}
 	var cfg runtimeConfig
-	decoder := json.NewDecoder(request.Body)
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, maxIPCJSONBody))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("decode runtime config: %v", err)})
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": "runtime config must contain exactly one JSON object"})
 		return
 	}
 	if cfg.Role != "client" {

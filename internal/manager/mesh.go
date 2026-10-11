@@ -180,6 +180,13 @@ func (mesh *CommitteeMesh) ensureCommitteeAvailable() (CommitteeReadiness, error
 		required = len(peers)
 	}
 	readiness := CommitteeReadiness{Rounds: make(map[uint64]int)}
+	if required == 0 {
+		// A one-member committee has no remote peers; the local manager is
+		// the quorum and therefore the sole readiness responder.
+		readiness.Responders = 1
+		readiness.Rounds[mesh.engine.CurrentRound()]++
+		return readiness, nil
+	}
 	timer := time.NewTimer(committeeProbeTimeout)
 	defer timer.Stop()
 	answered := 0
@@ -506,9 +513,24 @@ func (mesh *CommitteeMesh) proposeLocal(transition model.StateTransition, round 
 	// when the outstanding peer votes arrive. Calling ProcessVote on the local
 	// vote here would race with the vote handler that commits the height and
 	// deletes the proposal.
-	proposal, _, err := mesh.engine.Propose(transition, round)
+	proposal, localVote, err := mesh.engine.Propose(transition, round)
 	if err != nil {
 		log.Printf("committee propose failed at height %d round %d: %v", height, round, err)
+		return
+	}
+	if mesh.engine.CommitteeParams().QuorumSize == 1 {
+		quorum, ready, voteErr := mesh.engine.ProcessVote(localVote)
+		if voteErr != nil {
+			log.Printf("committee local vote failed at height %d round %d: %v", height, round, voteErr)
+			return
+		}
+		if !ready {
+			log.Printf("committee single-member quorum was not ready at height %d round %d", height, round)
+			return
+		}
+		if _, commitErr := mesh.engine.Commit(proposal, quorum); commitErr != nil {
+			log.Printf("committee local commit failed at height %d round %d: %v", height, round, commitErr)
+		}
 		return
 	}
 	mesh.broadcast(model.CommitteeEnvelope{Type: "proposal", Proposal: &proposal})

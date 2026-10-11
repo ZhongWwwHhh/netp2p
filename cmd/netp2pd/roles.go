@@ -199,8 +199,12 @@ func runManager(ctx context.Context, options managerOptions) error {
 		if params == (model.CommitteeParams{}) {
 			params = model.DefaultCommitteeParams()
 		}
-		loadShare := func(epoch uint64) (*bls.KeySet, bool) {
-			return dkg.LoadShare(options.dataDir, epoch, local.ID, memberIDs, params.QuorumSize)
+		loadShare := func(epoch uint64, committee []model.CommitteeMember, params model.CommitteeParams) (*bls.KeySet, bool) {
+			currentIDs := make([]string, 0, len(committee))
+			for _, member := range committee {
+				currentIDs = append(currentIDs, member.ID)
+			}
+			return dkg.LoadShare(options.dataDir, epoch, local.ID, currentIDs, params.QuorumSize)
 		}
 		if hasLedger {
 			committeeConfig := latest.State.CommitteeConfig
@@ -211,13 +215,17 @@ func runManager(ctx context.Context, options managerOptions) error {
 			if snapshotParams != params {
 				return fmt.Errorf("certified committee parameters %+v do not match manifest %+v", snapshotParams, params)
 			}
-			if !sameRoutingCommittee(members, latest.Committee) {
+			certifiedCommittee := latest.Committee
+			if latest.Transition.Type == bft.TransitionActivateCommittee && len(latest.Transition.Committee) > 0 {
+				certifiedCommittee = latest.Transition.Committee
+			}
+			if !sameRoutingCommittee(members, certifiedCommittee) {
 				return fmt.Errorf("certified committee membership does not match the network manifest")
 			}
 			if committeeConfig.CommitteeEpoch == 0 || len(committeeConfig.GroupPublicKey) == 0 {
 				return fmt.Errorf("certified ledger has no DKG committee key")
 			}
-			keys, ok := loadShare(committeeConfig.CommitteeEpoch)
+			keys, ok := loadShare(committeeConfig.CommitteeEpoch, certifiedCommittee, snapshotParams)
 			if !ok {
 				return fmt.Errorf("local DKG share for epoch %d is missing", committeeConfig.CommitteeEpoch)
 			}
@@ -269,8 +277,12 @@ func runManager(ctx context.Context, options managerOptions) error {
 		if err != nil {
 			return err
 		}
-		engine.SetDKGLoader(func(epoch uint64) (*bls.KeySet, bool) {
-			return dkg.LoadShare(options.dataDir, epoch, local.ID, memberIDs, engine.CommitteeParams().QuorumSize)
+		engine.SetDKGLoader(func(epoch uint64, committee []model.CommitteeMember, params model.CommitteeParams) (*bls.KeySet, bool) {
+			currentIDs := make([]string, 0, len(committee))
+			for _, member := range committee {
+				currentIDs = append(currentIDs, member.ID)
+			}
+			return dkg.LoadShare(options.dataDir, epoch, local.ID, currentIDs, params.QuorumSize)
 		})
 	}
 
@@ -304,6 +316,12 @@ func runManager(ctx context.Context, options managerOptions) error {
 	cancel()
 	if err != nil {
 		log.Printf("committee readiness incomplete: %v", err)
+	}
+	if production {
+		go runCommitteeResizeWatcher(ctx, committeeResizeWatcher{
+			node: node, engine: engine, mesh: mesh, localID: local.ID,
+			dataDir: options.dataDir, networkID: manifest.NetworkID,
+		})
 	}
 	degraded := !committeeQuorumAvailable(node, mesh, engine.CommitteeParams())
 	if degraded {
@@ -398,7 +416,7 @@ func runManager(ctx context.Context, options managerOptions) error {
 		SSO: sso, Links: linkGossiper, Forwarding: options.forwarding, Metrics: collector, Alerts: alerter,
 		InitialCertifiedAt: latestCertifiedAt,
 	})
-	manager.RegisterAdminHandler(node, mesh, adminToken)
+	manager.RegisterAdminHandler(node, mesh, adminToken, manifest.ManagerJoinTokenHash)
 	netManager.EnableForwarding(ctx)
 	go netManager.RunPresenceGossip(ctx)
 	node.Handle(p2p.LinkGossipProtocol, linkGossiper.Handle)

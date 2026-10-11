@@ -3,6 +3,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -290,6 +291,52 @@ func TestSendRejectsInvalidFrameSize(t *testing.T) {
 	}
 	if err := transport.SendPacket(remote, make([]byte, MaxFrameSize+1)); err == nil {
 		t.Fatal("oversized frame must be rejected")
+	}
+}
+
+func TestTransportRejectsOversizedForwardingEnvelope(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	left, cancelLeft := newTestNode(t)
+	defer cancelLeft()
+	defer left.Close()
+	right, cancelRight := newTestNode(t)
+	defer cancelRight()
+	defer right.Close()
+
+	if err := left.Host.Connect(ctx, peer.AddrInfo{ID: right.Host.ID(), Addrs: right.Host.Addrs()}); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	decoded := make(chan error, 1)
+	rightTransport := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, nil, func(_ peer.ID, payload []byte) {
+		_, err := forward.DecodeEnvelope(payload)
+		decoded <- err
+	})
+	defer rightTransport.Close()
+	leftTransport := NewWithEnvelope(ctx, left.Host, p2p.FrameProtocol, nil, nil)
+	defer leftTransport.Close()
+
+	envelope, err := forward.EncodeEnvelope(forward.Envelope{
+		Header: forward.Header{
+			SourcePeerID: "source", DestinationPeerID: "destination",
+			AssignmentID: "assignment", PathID: "path", TTL: 3,
+		},
+		Payload: []byte("x"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := append(append([]byte{}, envelope[:len(envelope)-1]...), make([]byte, forward.MaxFrameSize+1)...)
+	if err := leftTransport.SendEnvelope(right.Host.ID(), oversized); err != nil {
+		t.Fatalf("send oversized envelope: %v", err)
+	}
+	select {
+	case err := <-decoded:
+		if !errors.Is(err, forward.ErrMalformedEnvelope) {
+			t.Fatalf("decode error = %v, want %v", err, forward.ErrMalformedEnvelope)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for oversized envelope")
 	}
 }
 

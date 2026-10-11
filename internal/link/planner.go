@@ -256,6 +256,7 @@ func appendViaManagerPath(result *[]scoredPath, source, destination string, hops
 		return
 	}
 	spec.RTTMilliseconds = metrics.rtt
+	spec.JitterMilliseconds = metrics.jitter
 	spec.LossPercent = metrics.loss
 	spec.BandwidthMbps = metrics.bandwidth
 	spec.Confidence = metrics.confidence

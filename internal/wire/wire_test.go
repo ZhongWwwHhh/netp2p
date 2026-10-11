@@ -72,6 +72,28 @@ func sampleState() model.NetworkState {
 			},
 			Fallbacks: []model.PathSpec{{ID: "p2", Kind: model.PathKindDirect}},
 		}},
+		PathFamilies: []model.PathFamily{{
+			ID: "family-1", Kind: model.PathKindMultiHop, ManagerHops: []string{"m1", "m2"},
+			SourceGroups: []string{"clients"}, DestinationScopes: []string{"10.0.0.0/24"},
+			FlowClasses: []string{model.FlowClassRealtime}, MaxRTTMilliseconds: 40,
+			MaxJitterMilliseconds: 5, MaxLossPercent: 0.5, MinBandwidthMbps: 25,
+		}},
+		RoutingDomains: []model.RoutingDomainAuthorization{{
+			ID: "domain-1",
+			Key: model.RoutingDomainKey{
+				SourceManagerID: "m1", SourceGroupID: "clients",
+				DestinationScope: "10.0.0.0/24", FlowClass: model.FlowClassRealtime,
+			},
+			PathFamilyIDs: []string{"family-1"}, PolicyIDs: []string{"allow"},
+			Services: []model.Service{{Protocol: "udp", StartPort: 5000, EndPort: 5001}},
+			MaxHops:  2, RequiresAdmission: true,
+		}},
+		ManagerJoins: []model.ManagerJoinRequest{{
+			ID: "join-1", ManagerID: "manager-4", PeerID: "peer-manager-4",
+			Address:    "/dns4/manager-4.netp2p.example/udp/4001/quic-v1",
+			ListenAddr: "/ip4/0.0.0.0/udp/4101/webrtc-direct", PublicKey: []byte{4, 5, 6},
+			RequestedAt: "2026-01-01T00:00:00Z", Status: model.ManagerJoinPending,
+		}},
 		NextIPOffset:    3,
 		CommitteeConfig: model.CommitteeConfig{Threshold: 3, Size: 4, GroupPublicKey: []byte{9, 9}, CommitteeEpoch: 1},
 	}
@@ -148,6 +170,50 @@ func TestControlMessagesRoundTrip(t *testing.T) {
 		if got.Actor == nil || got.Actor.ID != "user-1" || got.Actor.Role != model.RoleAdmin || got.Actor.Name != "Ada" {
 			t.Fatalf("actor round trip mismatch: %#v", got.Actor)
 		}
+	}
+}
+
+func TestCommitteeScaleFieldsRoundTrip(t *testing.T) {
+	state := sampleState()
+	transition := model.StateTransition{
+		Type: "submit_manager_join",
+		PathFamily: &model.PathFamily{
+			ID: "family-1", Kind: model.PathKindViaManager, ManagerHops: []string{"m1"},
+			SourceGroups: []string{"clients"}, DestinationScopes: []string{"10.0.0.0/24"},
+			FlowClasses: []string{model.FlowClassThroughput}, MinBandwidthMbps: 100,
+		},
+		Domain: &model.RoutingDomainAuthorization{
+			ID: "domain-1",
+			Key: model.RoutingDomainKey{
+				SourceManagerID: "m1", SourceGroupID: "clients",
+				DestinationScope: "10.0.0.0/24", FlowClass: model.FlowClassThroughput,
+			},
+			PathFamilyIDs: []string{"family-1"}, PolicyIDs: []string{"allow"}, MaxHops: 2,
+		},
+		ManagerJoin: &model.ManagerJoinRequest{
+			ID: "join-1", ManagerID: "manager-4", PeerID: "peer-manager-4",
+			Address:   "/dns4/manager-4.netp2p.example/udp/4001/quic-v1",
+			PublicKey: []byte{4, 5, 6}, RequestedAt: "2026-01-01T00:00:00Z",
+			Status: model.ManagerJoinPending,
+		},
+	}
+
+	var restoredState pb.NetworkState
+	roundTrip(t, wire.NetworkStateToProto(state), &restoredState)
+	gotState := wire.NetworkStateFromProto(&restoredState)
+	if len(gotState.PathFamilies) != 1 || gotState.PathFamilies[0].ID != "family-1" ||
+		len(gotState.RoutingDomains) != 1 || gotState.RoutingDomains[0].ID != "domain-1" ||
+		len(gotState.ManagerJoins) != 1 || gotState.ManagerJoins[0].ManagerID != "manager-4" {
+		t.Fatalf("certified scale fields were lost over protobuf: %#v", gotState)
+	}
+
+	var restoredTransition pb.StateTransition
+	roundTrip(t, wire.StateTransitionToProto(transition), &restoredTransition)
+	gotTransition := wire.StateTransitionFromProto(&restoredTransition)
+	if gotTransition.PathFamily == nil || gotTransition.PathFamily.ID != "family-1" ||
+		gotTransition.Domain == nil || gotTransition.Domain.ID != "domain-1" ||
+		gotTransition.ManagerJoin == nil || gotTransition.ManagerJoin.ManagerID != "manager-4" {
+		t.Fatalf("committee transition fields were lost over protobuf: %#v", gotTransition)
 	}
 }
 

@@ -107,6 +107,10 @@ type Config struct {
 	OIDC *BootstrapOIDC
 	// Readiness overrides the default manager/node-derived readiness signal.
 	Readiness ReadinessFunc
+	// RoutingStatus supplies signed epochs, manager telemetry, demand, and FEC
+	// counters from the runtime planner. When nil, the API returns an explicit
+	// derived view instead of fabricating runtime state.
+	RoutingStatus RoutingStatusFunc
 }
 
 // Authenticator resolves an SSO ID token to an authenticated identity. It is
@@ -284,6 +288,10 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		}
 		writeJSON(writer, http.StatusOK, server.diagnostics())
 	case request.Method == http.MethodGet && path == "/api/v1/committee/status":
+		if !identity.Allows(auth.ModuleDiagnostics, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
 		writeJSON(writer, http.StatusOK, server.committeeStatus())
 	case request.Method == http.MethodGet && path == "/api/v1/link-view":
 		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
@@ -291,6 +299,58 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"linkView": server.manager.LinkView()})
+	case request.Method == http.MethodGet && path == "/api/v1/routing/status":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		status := server.routingStatus()
+		if !identity.Allows(auth.ModuleBudgets, auth.OpRead) {
+			status.ManagerCapacity = []ManagerCapacityStatus{}
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"routing": status})
+	case request.Method == http.MethodGet && path == "/api/v1/routing/domains":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"domains": server.routingStatus().Domains})
+	case request.Method == http.MethodGet && path == "/api/v1/routing/path-families":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"pathFamilies": server.routingStatus().PathFamilies})
+	case request.Method == http.MethodGet && path == "/api/v1/routing/telemetry":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"telemetry": server.routingStatus().Telemetry})
+	case request.Method == http.MethodGet && path == "/api/v1/routing/demand":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"demand": server.routingStatus().Demand})
+	case request.Method == http.MethodGet && path == "/api/v1/routing/epoch/current":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"epoch": server.routingStatus().Epoch})
+	case request.Method == http.MethodGet && path == "/api/v1/routing/fec":
+		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"fec": server.routingStatus().Fec})
+	case request.Method == http.MethodGet && path == "/api/v1/managers/capacity":
+		if !identity.Allows(auth.ModuleBudgets, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"managers": server.routingStatus().ManagerCapacity})
 	case request.Method == http.MethodGet && path == "/api/v1/assignments":
 		if !identity.Allows(auth.ModulePaths, auth.OpRead) {
 			writeError(writer, http.StatusForbidden, "forbidden")
@@ -333,7 +393,7 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		writeJSON(writer, http.StatusOK, map[string]string{"protocol": string(p2p.WebAPIProtocol)})
 	case request.Method == http.MethodPost && path == "/api/v1/setup-keys":
 		var body SetupKeyCreateRequest
-		if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
+		if err := decodeJSONBody(writer, request, 1<<20, &body); err != nil {
 			writeError(writer, http.StatusBadRequest, "invalid request")
 			return
 		}
@@ -363,7 +423,7 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		writeJSON(writer, http.StatusOK, map[string]any{"token": token, "snapshot": model.ClientSnapshot(snapshot)})
 	case request.Method == http.MethodPost && path == "/api/v1/transitions":
 		var body TransitionRequest
-		if err := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1<<20)).Decode(&body); err != nil {
+		if err := decodeJSONBody(writer, request, 1<<20, &body); err != nil {
 			writeError(writer, http.StatusBadRequest, "invalid request")
 			return
 		}
@@ -800,6 +860,9 @@ func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) 
 		}
 		issuedAt, err := server.sessions.IssuedAt(token)
 		if err != nil {
+			return auth.Identity{}, false
+		}
+		if server.accounts == nil {
 			return auth.Identity{}, false
 		}
 		for _, user := range server.accounts.Users() {

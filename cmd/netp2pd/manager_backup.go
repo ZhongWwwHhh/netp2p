@@ -12,13 +12,15 @@ import (
 
 func runManagerCommand(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: netp2pd manager <backup|restore> [flags]")
+		return fmt.Errorf("usage: netp2pd manager <backup|restore|join> [flags]")
 	}
 	switch args[0] {
 	case "backup":
 		return runManagerBackup(args[1:])
 	case "restore":
 		return runManagerRestore(args[1:])
+	case "join":
+		return runManagerJoin(args[1:])
 	default:
 		return fmt.Errorf("unknown manager command %q", args[0])
 	}

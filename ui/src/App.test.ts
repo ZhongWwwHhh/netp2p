@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { multiaddr } from '@multiformats/multiaddr';
 import { bitrateLabel, bytesLabel, percent, relativeTime, shortPeerId } from './lib/format';
 import { bootstrapAddresses } from './lib/libp2p';
-import { normalizePresence, normalizeSnapshot } from './lib/normalize';
+import { normalizePresence, normalizeRoutingStatus, normalizeSnapshot } from './lib/normalize';
 import { httpResource, joinProtocolPath } from './lib/paths';
 import { CommitteeSize, FaultLimit, QuorumSize, signerCount } from './lib/quorum';
 import { defaultPath, routeTitle, routes } from './lib/router.svelte';
@@ -24,6 +24,9 @@ const emptyState = {
   dnsSettings: { disabled: false, groups: [] },
   settings: {},
   assignments: [],
+  pathFamilies: [],
+  routingDomains: [],
+  managerJoins: [],
   nextIpOffset: 1,
 };
 
@@ -112,13 +115,27 @@ describe('snapshot normalization', () => {
     const snapshot = baseSnapshot();
     const withNulls = {
       ...snapshot,
-      state: { ...emptyState, peers: null, routes: null, budgets: null, nameservers: null, zones: null, dnsSettings: null },
+      state: {
+        ...emptyState,
+        peers: null,
+        routes: null,
+        budgets: null,
+        nameservers: null,
+        zones: null,
+        dnsSettings: null,
+        pathFamilies: null,
+        routingDomains: null,
+        managerJoins: null,
+      },
     } as unknown as Snapshot;
     const normalized = normalizeSnapshot(withNulls);
     expect(normalized.state.peers).toEqual([]);
     expect(normalized.state.routes).toEqual([]);
     expect(normalized.state.nameservers).toEqual([]);
     expect(normalized.state.zones).toEqual([]);
+    expect(normalized.state.pathFamilies).toEqual([]);
+    expect(normalized.state.routingDomains).toEqual([]);
+    expect(normalized.state.managerJoins).toEqual([]);
     expect(normalized.state.dnsSettings.groups).toEqual([]);
   });
 
@@ -159,7 +176,35 @@ describe('routing table', () => {
 
   it('exposes the operator pages for paths and diagnostics', () => {
     expect(routes.some((route) => route.path === '/paths')).toBe(true);
+    expect(routes.some((route) => route.path === '/routing')).toBe(true);
     expect(routes.some((route) => route.path === '/diagnostics')).toBe(true);
+  });
+
+  it('normalizes routing status collections without inventing runtime state', () => {
+    const normalized = normalizeRoutingStatus({
+      networkId: 'net',
+      snapshotHeight: 42,
+      generatedAt: '2026-10-11T00:00:00Z',
+      mode: 'runtime',
+      supportedFlowClasses: null,
+      domains: null,
+      pathFamilies: null,
+      managerCapacity: null,
+      telemetry: null,
+      demand: null,
+      fec: { enabled: true, defaultCodec: 'reed-solomon', maxRedundancyPercent: 25, classes: null },
+      problems: null,
+    } as unknown as Parameters<typeof normalizeRoutingStatus>[0]);
+
+    expect(normalized.supportedFlowClasses).toEqual([]);
+    expect(normalized.domains).toEqual([]);
+    expect(normalized.pathFamilies).toEqual([]);
+    expect(normalized.managerCapacity).toEqual([]);
+    expect(normalized.telemetry).toEqual([]);
+    expect(normalized.demand).toEqual([]);
+    expect(normalized.fec.classes).toEqual([]);
+    expect(normalized.problems).toEqual([]);
+    expect(normalized.epoch).toBeNull();
   });
 });
 

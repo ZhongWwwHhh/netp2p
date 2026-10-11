@@ -15,6 +15,7 @@ export const routes: Route[] = [
   { path: '/routes', title: 'Routes', group: 'Network Routing' },
   { path: '/budgets', title: 'Traffic Budgets', group: 'Network Routing' },
   { path: '/paths', title: 'Paths', group: 'Network Routing' },
+  { path: '/routing', title: 'Global Routing', group: 'Network Routing' },
   { path: '/dns/nameservers', title: 'Nameservers', group: 'DNS' },
   { path: '/dns/zones', title: 'Zones', group: 'DNS' },
   { path: '/dns/settings', title: 'DNS Settings', group: 'DNS' },

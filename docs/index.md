@@ -18,6 +18,7 @@ task you want to complete.
 - [Users and groups](manage/users-and-groups.md)
 - [Policies](manage/policies.md)
 - [Routes and routing peers](manage/routes.md)
+- [Global routing and load balancing](manage/global-routing.md)
 - [DNS](manage/dns.md)
 - [Setup keys](manage/setup-keys.md)
 - [Peers, diagnostics, and audit](manage/peers-and-diagnostics.md)

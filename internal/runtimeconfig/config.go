@@ -4,7 +4,9 @@ package runtimeconfig
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"runtime"
@@ -15,6 +17,10 @@ import (
 )
 
 const Version = 1
+
+// maxConfigFileSize keeps a corrupt or oversized local file from becoming a
+// whole-process allocation before YAML validation can run.
+const maxConfigFileSize = 1 << 20
 
 type Config struct {
 	Version int `yaml:"version" json:"version"`
@@ -122,15 +128,32 @@ func Parse(path string) (Config, error) {
 	if path == "" {
 		return cfg, nil
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config file: %w", err)
 	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxConfigFileSize+1))
+	if err != nil {
+		return Config{}, fmt.Errorf("read config file: %w", err)
+	}
+	if len(data) > maxConfigFileSize {
+		return Config{}, fmt.Errorf("config file exceeds %d bytes", maxConfigFileSize)
+	}
+	return parse(data)
+}
+
+func parse(data []byte) (Config, error) {
+	cfg := Default()
 	cfg.Version = 0
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config file: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Config{}, fmt.Errorf("config file must contain exactly one document")
 	}
 	if cfg.Version != Version {
 		return Config{}, fmt.Errorf("unsupported runtime config version %d (want %d)", cfg.Version, Version)

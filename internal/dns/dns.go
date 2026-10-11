@@ -116,16 +116,16 @@ func (resolver *Resolver) ListenAndServe() error {
 	mux := dns.NewServeMux()
 	mux.HandleFunc(".", resolver.handle)
 
-	packetConn, err := net.ListenPacket("udp", resolver.listen)
+	tcpListener, err := net.Listen("tcp", resolver.listen)
 	if err != nil {
-		return fmt.Errorf("listen dns %s: %w", resolver.listen, err)
+		return fmt.Errorf("listen dns tcp %s: %w", resolver.listen, err)
 	}
 	// UDP and TCP must use the same port so a truncated UDP reply can be
 	// retried by the stub resolver over TCP.
-	tcpListener, err := net.Listen("tcp", packetConn.LocalAddr().String())
+	packetConn, err := net.ListenPacket("udp", tcpListener.Addr().String())
 	if err != nil {
-		_ = packetConn.Close()
-		return fmt.Errorf("listen dns tcp %s: %w", packetConn.LocalAddr().String(), err)
+		_ = tcpListener.Close()
+		return fmt.Errorf("listen dns udp %s: %w", tcpListener.Addr().String(), err)
 	}
 	udpServer := &dns.Server{PacketConn: packetConn, Handler: mux}
 	tcpServer := &dns.Server{Listener: tcpListener, Handler: mux}
@@ -350,6 +350,9 @@ func (resolver *Resolver) storeCached(request *dns.Msg, reply *dns.Msg) {
 	ttl := replyTTL(reply)
 	if ttl <= 0 {
 		return
+	}
+	if ttl > maxDNSCacheTTL {
+		ttl = maxDNSCacheTTL
 	}
 	resolver.mu.Lock()
 	defer resolver.mu.Unlock()

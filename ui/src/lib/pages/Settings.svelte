@@ -203,7 +203,7 @@
         <label class="block">
           <span class="label">Default flow class</span>
           <select class="input" bind:value={settings.defaultFlowClass} disabled={!canWrite}>
-            {#each ['', 'latency', 'throughput', 'reliability', 'cost'] as flowClass (flowClass)}
+          {#each ['', 'latency', 'throughput', 'cost', 'reliability', 'realtime'] as flowClass (flowClass)}
               <option value={flowClass}>{flowClass || 'default (latency)'}</option>
             {/each}
           </select>

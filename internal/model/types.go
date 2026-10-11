@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +103,49 @@ func CommitteeParamsFromConfig(config CommitteeConfig) (CommitteeParams, error) 
 	return params, nil
 }
 
+// CommitteeParamsForSize returns the largest Byzantine-fault tolerance that
+// BFT consensus supports for a committee size. Four managers therefore use
+// 4/1/3 and seven managers use 7/2/5.
+func CommitteeParamsForSize(size int) (CommitteeParams, error) {
+	if size < 1 {
+		return CommitteeParams{}, fmt.Errorf("committee size must be at least 1")
+	}
+	faultLimit := (size - 1) / 3
+	params := CommitteeParams{
+		Size: size, FaultLimit: faultLimit, QuorumSize: size - faultLimit,
+	}
+	if err := params.Validate(); err != nil {
+		return CommitteeParams{}, err
+	}
+	return params, nil
+}
+
+type ManagerJoinStatus string
+
+const (
+	ManagerJoinPending   ManagerJoinStatus = "pending"
+	ManagerJoinApproved  ManagerJoinStatus = "approved"
+	ManagerJoinRejected  ManagerJoinStatus = "rejected"
+	ManagerJoinActivated ManagerJoinStatus = "activated"
+)
+
+// ManagerJoinRequest records a candidate manager discovered through the
+// bootstrap token. The token only lets a candidate reach this queue; an owner
+// or network administrator must approve it before committee activation.
+type ManagerJoinRequest struct {
+	ID          string            `json:"id"`
+	ManagerID   string            `json:"managerId"`
+	PeerID      string            `json:"peerId"`
+	Address     string            `json:"address"`
+	ListenAddr  string            `json:"listenAddr,omitempty"`
+	PublicKey   []byte            `json:"publicKey"`
+	RequestedAt string            `json:"requestedAt"`
+	Status      ManagerJoinStatus `json:"status"`
+	ReviewedBy  string            `json:"reviewedBy,omitempty"`
+	ReviewedAt  string            `json:"reviewedAt,omitempty"`
+	Reason      string            `json:"reason,omitempty"`
+}
+
 func (config CommitteeConfig) Equal(other CommitteeConfig) bool {
 	return config.Threshold == other.Threshold &&
 		config.Size == other.Size &&
@@ -194,14 +238,70 @@ const (
 	PathKindMultiHop   PathKind = "multi_hop"
 )
 
+// Flow classes are protocol-level planner inputs. Empty means "inherit from
+// policy, route, or network settings"; a certified path family must name at
+// least one explicit class.
+const (
+	FlowClassLatency     = "latency"
+	FlowClassThroughput  = "throughput"
+	FlowClassCost        = "cost"
+	FlowClassReliability = "reliability"
+	FlowClassRealtime    = "realtime"
+)
+
+func ValidFlowClass(flowClass string) bool {
+	switch flowClass {
+	case FlowClassLatency, FlowClassThroughput, FlowClassCost,
+		FlowClassReliability, FlowClassRealtime:
+		return true
+	default:
+		return false
+	}
+}
+
+func AllFlowClasses() []string {
+	return []string{
+		FlowClassLatency, FlowClassThroughput, FlowClassCost,
+		FlowClassReliability, FlowClassRealtime,
+	}
+}
+
+// Destination scopes deliberately identify collections or bounded hot keys,
+// never an unbounded source-peer/destination-peer pair.
+const (
+	DestinationScopeGroup    = "group:"
+	DestinationScopeRoute    = "route:"
+	DestinationScopeResource = "resource:"
+	DestinationScopePeer     = "peer:"
+)
+
+func ParseDestinationScope(scope string) (kind, id string, err error) {
+	for _, prefix := range []string{
+		DestinationScopeGroup, DestinationScopeRoute,
+		DestinationScopeResource, DestinationScopePeer,
+	} {
+		if strings.HasPrefix(scope, prefix) {
+			id = strings.TrimPrefix(scope, prefix)
+			if id == "" || strings.ContainsAny(id, " \t\r\n") {
+				return "", "", fmt.Errorf("destination scope %q has an empty or invalid identifier", scope)
+			}
+			return prefix, id, nil
+		}
+	}
+	return "", "", fmt.Errorf("destination scope %q must use group:, route:, resource:, or peer: prefix", scope)
+}
+
 type PathSpec struct {
 	ID              string   `json:"id"`
 	Kind            PathKind `json:"kind"`
 	ManagerHops     []string `json:"managerHops,omitempty"`
 	RTTMilliseconds float64  `json:"rttMilliseconds"`
-	LossPercent     float64  `json:"lossPercent"`
-	BandwidthMbps   float64  `json:"bandwidthMbps"`
-	Confidence      float64  `json:"confidence"`
+	// JitterMilliseconds is the observed or composed jitter ceiling. It is a
+	// hard realtime constraint, not merely a scoring input.
+	JitterMilliseconds float64 `json:"jitterMilliseconds"`
+	LossPercent        float64 `json:"lossPercent"`
+	BandwidthMbps      float64 `json:"bandwidthMbps"`
+	Confidence         float64 `json:"confidence"`
 	// Cost is the estimated forwarding cost of this path: the sum of per-hop
 	// forwarding cost. It breaks score ties and drives cost-class routing.
 	Cost uint64 `json:"cost,omitempty"`
@@ -249,6 +349,122 @@ type RouteAssignment struct {
 	RequiresAdmission bool       `json:"requiresAdmission"`
 	// MaxHops is the certified ceiling on manager hops for this assignment.
 	MaxHops int `json:"maxHops,omitempty"`
+}
+
+// RoutingDomainKey is the normal optimizer allocation key. SourceManagerID
+// scopes a domain to an access edge; SourceGroupID and DestinationScope remain
+// aggregate identities. A peer scope is a bounded hot-key exception, not the
+// normal representation of a peer pair.
+type RoutingDomainKey struct {
+	SourceManagerID  string `json:"sourceManagerId"`
+	SourceGroupID    string `json:"sourceGroupId"`
+	DestinationScope string `json:"destinationScope"`
+	FlowClass        string `json:"flowClass"`
+}
+
+func (key RoutingDomainKey) Validate() error {
+	if key.SourceManagerID == "" {
+		return fmt.Errorf("routing domain source manager is required")
+	}
+	if key.SourceGroupID == "" {
+		return fmt.Errorf("routing domain source group is required")
+	}
+	if _, _, err := ParseDestinationScope(key.DestinationScope); err != nil {
+		return err
+	}
+	if !ValidFlowClass(key.FlowClass) {
+		return fmt.Errorf("routing domain flow class %q is unknown", key.FlowClass)
+	}
+	return nil
+}
+
+func (key RoutingDomainKey) ID() string {
+	return strings.Join([]string{
+		key.SourceManagerID, key.SourceGroupID, key.DestinationScope, key.FlowClass,
+	}, "/")
+}
+
+// PathFamily is the certified candidate set consumed by runtime weighted
+// selection. Runtime telemetry may choose weights among families, but can never
+// introduce a family that the committee did not certify.
+type PathFamily struct {
+	ID                 string   `json:"id"`
+	Kind               PathKind `json:"kind"`
+	ManagerHops        []string `json:"managerHops,omitempty"`
+	SourceGroups       []string `json:"sourceGroups"`
+	DestinationScopes  []string `json:"destinationScopes"`
+	FlowClasses        []string `json:"flowClasses"`
+	MaxRTTMilliseconds float64  `json:"maxRttMilliseconds"`
+	// MaxJitterMilliseconds is required for a family that admits realtime
+	// traffic. The committee certifies the SLA; runtime telemetry only decides
+	// whether a member path currently satisfies it.
+	MaxJitterMilliseconds float64 `json:"maxJitterMilliseconds"`
+	MaxLossPercent        float64 `json:"maxLossPercent"`
+	MinBandwidthMbps      float64 `json:"minBandwidthMbps"`
+}
+
+func (family PathFamily) Normalized() PathFamily {
+	family.ManagerHops = dedupe(family.ManagerHops)
+	family.SourceGroups = dedupe(family.SourceGroups)
+	family.DestinationScopes = dedupe(family.DestinationScopes)
+	family.FlowClasses = dedupe(family.FlowClasses)
+	sort.Strings(family.ManagerHops)
+	sort.Strings(family.SourceGroups)
+	sort.Strings(family.DestinationScopes)
+	sort.Strings(family.FlowClasses)
+	return family
+}
+
+func (family PathFamily) Covers(key RoutingDomainKey) bool {
+	return scopeMatches(family.SourceGroups, key.SourceGroupID) &&
+		scopeMatches(family.DestinationScopes, key.DestinationScope) &&
+		containsString(family.FlowClasses, key.FlowClass)
+}
+
+func scopeMatches(values []string, wanted string) bool {
+	return containsString(values, wanted) || containsString(values, "*")
+}
+
+// RoutingDomainAuthorization compiles policy admission and certified path
+// families for one RoutingDomainKey. Managers use it to authorize forwarded
+// traffic without consulting an assignment per peer pair.
+type RoutingDomainAuthorization struct {
+	ID                string           `json:"id"`
+	Key               RoutingDomainKey `json:"key"`
+	PathFamilyIDs     []string         `json:"pathFamilyIds"`
+	PolicyIDs         []string         `json:"policyIds"`
+	Services          []Service        `json:"services,omitempty"`
+	MaxHops           int              `json:"maxHops,omitempty"`
+	RequiresAdmission bool             `json:"requiresAdmission"`
+}
+
+func (authorization RoutingDomainAuthorization) Normalized() RoutingDomainAuthorization {
+	authorization.PathFamilyIDs = dedupe(authorization.PathFamilyIDs)
+	authorization.PolicyIDs = dedupe(authorization.PolicyIDs)
+	sort.Strings(authorization.PathFamilyIDs)
+	sort.Strings(authorization.PolicyIDs)
+	if len(authorization.Services) > 0 {
+		sort.Slice(authorization.Services, func(i, j int) bool {
+			left, right := authorization.Services[i], authorization.Services[j]
+			if left.Protocol != right.Protocol {
+				return left.Protocol < right.Protocol
+			}
+			if left.StartPort != right.StartPort {
+				return left.StartPort < right.StartPort
+			}
+			return left.EndPort < right.EndPort
+		})
+	}
+	return authorization
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 // Paths returns the primary followed by fallbacks in certified order.
@@ -374,6 +590,14 @@ func SetupKeyHash(token string) []byte {
 	return argon2.IDKey([]byte(token), salt[:], 1, 64*1024, 1, 32)
 }
 
+// ManagerJoinTokenHash computes the verifier stored by an existing committee
+// for the one-time manager enrollment token. The token itself is only present
+// in the candidate manager's private join bundle.
+func ManagerJoinTokenHash(token string) []byte {
+	salt := sha256.Sum256([]byte("netp2p-manager-join:" + token))
+	return argon2.IDKey([]byte(token), salt[:], 1, 64*1024, 1, 32)
+}
+
 // Nameserver is a certified DNS resolver that applies to the groups listed in
 // Groups. MatchDomains scopes the resolver to specific suffixes; an empty list
 // makes it a general-purpose resolver.
@@ -412,22 +636,25 @@ type DNSSettings struct {
 }
 
 type StateTransition struct {
-	Type        string           `json:"type"`
-	Peer        PeerRecord       `json:"peer,omitempty"`
-	SetupKey    string           `json:"setupKey,omitempty"`
-	RequestID   string           `json:"requestId,omitempty"`
-	Group       *Group           `json:"group,omitempty"`
-	Policy      *Policy          `json:"policy,omitempty"`
-	Route       *Route           `json:"route,omitempty"`
-	Budget      *TrafficBudget   `json:"budget,omitempty"`
-	Record      *SetupKey        `json:"setupKeyRecord,omitempty"`
-	Nameserver  *Nameserver      `json:"nameserver,omitempty"`
-	Zone        *DNSZone         `json:"zone,omitempty"`
-	DNSSettings *DNSSettings     `json:"dnsSettings,omitempty"`
-	User        *User            `json:"user,omitempty"`
-	Settings    *NetworkSettings `json:"settings,omitempty"`
-	Assignment  *RouteAssignment `json:"assignment,omitempty"`
-	TargetID    string           `json:"targetId,omitempty"`
+	Type        string                      `json:"type"`
+	Peer        PeerRecord                  `json:"peer,omitempty"`
+	SetupKey    string                      `json:"setupKey,omitempty"`
+	RequestID   string                      `json:"requestId,omitempty"`
+	Group       *Group                      `json:"group,omitempty"`
+	Policy      *Policy                     `json:"policy,omitempty"`
+	Route       *Route                      `json:"route,omitempty"`
+	Budget      *TrafficBudget              `json:"budget,omitempty"`
+	Record      *SetupKey                   `json:"setupKeyRecord,omitempty"`
+	Nameserver  *Nameserver                 `json:"nameserver,omitempty"`
+	Zone        *DNSZone                    `json:"zone,omitempty"`
+	DNSSettings *DNSSettings                `json:"dnsSettings,omitempty"`
+	User        *User                       `json:"user,omitempty"`
+	Settings    *NetworkSettings            `json:"settings,omitempty"`
+	Assignment  *RouteAssignment            `json:"assignment,omitempty"`
+	PathFamily  *PathFamily                 `json:"pathFamily,omitempty"`
+	Domain      *RoutingDomainAuthorization `json:"routingDomain,omitempty"`
+	ManagerJoin *ManagerJoinRequest         `json:"managerJoin,omitempty"`
+	TargetID    string                      `json:"targetId,omitempty"`
 	// Committee carries the full replacement committee for update_committee.
 	Committee []CommitteeMember `json:"committee,omitempty"`
 	// CommitteeConfig carries the new threshold parameters for
@@ -484,6 +711,9 @@ type SignedSnapshot struct {
 	CommitteeConfig CommitteeConfig `json:"committeeConfig"`
 	Transition      StateTransition `json:"transition"`
 	LeaderID        string          `json:"leaderId"`
+	// LocalCommittedAt is runtime-only retention metadata. It is not signed and
+	// is never serialized into certified state.
+	LocalCommittedAt time.Time `json:"-"`
 }
 
 // ClientSnapshot returns a copy safe for client-visible state. It removes
@@ -557,21 +787,24 @@ func redactTransition(transition StateTransition) StateTransition {
 }
 
 type NetworkState struct {
-	NetworkID    string            `json:"networkId"`
-	OverlayCIDR  string            `json:"overlayCidr"`
-	Peers        []PeerRecord      `json:"peers"`
-	Users        []User            `json:"users"`
-	Groups       []Group           `json:"groups"`
-	Policies     []Policy          `json:"policies"`
-	Routes       []Route           `json:"routes"`
-	Budgets      []TrafficBudget   `json:"budgets"`
-	SetupKeys    []SetupKey        `json:"setupKeys"`
-	Nameservers  []Nameserver      `json:"nameservers"`
-	Zones        []DNSZone         `json:"zones"`
-	DNSSettings  DNSSettings       `json:"dnsSettings"`
-	Settings     NetworkSettings   `json:"settings"`
-	Assignments  []RouteAssignment `json:"assignments"`
-	NextIPOffset uint32            `json:"nextIpOffset"`
+	NetworkID      string                       `json:"networkId"`
+	OverlayCIDR    string                       `json:"overlayCidr"`
+	Peers          []PeerRecord                 `json:"peers"`
+	Users          []User                       `json:"users"`
+	Groups         []Group                      `json:"groups"`
+	Policies       []Policy                     `json:"policies"`
+	Routes         []Route                      `json:"routes"`
+	Budgets        []TrafficBudget              `json:"budgets"`
+	SetupKeys      []SetupKey                   `json:"setupKeys"`
+	Nameservers    []Nameserver                 `json:"nameservers"`
+	Zones          []DNSZone                    `json:"zones"`
+	DNSSettings    DNSSettings                  `json:"dnsSettings"`
+	Settings       NetworkSettings              `json:"settings"`
+	Assignments    []RouteAssignment            `json:"assignments"`
+	PathFamilies   []PathFamily                 `json:"pathFamilies"`
+	RoutingDomains []RoutingDomainAuthorization `json:"routingDomains"`
+	ManagerJoins   []ManagerJoinRequest         `json:"managerJoinRequests"`
+	NextIPOffset   uint32                       `json:"nextIpOffset"`
 	// CommitteeConfig is mirrored into certified state so a client can verify a
 	// snapshot using only the snapshot itself.
 	CommitteeConfig CommitteeConfig `json:"committeeConfig"`

@@ -55,6 +55,52 @@ can strand a manager on the old version. Always use an atomic all-stop/all-start
 
 Never roll one manager at a time for a committee upgrade.
 
+## Add a manager
+
+NetP2P separates discovery from trust:
+
+1. A manager join token lets a candidate reach an existing manager.
+2. The candidate submits a signed join request.
+3. An owner or network administrator approves it in the console.
+4. Existing managers and the candidate run a fresh DKG ceremony.
+5. The committee certifies an `activate_committee` transition for the next epoch.
+
+On a trusted administrator machine, generate a private join bundle for the new
+host:
+
+```bash
+netp2p init manager-join \
+  --manifest ./network.json \
+  --manager-bundle ./manager-1.json \
+  --join-token-file ./manager-join-token.txt \
+  --manager manager-4,manager-4.netp2p.example,203.0.113.14,4001 \
+  --init-domain console.netp2p.example \
+  --output ./manager-4-join.json
+```
+
+Copy only that bundle to the new host, then start the candidate:
+
+```bash
+netp2pd manager join \
+  --bundle /etc/netp2p/manager-join.json \
+  --data-dir /var/lib/netp2p
+```
+
+Open **Committee → Manager join requests** in the console and approve the
+candidate. After activation, verify the new manager's `/readyz` endpoint and the
+committee's certified size and epoch.
+
+The join token is an enrollment convenience, not a trust decision. A leaked token
+can only create a pending request; it cannot add the candidate to the committee
+without administrator approval.
+
+## Remove a manager
+
+Before removing a manager, back up every remaining manager and confirm the next
+committee still meets quorum. Submit a committee update from the console only
+after the target manager has stopped receiving client traffic. Keep the removed
+host's identity and DKG share offline in case a rollback is required.
+
 ## Rollback steps
 
 1. Announce another maintenance window.

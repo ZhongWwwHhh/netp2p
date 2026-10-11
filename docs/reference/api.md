@@ -66,6 +66,14 @@ Implemented reads and actions:
 | `GET /api/v1/committee/status` | local committee view |
 | `GET /api/v1/link-view` | link segments/view |
 | `GET /api/v1/assignments` | assignments and admissions |
+| `GET /api/v1/routing/status` | aggregate routing and load-balancing status |
+| `GET /api/v1/routing/domains` | routing domain authorizations |
+| `GET /api/v1/routing/path-families` | certified path families |
+| `GET /api/v1/routing/telemetry` | manager edge telemetry |
+| `GET /api/v1/routing/demand` | aggregated client demand samples |
+| `GET /api/v1/routing/epoch/current` | current signed routing epoch |
+| `GET /api/v1/routing/fec` | FEC diagnostics |
+| `GET /api/v1/managers/capacity` | manager monthly capacity pressure |
 | `GET /api/v1/quota` | quota usage |
 | `GET /api/v1/quota/history?period=daily|monthly` | quota history |
 | `GET /api/v1/alerts` | active alerts |
@@ -75,6 +83,28 @@ Implemented reads and actions:
 
 `GET /api/v1/auth/session` and `GET /api/v1/session` both resolve the current
 session. Use `/api/v1/auth/session` in authentication-focused clients.
+
+## Routing status
+
+`GET /api/v1/routing/status` returns one aggregate view:
+
+- certified routing domains and path families;
+- the complete five-class model: `latency`, `throughput`, `cost`, `reliability`, and `realtime`;
+- the current signed `RoutingEpoch`, when the runtime producer is enabled;
+- manager monthly capacity pressure;
+- edge telemetry;
+- aggregated demand samples;
+- FEC diagnostics and explicit producer problems.
+
+The focused routes under `/api/v1/routing/*` and
+`/api/v1/managers/capacity` return the same objects for clients that need only
+one section. Routing reads require the paths permission; manager capacity reads
+require the budgets permission. The aggregate routing response omits manager
+capacity for callers without budgets permission.
+
+When a runtime producer is unavailable, the API returns an explicit `derived`
+or `unavailable` mode and lists the missing inputs. It does not invent a
+signature, epoch version, demand sample, or FEC counter.
 
 The manager admin CLI exposes the same certified credential change:
 

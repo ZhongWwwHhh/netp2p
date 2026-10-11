@@ -65,7 +65,7 @@ func DecodeEnvelope(wire []byte) (Envelope, error) {
 	ttl := wire[9]
 	required := headerSize + sourceLength + destinationLength + assignmentLength + pathLength
 	if sourceLength == 0 || destinationLength == 0 || assignmentLength == 0 || pathLength == 0 ||
-		required > len(wire) {
+		required >= len(wire) || len(wire)-required > MaxFrameSize || ttl == 0 {
 		return Envelope{}, ErrMalformedEnvelope
 	}
 	offset := headerSize

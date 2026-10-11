@@ -185,7 +185,7 @@
       </div>
       <FormField label="Flow class" hint="Overrides the network default scoring weights for this route.">
         <select class="input" bind:value={editing.flowClass}>
-          {#each ['', 'latency', 'throughput', 'reliability', 'cost'] as flowClass (flowClass)}
+          {#each ['', 'latency', 'throughput', 'cost', 'reliability', 'realtime'] as flowClass (flowClass)}
             <option value={flowClass}>{flowClass || 'default'}</option>
           {/each}
         </select>

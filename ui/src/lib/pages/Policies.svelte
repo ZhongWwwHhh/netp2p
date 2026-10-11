@@ -10,7 +10,7 @@
   import { network, submit } from '../stores/network.svelte';
   import { can } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
-  import type { Policy, Service } from '../types';
+  import type { FlowClass, Policy, Service } from '../types';
 
   let query = $state('');
   let editing = $state<Policy | null>(null);
@@ -19,6 +19,7 @@
 
   const policies = $derived(network.snapshot?.state.policies ?? []);
   const groupIds = $derived((network.snapshot?.state.groups ?? []).map((group) => group.id));
+  const flowClasses: (FlowClass | '')[] = ['', 'latency', 'throughput', 'cost', 'reliability', 'realtime'];
   const filtered = $derived(
     policies.filter((policy) =>
       `${policy.id} ${policy.sourceGroups.join(' ')} ${policy.destinationGroups.join(' ')}`
@@ -39,6 +40,7 @@
       effect: 'allow',
       direction: 'bidirectional',
       priority: 10,
+      flowClass: '',
     } as Policy;
   }
 
@@ -106,6 +108,7 @@
         { key: 'source', label: 'Source' },
         { key: 'destination', label: 'Destination' },
         { key: 'services', label: 'Protocol / port' },
+        { key: 'flow', label: 'Flow class' },
         { key: 'direction', label: 'Direction' },
         { key: 'priority', label: 'Priority', align: 'right' },
         { key: 'actions', label: '', align: 'right' },
@@ -134,6 +137,8 @@
           </div>
         {:else if key === 'direction'}
           <span class="text-sm text-slate-600">{policy.direction === 'bidirectional' ? 'both ways' : 'one way'}</span>
+        {:else if key === 'flow'}
+          <Badge tone="sky" label={policy.flowClass || 'inherit'} />
         {:else if key === 'priority'}
           <span class="text-sm text-slate-600">{policy.priority}</span>
         {:else if key === 'actions'}
@@ -187,6 +192,13 @@
           {/each}
           <button class="btn-secondary" onclick={addService}>Add protocol</button>
         </div>
+      </FormField>
+      <FormField label="Flow class">
+        <select class="input" bind:value={editing.flowClass}>
+          {#each flowClasses as flowClass (flowClass)}
+            <option value={flowClass}>{flowClass || 'inherit'}</option>
+          {/each}
+        </select>
       </FormField>
       <FormField label="Priority" hint="Higher priority deny rules win over lower priority allow rules.">
         <input class="input" type="number" bind:value={editing.priority} />

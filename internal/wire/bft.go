@@ -56,6 +56,15 @@ func StateTransitionToProto(transition model.StateTransition) *pb.StateTransitio
 	if transition.Assignment != nil {
 		message.Assignment = RouteAssignmentToProto(*transition.Assignment)
 	}
+	if transition.PathFamily != nil {
+		message.PathFamily = PathFamilyToProto(*transition.PathFamily)
+	}
+	if transition.Domain != nil {
+		message.RoutingDomain = RoutingDomainToProto(*transition.Domain)
+	}
+	if transition.ManagerJoin != nil {
+		message.ManagerJoin = ManagerJoinToProto(*transition.ManagerJoin)
+	}
 	if transition.CommitteeConfig != nil {
 		message.CommitteeConfig = CommitteeConfigToProto(*transition.CommitteeConfig)
 	}
@@ -139,6 +148,18 @@ func StateTransitionFromProto(message *pb.StateTransition) model.StateTransition
 	if message.GetAssignment() != nil {
 		assignment := RouteAssignmentFromProto(message.GetAssignment())
 		transition.Assignment = &assignment
+	}
+	if message.GetPathFamily() != nil {
+		family := PathFamilyFromProto(message.GetPathFamily())
+		transition.PathFamily = &family
+	}
+	if message.GetRoutingDomain() != nil {
+		authorization := RoutingDomainFromProto(message.GetRoutingDomain())
+		transition.Domain = &authorization
+	}
+	if message.GetManagerJoin() != nil {
+		request := ManagerJoinFromProto(message.GetManagerJoin())
+		transition.ManagerJoin = &request
 	}
 	if message.GetCommitteeConfig() != nil {
 		config := CommitteeConfigFromProto(message.GetCommitteeConfig())

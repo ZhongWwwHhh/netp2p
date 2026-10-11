@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -41,6 +42,30 @@ func TestGenerateProductionMaterialCreatesRandomThreeManagerTrust(t *testing.T) 
 	}
 	if first.Bundles[0].SessionSecret != first.Bundles[1].SessionSecret || first.Bundles[1].SessionSecret != first.Bundles[2].SessionSecret {
 		t.Fatal("session secret is not shared by all managers")
+	}
+}
+
+func TestGenerateProductionMaterialSupportsFourAndSevenManagers(t *testing.T) {
+	tests := []struct {
+		count  int
+		params model.CommitteeParams
+	}{
+		{count: 4, params: model.CommitteeParams{Size: 4, FaultLimit: 1, QuorumSize: 3}},
+		{count: 7, params: model.CommitteeParams{Size: 7, FaultLimit: 2, QuorumSize: 5}},
+	}
+	for _, test := range tests {
+		specs := productionSpecsForCount(test.count)
+		material, err := GenerateProductionMaterial("netp2p-production", "100.64.0.0/24", specs)
+		if err != nil {
+			t.Fatalf("%d managers: %v", test.count, err)
+		}
+		if material.Manifest.CommitteeParams != test.params {
+			t.Fatalf("%d-manager committee params = %+v, want %+v", test.count, material.Manifest.CommitteeParams, test.params)
+		}
+		if len(material.Manifest.Managers) != test.count || len(material.Bundles) != test.count || len(material.ClientTrust.Managers) != test.count {
+			t.Fatalf("%d-manager material counts = manifest:%d bundles:%d trust:%d",
+				test.count, len(material.Manifest.Managers), len(material.Bundles), len(material.ClientTrust.Managers))
+		}
 	}
 }
 
@@ -100,9 +125,18 @@ func TestGenerateProductionMaterialKeepsPublicDocumentsSecretFree(t *testing.T) 
 }
 
 func productionSpecs() []ProductionManagerSpec {
-	return []ProductionManagerSpec{
-		{ID: "manager-1", DNSName: "manager-1.netp2p.example", PublicIPv4: "203.0.113.11", Port: 4001, WebRTCPort: 4101},
-		{ID: "manager-2", DNSName: "manager-2.netp2p.example", PublicIPv4: "203.0.113.12", Port: 4001, WebRTCPort: 4101},
-		{ID: "manager-3", DNSName: "manager-3.netp2p.example", PublicIPv4: "203.0.113.13", Port: 4001, WebRTCPort: 4101},
+	return productionSpecsForCount(3)
+}
+
+func productionSpecsForCount(count int) []ProductionManagerSpec {
+	specs := make([]ProductionManagerSpec, 0, count)
+	for index := 1; index <= count; index++ {
+		specs = append(specs, ProductionManagerSpec{
+			ID:         fmt.Sprintf("manager-%d", index),
+			DNSName:    fmt.Sprintf("manager-%d.netp2p.example", index),
+			PublicIPv4: fmt.Sprintf("203.0.113.%d", 10+index),
+			Port:       4001, WebRTCPort: 4101,
+		})
 	}
+	return specs
 }

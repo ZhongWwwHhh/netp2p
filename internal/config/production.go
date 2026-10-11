@@ -25,16 +25,19 @@ type ProductionManagerSpec struct {
 }
 
 // ProductionMaterial is the complete set of documents needed to bootstrap a
-// three-manager production network.
+// production committee.
 type ProductionMaterial struct {
 	Manifest    NetworkManifest
 	Bundles     []ManagerBundle
 	ClientTrust ClientTrust
+	// ManagerJoinToken is the one-time enrollment secret used by candidate
+	// managers. It is never placed in the public manifest or client trust.
+	ManagerJoinToken string
 }
 
 // GenerateProductionMaterial creates random Ed25519 manager identities and the
-// shared manager tokens for a 3/0/3 committee. It never derives a key from a
-// seed.
+// shared manager tokens for a variable-size production committee. It never
+// derives a key from a seed.
 func GenerateProductionMaterial(networkID, overlayCIDR string, specs []ProductionManagerSpec) (ProductionMaterial, error) {
 	if strings.TrimSpace(networkID) == "" {
 		return ProductionMaterial{}, fmt.Errorf("network id is required")
@@ -42,11 +45,15 @@ func GenerateProductionMaterial(networkID, overlayCIDR string, specs []Productio
 	if strings.TrimSpace(overlayCIDR) == "" {
 		return ProductionMaterial{}, fmt.Errorf("overlay cidr is required")
 	}
-	if len(specs) != model.DefaultCommitteeSize {
-		return ProductionMaterial{}, fmt.Errorf("production bootstrap requires exactly %d managers, got %d", model.DefaultCommitteeSize, len(specs))
+	if len(specs) < 3 {
+		return ProductionMaterial{}, fmt.Errorf("production bootstrap requires at least 3 managers, got %d", len(specs))
 	}
 	if err := validateProductionSpecs(specs); err != nil {
 		return ProductionMaterial{}, err
+	}
+	params, err := model.CommitteeParamsForSize(len(specs))
+	if err != nil {
+		return ProductionMaterial{}, fmt.Errorf("production committee: %w", err)
 	}
 
 	adminToken, err := randomProductionSecret()
@@ -57,15 +64,19 @@ func GenerateProductionMaterial(networkID, overlayCIDR string, specs []Productio
 	if err != nil {
 		return ProductionMaterial{}, fmt.Errorf("generate session secret: %w", err)
 	}
+	managerJoinToken, err := randomProductionSecret()
+	if err != nil {
+		return ProductionMaterial{}, fmt.Errorf("generate manager join token: %w", err)
+	}
 
-	params := model.CommitteeParams{Size: 3, FaultLimit: 0, QuorumSize: 3}
 	manifest := NetworkManifest{
-		Version:         NetworkManifestVersion,
-		NetworkID:       strings.TrimSpace(networkID),
-		OverlayCIDR:     strings.TrimSpace(overlayCIDR),
-		ProtocolVersion: version.ProtocolVersion,
-		CommitteeParams: params,
-		NextIPOffset:    11,
+		Version:              NetworkManifestVersion,
+		NetworkID:            strings.TrimSpace(networkID),
+		OverlayCIDR:          strings.TrimSpace(overlayCIDR),
+		ProtocolVersion:      version.ProtocolVersion,
+		ManagerJoinTokenHash: model.ManagerJoinTokenHash(managerJoinToken),
+		CommitteeParams:      params,
+		NextIPOffset:         11,
 		Settings: model.NetworkSettings{
 			DirectPathEnabled: true,
 			ViaManagerEnabled: true,
@@ -126,7 +137,10 @@ func GenerateProductionMaterial(networkID, overlayCIDR string, specs []Productio
 			return ProductionMaterial{}, fmt.Errorf("validate generated manager bundle: %w", err)
 		}
 	}
-	return ProductionMaterial{Manifest: manifest, Bundles: bundles, ClientTrust: clientTrust}, nil
+	return ProductionMaterial{
+		Manifest: manifest, Bundles: bundles, ClientTrust: clientTrust,
+		ManagerJoinToken: managerJoinToken,
+	}, nil
 }
 
 func validateProductionSpecs(specs []ProductionManagerSpec) error {

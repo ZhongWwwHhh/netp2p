@@ -440,6 +440,122 @@ func TrafficBudgetFromProto(message *pb.TrafficBudget) model.TrafficBudget {
 	}
 }
 
+func RoutingDomainKeyToProto(key model.RoutingDomainKey) *pb.RoutingDomainKey {
+	return &pb.RoutingDomainKey{
+		SourceManagerId:  key.SourceManagerID,
+		SourceGroupId:    key.SourceGroupID,
+		DestinationScope: key.DestinationScope,
+		FlowClass:        key.FlowClass,
+	}
+}
+
+func RoutingDomainKeyFromProto(message *pb.RoutingDomainKey) model.RoutingDomainKey {
+	if message == nil {
+		return model.RoutingDomainKey{}
+	}
+	return model.RoutingDomainKey{
+		SourceManagerID:  message.GetSourceManagerId(),
+		SourceGroupID:    message.GetSourceGroupId(),
+		DestinationScope: message.GetDestinationScope(),
+		FlowClass:        message.GetFlowClass(),
+	}
+}
+
+func PathFamilyToProto(family model.PathFamily) *pb.PathFamily {
+	return &pb.PathFamily{
+		Id:                    family.ID,
+		Kind:                  string(family.Kind),
+		ManagerHops:           cloneStrings(family.ManagerHops),
+		SourceGroups:          cloneStrings(family.SourceGroups),
+		DestinationScopes:     cloneStrings(family.DestinationScopes),
+		FlowClasses:           cloneStrings(family.FlowClasses),
+		MaxRttMilliseconds:    family.MaxRTTMilliseconds,
+		MaxJitterMilliseconds: family.MaxJitterMilliseconds,
+		MaxLossPercent:        family.MaxLossPercent,
+		MinBandwidthMbps:      family.MinBandwidthMbps,
+	}
+}
+
+func PathFamilyFromProto(message *pb.PathFamily) model.PathFamily {
+	if message == nil {
+		return model.PathFamily{}
+	}
+	return model.PathFamily{
+		ID:                    message.GetId(),
+		Kind:                  model.PathKind(message.GetKind()),
+		ManagerHops:           cloneStrings(message.GetManagerHops()),
+		SourceGroups:          cloneStrings(message.GetSourceGroups()),
+		DestinationScopes:     cloneStrings(message.GetDestinationScopes()),
+		FlowClasses:           cloneStrings(message.GetFlowClasses()),
+		MaxRTTMilliseconds:    message.GetMaxRttMilliseconds(),
+		MaxJitterMilliseconds: message.GetMaxJitterMilliseconds(),
+		MaxLossPercent:        message.GetMaxLossPercent(),
+		MinBandwidthMbps:      message.GetMinBandwidthMbps(),
+	}
+}
+
+func RoutingDomainToProto(authorization model.RoutingDomainAuthorization) *pb.RoutingDomainAuthorization {
+	return &pb.RoutingDomainAuthorization{
+		Id:                authorization.ID,
+		Key:               RoutingDomainKeyToProto(authorization.Key),
+		PathFamilyIds:     cloneStrings(authorization.PathFamilyIDs),
+		PolicyIds:         cloneStrings(authorization.PolicyIDs),
+		Services:          mapSlice(authorization.Services, ServiceToProto),
+		MaxHops:           int32(authorization.MaxHops),
+		RequiresAdmission: authorization.RequiresAdmission,
+	}
+}
+
+func RoutingDomainFromProto(message *pb.RoutingDomainAuthorization) model.RoutingDomainAuthorization {
+	if message == nil {
+		return model.RoutingDomainAuthorization{}
+	}
+	return model.RoutingDomainAuthorization{
+		ID:                message.GetId(),
+		Key:               RoutingDomainKeyFromProto(message.GetKey()),
+		PathFamilyIDs:     cloneStrings(message.GetPathFamilyIds()),
+		PolicyIDs:         cloneStrings(message.GetPolicyIds()),
+		Services:          mapSlice(message.GetServices(), ServiceFromProto),
+		MaxHops:           int(message.GetMaxHops()),
+		RequiresAdmission: message.GetRequiresAdmission(),
+	}
+}
+
+func ManagerJoinToProto(request model.ManagerJoinRequest) *pb.ManagerJoinRequest {
+	return &pb.ManagerJoinRequest{
+		Id:          request.ID,
+		ManagerId:   request.ManagerID,
+		PeerId:      request.PeerID,
+		Address:     request.Address,
+		ListenAddr:  request.ListenAddr,
+		PublicKey:   cloneBytes(request.PublicKey),
+		RequestedAt: request.RequestedAt,
+		Status:      string(request.Status),
+		ReviewedBy:  request.ReviewedBy,
+		ReviewedAt:  request.ReviewedAt,
+		Reason:      request.Reason,
+	}
+}
+
+func ManagerJoinFromProto(message *pb.ManagerJoinRequest) model.ManagerJoinRequest {
+	if message == nil {
+		return model.ManagerJoinRequest{}
+	}
+	return model.ManagerJoinRequest{
+		ID:          message.GetId(),
+		ManagerID:   message.GetManagerId(),
+		PeerID:      message.GetPeerId(),
+		Address:     message.GetAddress(),
+		ListenAddr:  message.GetListenAddr(),
+		PublicKey:   cloneBytes(message.GetPublicKey()),
+		RequestedAt: message.GetRequestedAt(),
+		Status:      model.ManagerJoinStatus(message.GetStatus()),
+		ReviewedBy:  message.GetReviewedBy(),
+		ReviewedAt:  message.GetReviewedAt(),
+		Reason:      message.GetReason(),
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DNS
 // ---------------------------------------------------------------------------
@@ -538,6 +654,9 @@ func NetworkStateToProto(state model.NetworkState) *pb.NetworkState {
 		Assignments:     mapSlice(state.Assignments, RouteAssignmentToProto),
 		NextIpOffset:    state.NextIPOffset,
 		CommitteeConfig: CommitteeConfigToProto(state.CommitteeConfig),
+		PathFamilies:    mapSlice(state.PathFamilies, PathFamilyToProto),
+		RoutingDomains:  mapSlice(state.RoutingDomains, RoutingDomainToProto),
+		ManagerJoins:    mapSlice(state.ManagerJoins, ManagerJoinToProto),
 	}
 }
 
@@ -562,5 +681,8 @@ func NetworkStateFromProto(message *pb.NetworkState) model.NetworkState {
 		Assignments:     mapSlice(message.GetAssignments(), RouteAssignmentFromProto),
 		NextIPOffset:    message.GetNextIpOffset(),
 		CommitteeConfig: CommitteeConfigFromProto(message.GetCommitteeConfig()),
+		PathFamilies:    mapSlice(message.GetPathFamilies(), PathFamilyFromProto),
+		RoutingDomains:  mapSlice(message.GetRoutingDomains(), RoutingDomainFromProto),
+		ManagerJoins:    mapSlice(message.GetManagerJoins(), ManagerJoinFromProto),
 	}
 }

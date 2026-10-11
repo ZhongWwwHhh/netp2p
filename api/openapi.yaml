@@ -295,6 +295,155 @@ paths:
       summary: Link view
       responses:
         "200": { description: Link segments }
+  /api/v1/routing/status:
+    get:
+      operationId: getRoutingStatus
+      tags: [Operations]
+      summary: Global routing and load-balancing status
+      responses:
+        "200":
+          description: Certified domain/family projections plus runtime optimizer state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [routing]
+                properties:
+                  routing: { $ref: "#/components/schemas/RoutingStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/routing/domains:
+    get:
+      operationId: listRoutingDomains
+      tags: [Operations]
+      summary: Routing domain authorizations
+      responses:
+        "200":
+          description: Routing domains
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [domains]
+                properties:
+                  domains:
+                    type: array
+                    items: { $ref: "#/components/schemas/RoutingDomain" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/routing/path-families:
+    get:
+      operationId: listPathFamilies
+      tags: [Operations]
+      summary: Certified path families
+      responses:
+        "200":
+          description: Path families
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pathFamilies]
+                properties:
+                  pathFamilies:
+                    type: array
+                    items: { $ref: "#/components/schemas/PathFamily" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/routing/telemetry:
+    get:
+      operationId: listRoutingTelemetry
+      tags: [Operations]
+      summary: Manager edge telemetry
+      responses:
+        "200":
+          description: Edge telemetry
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [telemetry]
+                properties:
+                  telemetry:
+                    type: array
+                    items: { $ref: "#/components/schemas/EdgeTelemetry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/routing/demand:
+    get:
+      operationId: listRoutingDemand
+      tags: [Operations]
+      summary: Aggregated client demand samples
+      responses:
+        "200":
+          description: Demand samples
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [demand]
+                properties:
+                  demand:
+                    type: array
+                    items: { $ref: "#/components/schemas/DemandSample" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/routing/epoch/current:
+    get:
+      operationId: getCurrentRoutingEpoch
+      tags: [Operations]
+      summary: Current signed routing epoch
+      responses:
+        "200":
+          description: Current epoch, or null when no valid runtime epoch exists
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [epoch]
+                properties:
+                  epoch:
+                    type: object
+                    nullable: true
+                    allOf: [{ $ref: "#/components/schemas/RoutingEpoch" }]
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/routing/fec:
+    get:
+      operationId: getRoutingFecDiagnostics
+      tags: [Operations]
+      summary: Forward error correction diagnostics
+      responses:
+        "200":
+          description: FEC diagnostics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [fec]
+                properties:
+                  fec: { $ref: "#/components/schemas/FECDiagnostics" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/managers/capacity:
+    get:
+      operationId: listManagerCapacity
+      tags: [Operations]
+      summary: Manager monthly capacity pressure
+      responses:
+        "200":
+          description: Manager capacity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [managers]
+                properties:
+                  managers:
+                    type: array
+                    items: { $ref: "#/components/schemas/ManagerCapacityStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
   /api/v1/assignments:
     get:
       tags: [Operations]
@@ -400,6 +549,194 @@ components:
       required: [error]
       properties:
         error: { type: string }
+    FlowClass:
+      type: string
+      enum: [latency, throughput, cost, reliability, realtime]
+    Service:
+      type: object
+      required: [protocol, startPort, endPort]
+      properties:
+        protocol: { type: string, example: tcp }
+        startPort: { type: integer, minimum: 0, maximum: 65535 }
+        endPort: { type: integer, minimum: 0, maximum: 65535 }
+    PathKind:
+      type: string
+      enum: [direct, via_manager, multi_hop]
+    RoutingDomainKey:
+      type: object
+      required: [sourceManagerId, sourceGroupId, destinationScope, flowClass]
+      properties:
+        sourceManagerId: { type: string, example: manager-1 }
+        sourceGroupId: { type: string, example: workstations }
+        destinationScope: { type: string, example: group:servers }
+        flowClass: { $ref: "#/components/schemas/FlowClass" }
+    RoutingDomain:
+      type: object
+      required: [id, key, pathFamilyIds, policyIds, requiresAdmission]
+      properties:
+        id: { type: string }
+        key: { $ref: "#/components/schemas/RoutingDomainKey" }
+        pathFamilyIds: { type: array, items: { type: string } }
+        policyIds: { type: array, items: { type: string } }
+        services:
+          type: array
+          items: { $ref: "#/components/schemas/Service" }
+        maxHops: { type: integer, minimum: 0 }
+        requiresAdmission: { type: boolean }
+    PathFamily:
+      type: object
+      required: [id, kind, sourceGroups, destinationScopes, flowClasses]
+      properties:
+        id: { type: string }
+        kind: { $ref: "#/components/schemas/PathKind" }
+        managerHops: { type: array, items: { type: string } }
+        sourceGroups: { type: array, items: { type: string } }
+        destinationScopes: { type: array, items: { type: string } }
+        flowClasses:
+          type: array
+          items: { $ref: "#/components/schemas/FlowClass" }
+        maxRttMilliseconds: { type: number, minimum: 0 }
+        maxJitterMilliseconds: { type: number, minimum: 0 }
+        maxLossPercent: { type: number, minimum: 0, maximum: 100 }
+        minBandwidthMbps: { type: number, minimum: 0 }
+    PathWeight:
+      type: object
+      required: [pathId, weight]
+      properties:
+        pathId: { type: string }
+        weight: { type: number, minimum: 0, maximum: 1 }
+        reason: { type: string }
+    PathAllocation:
+      type: object
+      required: [key, paths]
+      properties:
+        key: { $ref: "#/components/schemas/RoutingDomainKey" }
+        paths:
+          type: array
+          items: { $ref: "#/components/schemas/PathWeight" }
+    RoutingEpoch:
+      type: object
+      required:
+        [networkId, snapshotHeight, version, generatedAt, expiresAt, managerId, signatureVerified, thresholdSigned, allocations]
+      properties:
+        networkId: { type: string }
+        snapshotHeight: { type: integer, format: int64, minimum: 1 }
+        version: { type: integer, format: int64, minimum: 1 }
+        generatedAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        candidateSetDigest: { type: string }
+        plannerDigest: { type: string }
+        managerId: { type: string }
+        signatureVerified: { type: boolean }
+        thresholdSigned: { type: boolean }
+        allocations:
+          type: array
+          items: { $ref: "#/components/schemas/PathAllocation" }
+    ManagerCapacityStatus:
+      type: object
+      required: [managerId, configured, state, updatedAt]
+      properties:
+        managerId: { type: string }
+        configured: { type: boolean }
+        monthlyBytes: { type: integer, format: int64, minimum: 0 }
+        usedBytes: { type: integer, format: int64, minimum: 0 }
+        remainingBytes: { type: integer, format: int64, minimum: 0 }
+        reserveBytes: { type: integer, format: int64, minimum: 0 }
+        countMode: { type: string, enum: [rx, tx, total, ""] }
+        resetDayUtc: { type: integer, minimum: 1, maximum: 31 }
+        softThresholdPercent: { type: integer, minimum: 0, maximum: 100 }
+        pressure: { type: number, minimum: 0, maximum: 1 }
+        burnRateBytesPerSecond: { type: number, minimum: 0 }
+        projectedExhaustionSeconds: { type: number, minimum: 0 }
+        state: { type: string, enum: [normal, pressure, projected-exhaustion, exhausted, unconfigured] }
+        updatedAt: { type: string, format: date-time }
+    EdgeTelemetry:
+      type: object
+      required: [edgeId, managerId, updatedAt, source]
+      properties:
+        edgeId: { type: string }
+        managerId: { type: string }
+        queueDepth: { type: number, minimum: 0 }
+        queueDepthEwma: { type: number, minimum: 0 }
+        sendBytesPerSecond: { type: number, minimum: 0 }
+        dropRate: { type: number, minimum: 0, maximum: 1 }
+        activeFlows: { type: integer, format: int64, minimum: 0 }
+        rttMilliseconds: { type: number, minimum: 0 }
+        jitterMilliseconds: { type: number, minimum: 0 }
+        lossPercent: { type: number, minimum: 0, maximum: 100 }
+        measuredBandwidthMbps: { type: number, minimum: 0 }
+        monthlyUsedBytes: { type: integer, format: int64, minimum: 0 }
+        monthlyLimitBytes: { type: integer, format: int64, minimum: 0 }
+        updatedAt: { type: string, format: date-time }
+        source: { type: string }
+    DemandSample:
+      type: object
+      required: [peerId, sourceGroupId, destinationScope, flowClass, pathId, bytes, durationMs, observedAt]
+      properties:
+        peerId: { type: string }
+        sourceGroupId: { type: string }
+        destinationScope: { type: string }
+        flowClass: { $ref: "#/components/schemas/FlowClass" }
+        pathId: { type: string }
+        bytes: { type: integer, format: int64, minimum: 0 }
+        durationMs: { type: integer, format: int64, minimum: 0 }
+        observedAt: { type: string, format: date-time }
+    FECClassDiagnostics:
+      type: object
+      required: [flowClass, enabled, packets, recoveredPackets, generatedRedundancyPackets, overheadRatio, recoveredRatio]
+      properties:
+        flowClass: { $ref: "#/components/schemas/FlowClass" }
+        enabled: { type: boolean }
+        packets: { type: integer, format: int64, minimum: 0 }
+        recoveredPackets: { type: integer, format: int64, minimum: 0 }
+        generatedRedundancyPackets: { type: integer, format: int64, minimum: 0 }
+        overheadRatio: { type: number, minimum: 0 }
+        recoveredRatio: { type: number, minimum: 0 }
+        lastError: { type: string }
+    FECDiagnostics:
+      type: object
+      required: [enabled, defaultCodec, maxRedundancyPercent, classes]
+      properties:
+        enabled: { type: boolean }
+        defaultCodec: { type: string }
+        maxRedundancyPercent: { type: integer, minimum: 0, maximum: 100 }
+        classes:
+          type: array
+          items: { $ref: "#/components/schemas/FECClassDiagnostics" }
+    RoutingStatus:
+      type: object
+      required:
+        [networkId, snapshotHeight, generatedAt, mode, supportedFlowClasses, domains, pathFamilies,
+         managerCapacity, telemetry, demand, fec, problems]
+      properties:
+        networkId: { type: string }
+        snapshotHeight: { type: integer, format: int64, minimum: 0 }
+        generatedAt: { type: string, format: date-time }
+        mode: { type: string, enum: [runtime, derived, unavailable] }
+        supportedFlowClasses:
+          type: array
+          items: { $ref: "#/components/schemas/FlowClass" }
+        domains:
+          type: array
+          items: { $ref: "#/components/schemas/RoutingDomain" }
+        pathFamilies:
+          type: array
+          items: { $ref: "#/components/schemas/PathFamily" }
+        epoch:
+          type: object
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/RoutingEpoch" }]
+        managerCapacity:
+          type: array
+          items: { $ref: "#/components/schemas/ManagerCapacityStatus" }
+        telemetry:
+          type: array
+          items: { $ref: "#/components/schemas/EdgeTelemetry" }
+        demand:
+          type: array
+          items: { $ref: "#/components/schemas/DemandSample" }
+        fec: { $ref: "#/components/schemas/FECDiagnostics" }
+        problems: { type: array, items: { type: string } }
     Bootstrap:
       type: object
       description: Actual bootstrap payload from the embedded manager web server.

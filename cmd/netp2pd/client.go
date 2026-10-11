@@ -187,7 +187,8 @@ func clientStatus(node *p2p.Node, netClient *client.Client, options clientOption
 		"height": netClient.SnapshotHeight(), "packetListen": options.packetListen,
 		"mode": clientMode(tunDevice), "assignments": paths,
 		"state": string(netClient.State()), "manager": netClient.ManagerStatus().ActiveManager.String(), "managerFailover": managerFailoverView(netClient.ManagerStatus()),
-		"pathDiagnostics": netClient.PathDiagnostics(), "nextAction": netClient.NextAction(),
+		"pathDiagnostics": netClient.PathDiagnostics(), "flowDiagnostics": netClient.FlowDiagnostics(),
+		"nextAction": netClient.NextAction(),
 	})
 }
 
@@ -342,7 +343,8 @@ func startClientMetrics(ctx context.Context, options clientOptions) (*metrics.Me
 }
 
 func runClientMetrics(ctx context.Context, netClient *client.Client, collector *metrics.Metrics) {
-	updateClientMetrics(netClient.DataPlaneStats(), collector)
+	previous := netClient.DataPlaneStats()
+	updateClientMetrics(previous, collector)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -350,13 +352,22 @@ func runClientMetrics(ctx context.Context, netClient *client.Client, collector *
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			updateClientMetrics(netClient.DataPlaneStats(), collector)
+			current := netClient.DataPlaneStats()
+			publishClientMetrics(previous, current, collector)
+			previous = current
 		}
 	}
 }
 
 func updateClientMetrics(stats client.DataPlaneStats, collector *metrics.Metrics) {
 	collector.ForwardQueueDepth.Set(float64(stats.OutboundQueueDepth))
+}
+
+func publishClientMetrics(previous, current client.DataPlaneStats, collector *metrics.Metrics) {
+	updateClientMetrics(current, collector)
+	if current.OutboundDrops > previous.OutboundDrops {
+		collector.ForwardDrops.Add(float64(current.OutboundDrops - previous.OutboundDrops))
+	}
 }
 
 func clientMode(tunDevice *tun.Device) string {

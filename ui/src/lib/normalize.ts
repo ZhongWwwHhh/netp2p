@@ -1,4 +1,4 @@
-import type { Presence, Snapshot } from './types';
+import type { Presence, RoutingStatus, Snapshot } from './types';
 
 function asArray<T>(value: readonly T[] | null | undefined): T[] {
   return Array.isArray(value) ? [...value] : [];
@@ -26,10 +26,49 @@ export function normalizeSnapshot(snapshot: Snapshot): Snapshot {
       zones: asArray(snapshot.state?.zones),
       dnsSettings: { disabled: snapshot.state?.dnsSettings?.disabled ?? false, groups: asArray(snapshot.state?.dnsSettings?.groups) },
       settings: snapshot.state?.settings ?? {},
+      pathFamilies: asArray(snapshot.state?.pathFamilies),
+      routingDomains: asArray(snapshot.state?.routingDomains),
+      managerJoins: asArray(snapshot.state?.managerJoins),
     },
   };
 }
 
 export function normalizePresence(observations: readonly Presence[] | null | undefined): Presence[] {
   return asArray(observations);
+}
+
+export function normalizeRoutingStatus(status: RoutingStatus | null | undefined): RoutingStatus {
+  const empty = {
+    networkId: '',
+    snapshotHeight: 0,
+    generatedAt: '',
+    mode: 'unavailable',
+    supportedFlowClasses: [],
+    domains: [],
+    pathFamilies: [],
+    epoch: null,
+    managerCapacity: [],
+    telemetry: [],
+    demand: [],
+    fec: { enabled: false, defaultCodec: '', maxRedundancyPercent: 0, classes: [] },
+    problems: [],
+  } as RoutingStatus;
+  if (!status) return empty;
+  return {
+    ...empty,
+    ...status,
+    supportedFlowClasses: asArray(status.supportedFlowClasses),
+    domains: asArray(status.domains),
+    pathFamilies: asArray(status.pathFamilies),
+    managerCapacity: asArray(status.managerCapacity),
+    telemetry: asArray(status.telemetry),
+    demand: asArray(status.demand),
+    problems: asArray(status.problems),
+    fec: {
+      ...empty.fec,
+      ...status.fec,
+      classes: asArray(status.fec?.classes),
+    },
+    epoch: status.epoch ?? null,
+  };
 }

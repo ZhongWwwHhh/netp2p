@@ -1,5 +1,6 @@
 export type Effect = 'allow' | 'deny';
 export type Direction = 'unidirectional' | 'bidirectional';
+export type FlowClass = 'latency' | 'throughput' | 'cost' | 'reliability' | 'realtime';
 
 export interface Service {
   protocol: string;
@@ -17,6 +18,7 @@ export interface Policy {
   priority: number;
   postureRequirements?: string[];
   linkConstraints?: string[];
+  flowClass?: FlowClass | '';
 }
 
 export interface Group {
@@ -57,11 +59,41 @@ export interface NetworkSettings {
   probeBandwidthBudgetKb?: number;
   quotaEnforcementEnabled?: boolean;
   quotaReportIntervalSeconds?: number;
-  defaultFlowClass?: string;
+  defaultFlowClass?: FlowClass | '';
   exitNodeEnabled?: boolean;
 }
 
 export type PathKind = 'direct' | 'via_manager' | 'multi_hop';
+
+export interface RoutingDomainKey {
+  sourceManagerId: string;
+  sourceGroupId: string;
+  destinationScope: string;
+  flowClass: FlowClass;
+}
+
+export interface RoutingDomain {
+  id: string;
+  key: RoutingDomainKey;
+  pathFamilyIds: string[];
+  policyIds: string[];
+  services?: Service[];
+  maxHops?: number;
+  requiresAdmission: boolean;
+}
+
+export interface PathFamily {
+  id: string;
+  kind: PathKind;
+  managerHops?: string[];
+  sourceGroups: string[];
+  destinationScopes: string[];
+  flowClasses: FlowClass[];
+  maxRttMilliseconds: number;
+  maxJitterMilliseconds: number;
+  maxLossPercent: number;
+  minBandwidthMbps: number;
+}
 
 export interface PathSpec {
   id: string;
@@ -97,7 +129,7 @@ export interface Route {
   maxHops?: number;
   budgetIds?: string[];
   masquerade?: boolean;
-  flowClass?: string;
+  flowClass?: FlowClass | '';
 }
 
 export interface SetupKey {
@@ -136,6 +168,111 @@ export interface Budget {
   peakBurstBytes?: number;
 }
 
+export interface RoutingEpoch {
+  networkId: string;
+  snapshotHeight: number;
+  version: number;
+  generatedAt: string;
+  expiresAt: string;
+  candidateSetDigest: string;
+  plannerDigest: string;
+  managerId: string;
+  signatureVerified: boolean;
+  thresholdSigned: boolean;
+  allocations: PathAllocation[];
+}
+
+export interface PathAllocation {
+  key: RoutingDomainKey;
+  paths: PathWeight[];
+}
+
+export interface PathWeight {
+  pathId: string;
+  weight: number;
+  reason?: string;
+}
+
+export interface ManagerCapacityStatus {
+  managerId: string;
+  configured: boolean;
+  monthlyBytes: number;
+  usedBytes: number;
+  remainingBytes: number;
+  reserveBytes: number;
+  countMode: string;
+  resetDayUtc: number;
+  softThresholdPercent: number;
+  pressure: number;
+  burnRateBytesPerSecond: number;
+  projectedExhaustionSeconds: number;
+  state: string;
+  updatedAt: string;
+}
+
+export interface EdgeTelemetry {
+  edgeId: string;
+  managerId: string;
+  queueDepth: number;
+  queueDepthEwma: number;
+  sendBytesPerSecond: number;
+  dropRate: number;
+  activeFlows: number;
+  rttMilliseconds: number;
+  jitterMilliseconds: number;
+  lossPercent: number;
+  measuredBandwidthMbps: number;
+  monthlyUsedBytes: number;
+  monthlyLimitBytes: number;
+  updatedAt: string;
+  source: string;
+}
+
+export interface DemandSample {
+  peerId: string;
+  sourceGroupId: string;
+  destinationScope: string;
+  flowClass: FlowClass;
+  pathId: string;
+  bytes: number;
+  durationMs: number;
+  observedAt: string;
+}
+
+export interface FECDiagnostics {
+  enabled: boolean;
+  defaultCodec: string;
+  maxRedundancyPercent: number;
+  classes: FECClassDiagnostics[];
+}
+
+export interface FECClassDiagnostics {
+  flowClass: FlowClass;
+  enabled: boolean;
+  packets: number;
+  recoveredPackets: number;
+  generatedRedundancyPackets: number;
+  overheadRatio: number;
+  recoveredRatio: number;
+  lastError?: string;
+}
+
+export interface RoutingStatus {
+  networkId: string;
+  snapshotHeight: number;
+  generatedAt: string;
+  mode: string;
+  supportedFlowClasses: FlowClass[];
+  domains: RoutingDomain[];
+  pathFamilies: PathFamily[];
+  epoch?: RoutingEpoch | null;
+  managerCapacity: ManagerCapacityStatus[];
+  telemetry: EdgeTelemetry[];
+  demand: DemandSample[];
+  fec: FECDiagnostics;
+  problems: string[];
+}
+
 export interface Peer {
   peerId: string;
   overlayIp: string;
@@ -159,6 +296,22 @@ export interface CommitteeMember {
   blsPublicKey?: string;
   listenAddr?: string;
   forwardingEnabled?: boolean;
+}
+
+export type ManagerJoinStatus = 'pending' | 'approved' | 'rejected' | 'activated';
+
+export interface ManagerJoinRequest {
+  id: string;
+  managerId: string;
+  peerId: string;
+  address: string;
+  listenAddr?: string;
+  publicKey?: string;
+  requestedAt: string;
+  status: ManagerJoinStatus;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reason?: string;
 }
 
 export interface QC {
@@ -230,6 +383,9 @@ export interface State {
   dnsSettings: DNSSettings;
   settings: NetworkSettings;
   assignments: RouteAssignment[];
+  pathFamilies: PathFamily[];
+  routingDomains: RoutingDomain[];
+  managerJoins: ManagerJoinRequest[];
   nextIpOffset: number;
 }
 
@@ -317,8 +473,15 @@ export type StateTransition = (
   | { type: 'update_peer'; peer: Peer }
   | { type: 'update_route_assignment'; assignment: RouteAssignment }
   | { type: 'remove_route_assignment'; targetId: string }
+  | { type: 'upsert_path_family'; pathFamily: PathFamily }
+  | { type: 'remove_path_family'; targetId: string }
+  | { type: 'upsert_routing_domain'; routingDomain: RoutingDomain }
+  | { type: 'remove_routing_domain'; targetId: string }
   | { type: 'update_committee'; committee: CommitteeMember[]; committeeConfig?: CommitteeConfig }
   | { type: 'rotate_committee_keys'; committeeConfig?: CommitteeConfig }
+  | { type: 'submit_manager_join'; managerJoin: ManagerJoinRequest }
+  | { type: 'review_manager_join'; managerJoin: ManagerJoinRequest }
+  | { type: 'activate_committee'; committee: CommitteeMember[]; committeeConfig?: CommitteeConfig }
 ) & { actor?: Actor };
 
 // AdmissionReport is a client-observed, non-certified end-to-end probe result.

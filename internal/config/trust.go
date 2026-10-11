@@ -24,22 +24,25 @@ const (
 // NetworkManifest is the public, secret-free description of a network. It is
 // safe to distribute to every manager and to publish for operator reference.
 type NetworkManifest struct {
-	Version         int                     `json:"version"`
-	NetworkID       string                  `json:"networkId"`
-	OverlayCIDR     string                  `json:"overlayCidr"`
-	ProtocolVersion string                  `json:"protocolVersion"`
-	CommitteeParams model.CommitteeParams   `json:"committeeParams"`
-	Managers        []model.CommitteeMember `json:"managers"`
-	Groups          []model.Group           `json:"groups,omitempty"`
-	Policies        []model.Policy          `json:"policies,omitempty"`
-	Routes          []model.Route           `json:"routes,omitempty"`
-	Budgets         []model.TrafficBudget   `json:"budgets,omitempty"`
-	Nameservers     []model.Nameserver      `json:"nameservers,omitempty"`
-	Zones           []model.DNSZone         `json:"zones,omitempty"`
-	DNSSettings     model.DNSSettings       `json:"dnsSettings,omitempty"`
-	Settings        model.NetworkSettings   `json:"settings,omitempty"`
-	OIDC            oidc.Config             `json:"oidc,omitempty"`
-	NextIPOffset    uint32                  `json:"nextIpOffset"`
+	Version         int    `json:"version"`
+	NetworkID       string `json:"networkId"`
+	OverlayCIDR     string `json:"overlayCidr"`
+	ProtocolVersion string `json:"protocolVersion"`
+	// ManagerJoinTokenHash is an Argon2id verifier. Existing managers use it
+	// to authenticate a candidate without storing the plaintext token.
+	ManagerJoinTokenHash []byte                  `json:"managerJoinTokenHash,omitempty"`
+	CommitteeParams      model.CommitteeParams   `json:"committeeParams"`
+	Managers             []model.CommitteeMember `json:"managers"`
+	Groups               []model.Group           `json:"groups,omitempty"`
+	Policies             []model.Policy          `json:"policies,omitempty"`
+	Routes               []model.Route           `json:"routes,omitempty"`
+	Budgets              []model.TrafficBudget   `json:"budgets,omitempty"`
+	Nameservers          []model.Nameserver      `json:"nameservers,omitempty"`
+	Zones                []model.DNSZone         `json:"zones,omitempty"`
+	DNSSettings          model.DNSSettings       `json:"dnsSettings,omitempty"`
+	Settings             model.NetworkSettings   `json:"settings,omitempty"`
+	OIDC                 oidc.Config             `json:"oidc,omitempty"`
+	NextIPOffset         uint32                  `json:"nextIpOffset"`
 }
 
 // ManagerBundle contains only the private material one manager needs. It must
@@ -121,6 +124,9 @@ func (manifest NetworkManifest) Validate() error {
 	}
 	if manifest.ProtocolVersion != version.ProtocolVersion {
 		return fmt.Errorf("protocol version %q does not match binary %q", manifest.ProtocolVersion, version.ProtocolVersion)
+	}
+	if len(manifest.ManagerJoinTokenHash) != 0 && len(manifest.ManagerJoinTokenHash) != 32 {
+		return fmt.Errorf("managerJoinTokenHash must be empty or 32 bytes")
 	}
 	params := manifest.CommitteeParams
 	if params == (model.CommitteeParams{}) {

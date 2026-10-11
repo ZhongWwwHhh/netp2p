@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/conntrack"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/packet"
 	netproto "github.com/netp2p/netp2p/internal/protocol"
@@ -23,6 +24,15 @@ func assignmentHeightLocked(snapshot model.SignedSnapshot) uint64 {
 }
 
 func (client *Client) selfPeerID() string {
+	client.mu.RLock()
+	selfID := client.self.PeerID
+	client.mu.RUnlock()
+	if selfID != "" {
+		return selfID
+	}
+	if client.node == nil || client.node.Host == nil {
+		return ""
+	}
 	return client.node.Host.ID().String()
 }
 
@@ -38,7 +48,21 @@ func (client *Client) sendViaAssignment(sourceID, destinationID string, raw []by
 	if err := client.syncPathSelector(); err != nil {
 		return false
 	}
-	assignment, path, status := client.paths.selectWithStatus(source, destination)
+	destinationRecord, err := client.peerByPeerID(destinationID)
+	if err != nil {
+		return false
+	}
+	ipPacket := packet.IPv4Packet(raw)
+	flow, hasFlow := ipPacket.Flow()
+	flowClass := FlowClassLatency
+	if !hasFlow {
+		flowClass = client.flowClassFor(destinationRecord, ipPacket)
+	} else if cached, ok := client.paths.cachedFlowClass(conntrack.Key(flow)); ok {
+		flowClass = cached
+	} else {
+		flowClass = client.flowClassFor(destinationRecord, ipPacket)
+	}
+	assignment, path, status := client.paths.selectFlowWithStatus(source, destination, conntrack.Key(flow), hasFlow, flowClass, len(raw))
 	client.recordPathSelection(destination, status)
 	if !status.OK {
 		return false

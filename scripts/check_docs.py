@@ -55,6 +55,11 @@ SECRET_REF_RES = [
     re.compile(r"\.ssh/[^\s`\"')\]]*"),
 ]
 
+INTERNAL_PATH_RES = [
+    re.compile(r"(?:^|[\s(`'\[])(?:\./)?tmp/doc(?:/|[\s`'\]])", re.IGNORECASE),
+    re.compile(r"(?:^|[\s/])(?:\.codex|\.cache)/", re.IGNORECASE),
+]
+
 LINK_RE = re.compile(r"\[[^\]]*\]\(<([^>]+)>|\[[^\]]*\]\(([^)\s]+)")
 
 
@@ -149,6 +154,7 @@ def extracted_members(path: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
 
     directory = tempfile.mkdtemp(prefix="netp2p-release-scan-")
     output = Path(directory)
+    payload = output / "payload.cpio"
     findings: list[str] = []
     try:
         if suffix == ".msi":
@@ -164,7 +170,6 @@ def extracted_members(path: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
                 detail = f": {diagnostic}" if diagnostic else ""
                 return [], [f"{path.name}: MSI extraction failed with exit code {result.returncode}{detail}"]
         else:
-            payload = output / "payload.cpio"
             try:
                 with payload.open("wb") as stream:
                     result = subprocess.run(
@@ -173,15 +178,17 @@ def extracted_members(path: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
                     )
             except OSError as error:
                 return [], [f"{path.name}: RPM extraction failed while running rpm2cpio: {error}"]
-            if result.returncode != 0:
-                diagnostic = _bounded_stderr(result.stderr)
-                detail = f": {diagnostic}" if diagnostic else ""
-                return [], [f"{path.name}: rpm2cpio failed with exit code {result.returncode}{detail}"]
-
+            # rpm2cpio on some distributions exits 1 after successfully
+            # writing a complete payload. Treat an empty payload as the real
+            # failure and let the following cpio extraction validate the data.
             try:
                 cpio_payload = payload.read_bytes()
             except OSError as error:
                 return [], [f"{path.name}: RPM extraction failed while reading rpm2cpio payload: {error}"]
+            if result.returncode != 0 and not cpio_payload:
+                diagnostic = _bounded_stderr(result.stderr)
+                detail = f": {diagnostic}" if diagnostic else ""
+                return [], [f"{path.name}: rpm2cpio failed with exit code {result.returncode}{detail}"]
             try:
                 result = subprocess.run(
                     ["cpio", "-id", "--quiet", "--no-absolute-filenames"],
@@ -196,7 +203,10 @@ def extracted_members(path: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
                 return [], [f"{path.name}: cpio failed with exit code {result.returncode}{detail}"]
 
         members: list[tuple[str, bytes]] = []
-        extracted_files = [item for item in output.rglob("*") if item.is_file()]
+        extracted_files = [
+            item for item in output.rglob("*")
+            if item.is_file() and item != payload
+        ]
         for item in extracted_files:
             relative = item.relative_to(output).as_posix()
             try:
@@ -281,6 +291,14 @@ def check_forbidden_host(line: str, findings: list[str]) -> None:
         findings.append(f"deployment hostname {match.group(0)!r}")
 
 
+def check_internal_paths(line: str, findings: list[str]) -> None:
+    for pattern in INTERNAL_PATH_RES:
+        match = pattern.search(line)
+        if match:
+            findings.append(f"internal-only path reference {match.group(0).strip()!r}")
+            return
+
+
 def check_markdown_links(path: str, lines: list[str], findings: list[str]) -> None:
     base = Path(path).parent
     for number, line in enumerate(lines, start=1):
@@ -326,6 +344,7 @@ def main() -> int:
             check_author_paths(line, file_findings)
             check_secret_refs(line, file_findings)
             check_forbidden_host(line, file_findings)
+            check_internal_paths(line, file_findings)
             failures.extend(f"{name}:{number}: {finding}" for finding in file_findings)
         if path.suffix == ".md":
             md_findings: list[str] = []

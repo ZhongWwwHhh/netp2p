@@ -171,6 +171,22 @@ func TestBootstrapHandlerAPIAuthentication(t *testing.T) {
 	}
 }
 
+func TestCommitteeStatusRequiresDiagnosticsPermission(t *testing.T) {
+	server, accounts, _ := newLocalAuthTestServer(t)
+	accounts.users = []model.User{{ID: "user-1", Email: "user@example.com", Role: model.RoleUser}}
+	token, _, err := server.sessions.Issue(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/committee/status", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+	server.handleAPI(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status %d body %q, want 403", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestBootstrapHandlerHealthz(t *testing.T) {
 	server := newTestServer()
 	recorder := httptest.NewRecorder()

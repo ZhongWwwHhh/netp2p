@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/mail"
@@ -57,9 +58,21 @@ const (
 	TransitionUpdateSettings        = "update_network_settings"
 	TransitionUpdateAssignment      = "update_route_assignment"
 	TransitionRemoveAssignment      = "remove_route_assignment"
+	TransitionUpsertPathFamily      = "upsert_path_family"
+	TransitionRemovePathFamily      = "remove_path_family"
+	TransitionUpsertRoutingDomain   = "upsert_routing_domain"
+	TransitionRemoveRoutingDomain   = "remove_routing_domain"
 	TransitionUpdateCommittee       = "update_committee"
 	TransitionRotateCommittee       = "rotate_committee_keys"
+	TransitionSubmitManagerJoin     = "submit_manager_join"
+	TransitionReviewManagerJoin     = "review_manager_join"
+	TransitionActivateCommittee     = "activate_committee"
 	TransitionUpdateBudgetUse       = "update_budget_usage"
+)
+
+const (
+	DefaultEngineLedgerMaxAge   = 14 * 24 * time.Hour
+	DefaultEngineLedgerMaxBytes = int64(20 << 20)
 )
 
 var (
@@ -68,6 +81,10 @@ var (
 	ErrStaleHeight   = errors.New("stale height")
 	ErrInvalidQC     = errors.New("invalid quorum certificate")
 )
+
+// Peer-scoped routing objects are bounded hot keys for elephant flows. They
+// must never become the default representation of peer-to-peer routing.
+const maxPeerScopedRoutingObjects = 1024
 
 // Proposal, Vote and CommitteeEnvelope live in the model package so the wire
 // conversion layer can reference them without importing bft. The aliases keep
@@ -85,10 +102,12 @@ type Engine struct {
 	byID      map[string]model.CommitteeMember
 	blsKeys   *bls.KeySet
 	blsIndex  map[string]int
-	// dkgLoader returns locally held DKG shares by committee epoch. When set, a
-	// rotation that carries an external group public key adopts that material
-	// instead of the deterministic seed derivation.
-	dkgLoader       func(epoch uint64) (*bls.KeySet, bool)
+	// dkgLoader returns locally held DKG shares by committee epoch. The target
+	// committee and parameters are supplied by the caller so loaders never need
+	// to reacquire the engine lock while a committee transition is being applied.
+	dkgLoader func(
+		epoch uint64, committee []model.CommitteeMember, params model.CommitteeParams,
+	) (*bls.KeySet, bool)
 	committeeConfig model.CommitteeConfig
 	params          model.CommitteeParams
 	privateKey      ed25519.PrivateKey
@@ -102,6 +121,9 @@ type Engine struct {
 	votes           map[proposalKey][]Vote
 	committed       map[uint64]model.SignedSnapshot
 	knownHeight     uint64
+	ledgerMaxAge    time.Duration
+	ledgerMaxBytes  int64
+	retentionErr    error
 	metrics         *metrics.Metrics
 	listeners       []func(model.SignedSnapshot)
 }
@@ -155,17 +177,19 @@ func NewEngineWithParams(seedState model.NetworkState, committee []model.Committ
 		return nil, fmt.Errorf("invalid overlay CIDR")
 	}
 	engine := &Engine{
-		committee:    append([]model.CommitteeMember(nil), committee...),
-		byID:         make(map[string]model.CommitteeMember, len(committee)),
-		privateKey:   append(ed25519.PrivateKey(nil), privateKey...),
-		localID:      localID,
-		current:      NormalizeState(seedState),
-		currentRound: 0,
-		roundTimeout: 2 * time.Second,
-		proposals:    make(map[proposalKey]Proposal),
-		votes:        make(map[proposalKey][]Vote),
-		committed:    make(map[uint64]model.SignedSnapshot),
-		params:       params,
+		committee:      append([]model.CommitteeMember(nil), committee...),
+		byID:           make(map[string]model.CommitteeMember, len(committee)),
+		privateKey:     append(ed25519.PrivateKey(nil), privateKey...),
+		localID:        localID,
+		current:        NormalizeState(seedState),
+		currentRound:   0,
+		roundTimeout:   2 * time.Second,
+		proposals:      make(map[proposalKey]Proposal),
+		votes:          make(map[proposalKey][]Vote),
+		committed:      make(map[uint64]model.SignedSnapshot),
+		params:         params,
+		ledgerMaxAge:   DefaultEngineLedgerMaxAge,
+		ledgerMaxBytes: DefaultEngineLedgerMaxBytes,
 	}
 	sort.Slice(engine.committee, func(i, j int) bool {
 		return engine.committee[i].ID < engine.committee[j].ID
@@ -237,19 +261,21 @@ func NewEngineWithKeySet(
 	}
 
 	engine := &Engine{
-		committee:    append([]model.CommitteeMember(nil), committee...),
-		byID:         make(map[string]model.CommitteeMember, len(committee)),
-		blsKeys:      keys,
-		blsIndex:     make(map[string]int, len(committee)),
-		privateKey:   append(ed25519.PrivateKey(nil), privateKey...),
-		localID:      localID,
-		current:      NormalizeState(seedState),
-		currentRound: 0,
-		roundTimeout: 2 * time.Second,
-		proposals:    make(map[proposalKey]Proposal),
-		votes:        make(map[proposalKey][]Vote),
-		committed:    make(map[uint64]model.SignedSnapshot),
-		params:       params,
+		committee:      append([]model.CommitteeMember(nil), committee...),
+		byID:           make(map[string]model.CommitteeMember, len(committee)),
+		blsKeys:        keys,
+		blsIndex:       make(map[string]int, len(committee)),
+		privateKey:     append(ed25519.PrivateKey(nil), privateKey...),
+		localID:        localID,
+		current:        NormalizeState(seedState),
+		currentRound:   0,
+		roundTimeout:   2 * time.Second,
+		proposals:      make(map[proposalKey]Proposal),
+		votes:          make(map[proposalKey][]Vote),
+		committed:      make(map[uint64]model.SignedSnapshot),
+		params:         params,
+		ledgerMaxAge:   DefaultEngineLedgerMaxAge,
+		ledgerMaxBytes: DefaultEngineLedgerMaxBytes,
 	}
 	sort.Slice(engine.committee, func(i, j int) bool {
 		return engine.committee[i].ID < engine.committee[j].ID
@@ -409,6 +435,9 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	normalized.Nameservers = append([]model.Nameserver{}, state.Nameservers...)
 	normalized.Zones = append([]model.DNSZone{}, state.Zones...)
 	normalized.Assignments = append([]model.RouteAssignment{}, state.Assignments...)
+	normalized.PathFamilies = append([]model.PathFamily{}, state.PathFamilies...)
+	normalized.RoutingDomains = append([]model.RoutingDomainAuthorization{}, state.RoutingDomains...)
+	normalized.ManagerJoins = append([]model.ManagerJoinRequest{}, state.ManagerJoins...)
 	sort.Slice(normalized.Peers, func(i, j int) bool { return normalized.Peers[i].PeerID < normalized.Peers[j].PeerID })
 	for index := range normalized.Peers {
 		normalized.Peers[index].Posture = dedupeSorted(normalized.Peers[index].Posture)
@@ -422,6 +451,9 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	sort.Slice(normalized.Nameservers, func(i, j int) bool { return normalized.Nameservers[i].ID < normalized.Nameservers[j].ID })
 	sort.Slice(normalized.Zones, func(i, j int) bool { return normalized.Zones[i].ID < normalized.Zones[j].ID })
 	sort.Slice(normalized.Assignments, func(i, j int) bool { return normalized.Assignments[i].ID < normalized.Assignments[j].ID })
+	sort.Slice(normalized.PathFamilies, func(i, j int) bool { return normalized.PathFamilies[i].ID < normalized.PathFamilies[j].ID })
+	sort.Slice(normalized.RoutingDomains, func(i, j int) bool { return normalized.RoutingDomains[i].ID < normalized.RoutingDomains[j].ID })
+	sort.Slice(normalized.ManagerJoins, func(i, j int) bool { return normalized.ManagerJoins[i].ID < normalized.ManagerJoins[j].ID })
 	for index := range normalized.Groups {
 		sort.Strings(normalized.Groups[index].UserIDs)
 		sort.Strings(normalized.Groups[index].PeerIDs)
@@ -460,6 +492,12 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 			sort.Strings(normalized.Assignments[index].Fallbacks[pathIndex].ManagerHops)
 		}
 	}
+	for index := range normalized.PathFamilies {
+		normalized.PathFamilies[index] = normalized.PathFamilies[index].Normalized()
+	}
+	for index := range normalized.RoutingDomains {
+		normalized.RoutingDomains[index] = normalized.RoutingDomains[index].Normalized()
+	}
 	sort.Strings(normalized.DNSSettings.Groups)
 	return normalized
 }
@@ -472,8 +510,10 @@ func StateHash(state model.NetworkState) []byte {
 		normalized.Users[index].PasswordVerifier = nil
 	}
 	message := wire.NetworkStateToProto(normalized)
-	hash := sha256.Sum256(mustDeterministicMarshal(message))
-	return hash[:]
+	return hashWithRoutingExtension(
+		mustDeterministicMarshal(message), normalized.PathFamilies, normalized.RoutingDomains,
+		normalized.ManagerJoins,
+	)
 }
 
 // TransitionHash commits a transition into the signed vote. Because the hash is
@@ -487,8 +527,7 @@ func TransitionHash(transition model.StateTransition) []byte {
 	if message.GetUser() != nil {
 		message.User.PasswordVerifier = nil
 	}
-	hash := sha256.Sum256(mustDeterministicMarshal(message))
-	return hash[:]
+	return hashWithTransitionRoutingExtension(mustDeterministicMarshal(message), transition)
 }
 
 // ClientViewHash hashes the client-visible projection of a proposal. The
@@ -500,8 +539,74 @@ func ClientViewHash(state model.NetworkState, transition model.StateTransition) 
 		State:      wire.NetworkStateToProto(client.State),
 		Transition: wire.StateTransitionToProto(client.Transition),
 	}
-	hash := sha256.Sum256(mustDeterministicMarshal(message))
-	return hash[:]
+	return hashWithClientRoutingExtension(
+		mustDeterministicMarshal(message), client.State, client.Transition,
+	)
+}
+
+func hashWithTransitionRoutingExtension(encoded []byte, transition model.StateTransition) []byte {
+	var families []model.PathFamily
+	if transition.PathFamily != nil {
+		family := transition.PathFamily.Normalized()
+		families = []model.PathFamily{family}
+	}
+	var domains []model.RoutingDomainAuthorization
+	if transition.Domain != nil {
+		domain := transition.Domain.Normalized()
+		domains = []model.RoutingDomainAuthorization{domain}
+	}
+	var joins []model.ManagerJoinRequest
+	if transition.ManagerJoin != nil {
+		joins = []model.ManagerJoinRequest{*transition.ManagerJoin}
+	}
+	return hashWithRoutingExtension(encoded, families, domains, joins)
+}
+
+func hashWithClientRoutingExtension(encoded []byte, state model.NetworkState, transition model.StateTransition) []byte {
+	// The protobuf schema predates routing-domain state. The extension keeps
+	// the new certified fields inside StateHash, TransitionHash, and the client
+	// view hash until the wire schema is expanded.
+	var transitionFamilies []model.PathFamily
+	if transition.PathFamily != nil {
+		transitionFamilies = []model.PathFamily{transition.PathFamily.Normalized()}
+	}
+	var transitionDomains []model.RoutingDomainAuthorization
+	if transition.Domain != nil {
+		transitionDomains = []model.RoutingDomainAuthorization{transition.Domain.Normalized()}
+	}
+	families := append(append([]model.PathFamily{}, state.PathFamilies...), transitionFamilies...)
+	domains := append(append([]model.RoutingDomainAuthorization{}, state.RoutingDomains...), transitionDomains...)
+	joins := append([]model.ManagerJoinRequest{}, state.ManagerJoins...)
+	if transition.ManagerJoin != nil {
+		joins = append(joins, *transition.ManagerJoin)
+	}
+	return hashWithRoutingExtension(encoded, families, domains, joins)
+}
+
+func hashWithRoutingExtension(
+	encoded []byte, families []model.PathFamily, domains []model.RoutingDomainAuthorization,
+	managerJoins []model.ManagerJoinRequest,
+) []byte {
+	if len(families) == 0 && len(domains) == 0 && len(managerJoins) == 0 {
+		digest := sha256.Sum256(encoded)
+		return digest[:]
+	}
+	payload, err := json.Marshal(struct {
+		PathFamilies   []model.PathFamily                 `json:"pathFamilies"`
+		RoutingDomains []model.RoutingDomainAuthorization `json:"routingDomains"`
+		ManagerJoins   []model.ManagerJoinRequest         `json:"managerJoinRequests"`
+	}{families, domains, managerJoins})
+	if err != nil {
+		panic(fmt.Sprintf("bft: marshal routing extension: %v", err))
+	}
+	digest := sha256.New()
+	_, _ = digest.Write(encoded)
+	_, _ = digest.Write([]byte("netp2p-routing-v1\x00"))
+	var length [8]byte
+	binary.BigEndian.PutUint64(length[:], uint64(len(payload)))
+	_, _ = digest.Write(length[:])
+	_, _ = digest.Write(payload)
+	return digest.Sum(nil)
 }
 
 // mustDeterministicMarshal encodes a protobuf message with field ordering
@@ -632,6 +737,123 @@ func (engine *Engine) LatestSnapshot() (model.SignedSnapshot, bool) {
 	snapshot := engine.committed[engine.height]
 	snapshot.Committee = append([]model.CommitteeMember(nil), engine.committee...)
 	return snapshot, true
+}
+
+type LedgerPruneResult struct {
+	RemovedSnapshots  int   `json:"removedSnapshots"`
+	RetainedSnapshots int   `json:"retainedSnapshots"`
+	EstimatedBytes    int64 `json:"estimatedBytes"`
+}
+
+// SetLedgerRetention configures automatic in-memory retention. Managers can
+// expose this through validated runtime configuration; tests use it to exercise
+// the post-commit path without allocating a multi-megabyte ledger.
+func (engine *Engine) SetLedgerRetention(maxAge time.Duration, maxBytes int64) error {
+	if maxAge <= 0 {
+		return fmt.Errorf("ledger max age must be positive")
+	}
+	if maxBytes <= 0 {
+		return fmt.Errorf("ledger max bytes must be positive")
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	engine.ledgerMaxAge = maxAge
+	engine.ledgerMaxBytes = maxBytes
+	engine.retentionErr = nil
+	return nil
+}
+
+// PruneLedger bounds the engine's in-memory decision log. The latest snapshot
+// is always retained as the recovery checkpoint; age and byte limits are
+// applied to older committed snapshots.
+func (engine *Engine) PruneLedger(now time.Time, maxAge time.Duration, maxBytes int64) (LedgerPruneResult, error) {
+	if maxAge <= 0 {
+		return LedgerPruneResult{}, fmt.Errorf("ledger max age must be positive")
+	}
+	if maxBytes <= 0 {
+		return LedgerPruneResult{}, fmt.Errorf("ledger max bytes must be positive")
+	}
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	if len(engine.committed) == 0 {
+		return LedgerPruneResult{}, nil
+	}
+	type candidate struct {
+		height uint64
+		size   int64
+	}
+	candidates := make([]candidate, 0, len(engine.committed)-1)
+	remove := make(map[uint64]struct{})
+	var total int64
+	for height, snapshot := range engine.committed {
+		size := snapshotLedgerBytes(snapshot)
+		total += size
+		if height == engine.height {
+			continue
+		}
+		if !snapshot.LocalCommittedAt.IsZero() && now.Sub(snapshot.LocalCommittedAt) > maxAge {
+			remove[height] = struct{}{}
+		}
+		candidates = append(candidates, candidate{height: height, size: size})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].height < candidates[j].height })
+	if total > maxBytes {
+		for _, item := range candidates {
+			if item.height == engine.height {
+				continue
+			}
+			remove[item.height] = struct{}{}
+			total -= item.size
+			if total <= maxBytes {
+				break
+			}
+		}
+	}
+	for height := range remove {
+		delete(engine.committed, height)
+	}
+	result := LedgerPruneResult{
+		RemovedSnapshots:  len(remove),
+		RetainedSnapshots: len(engine.committed),
+		EstimatedBytes:    total,
+	}
+	if total > maxBytes {
+		return result, fmt.Errorf("latest certified snapshot is %d bytes, exceeding the %d-byte ledger limit", total, maxBytes)
+	}
+	return result, nil
+}
+
+// pruneLedgerAfterCommit applies the configured retention policy after a new
+// certified checkpoint exists. It is deliberately called without the engine
+// lock because PruneLedger takes that lock itself.
+func (engine *Engine) pruneLedgerAfterCommit(now time.Time) {
+	engine.mu.RLock()
+	maxAge := engine.ledgerMaxAge
+	maxBytes := engine.ledgerMaxBytes
+	engine.mu.RUnlock()
+	if _, err := engine.PruneLedger(now, maxAge, maxBytes); err != nil {
+		engine.mu.Lock()
+		engine.retentionErr = err
+		engine.mu.Unlock()
+	}
+}
+
+// RetentionError reports the latest automatic ledger-retention failure. A
+// non-nil error means the manager still has its latest certified checkpoint but
+// should surface degraded storage health instead of silently growing forever.
+func (engine *Engine) RetentionError() error {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return engine.retentionErr
+}
+
+func snapshotLedgerBytes(snapshot model.SignedSnapshot) int64 {
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		// SignedSnapshot contains only JSON-encodable protocol fields.
+		panic(fmt.Sprintf("bft: encode snapshot for retention sizing: %v", err))
+	}
+	return int64(len(encoded))
 }
 
 // BudgetUsageHistory returns every committed budget settlement in commit order,
@@ -798,6 +1020,7 @@ func (engine *Engine) CatchUp(snapshot model.SignedSnapshot) error {
 	}
 	engine.current = NormalizeState(snapshot.State)
 	engine.height = snapshot.Height
+	snapshot.LocalCommittedAt = time.Now().UTC()
 	engine.currentRound = 0
 	engine.startRoundLocked(0)
 	engine.committed[snapshot.Height] = snapshot
@@ -811,6 +1034,7 @@ func (engine *Engine) CatchUp(snapshot model.SignedSnapshot) error {
 	listeners := make([]func(model.SignedSnapshot), len(engine.listeners))
 	copy(listeners, engine.listeners)
 	engine.mu.Unlock()
+	engine.pruneLedgerAfterCommit(time.Now().UTC())
 	for _, listener := range listeners {
 		listener(snapshot)
 	}
@@ -1068,6 +1292,7 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 		Epoch: proposal.Height, Height: proposal.Height, StateHash: append([]byte(nil), qc.StateHash...),
 		State: cloneState(engine.current), Committee: signedCommittee, QC: qc,
 		Transition: proposal.Transition, LeaderID: proposal.LeaderID, CommitteeConfig: signedConfig,
+		LocalCommittedAt: time.Now().UTC(),
 	}
 	if err := engine.adoptCommitteeLocked(proposal.Transition); err != nil {
 		engine.mu.Unlock()
@@ -1078,6 +1303,7 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 	listeners := make([]func(model.SignedSnapshot), len(engine.listeners))
 	copy(listeners, engine.listeners)
 	engine.mu.Unlock()
+	engine.pruneLedgerAfterCommit(time.Now().UTC())
 	for _, listener := range listeners {
 		listener(snapshot)
 	}
@@ -1087,11 +1313,13 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 // adoptCommitteeLocked applies a membership or key-rotation transition to the
 // engine so subsequent heights use the new committee and epoch.
 func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) error {
-	if transition.Type != TransitionUpdateCommittee && transition.Type != TransitionRotateCommittee {
+	if transition.Type != TransitionUpdateCommittee && transition.Type != TransitionRotateCommittee &&
+		transition.Type != TransitionActivateCommittee {
 		return nil
 	}
 	committee := append([]model.CommitteeMember(nil), engine.committee...)
 	epoch := engine.committeeConfig.CommitteeEpoch
+	params := engine.params
 	switch transition.Type {
 	case TransitionUpdateCommittee:
 		if len(transition.Committee) > 0 {
@@ -1099,9 +1327,23 @@ func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) err
 		}
 	case TransitionRotateCommittee:
 		epoch++
+	case TransitionActivateCommittee:
+		if transition.CommitteeConfig == nil {
+			return fmt.Errorf("activate_committee is missing its config")
+		}
+		nextParams, err := model.CommitteeParamsFromConfig(*transition.CommitteeConfig)
+		if err != nil {
+			return fmt.Errorf("invalid activated committee params: %w", err)
+		}
+		if len(transition.Committee) != nextParams.Size {
+			return fmt.Errorf("activated committee has %d members, want %d", len(transition.Committee), nextParams.Size)
+		}
+		params = nextParams
+		committee = append([]model.CommitteeMember(nil), transition.Committee...)
+		epoch = transition.CommitteeConfig.CommitteeEpoch
 	}
 	sort.Slice(committee, func(i, j int) bool { return committee[i].ID < committee[j].ID })
-	config, keys, index, err := engine.committeeMaterialLocked(committee, epoch, transition)
+	config, keys, index, err := engine.committeeMaterialLocked(committee, epoch, transition, params)
 	if err != nil {
 		return err
 	}
@@ -1114,6 +1356,7 @@ func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) err
 	engine.byID = byID
 	engine.blsKeys = keys
 	engine.blsIndex = index
+	engine.params = params
 	engine.committeeConfig = config
 	engine.current.CommitteeConfig = config
 	return nil
@@ -1123,24 +1366,34 @@ func (engine *Engine) adoptCommitteeLocked(transition model.StateTransition) err
 // When a rotation carries a DKG-produced group public key, the locally held
 // share for that epoch is adopted; otherwise the deterministic seed sharing is
 // used so genesis and non-DKG deployments keep working unchanged.
-func (engine *Engine) committeeMaterialLocked(committee []model.CommitteeMember, epoch uint64, transition model.StateTransition) (model.CommitteeConfig, *bls.KeySet, map[string]int, error) {
-	if transition.Type == TransitionRotateCommittee && transition.CommitteeConfig != nil {
+func (engine *Engine) committeeMaterialLocked(
+	committee []model.CommitteeMember, epoch uint64, transition model.StateTransition,
+	params model.CommitteeParams,
+) (model.CommitteeConfig, *bls.KeySet, map[string]int, error) {
+	if (transition.Type == TransitionRotateCommittee || transition.Type == TransitionActivateCommittee) &&
+		transition.CommitteeConfig != nil {
 		groupKey := transition.CommitteeConfig.GroupPublicKey
 		if len(groupKey) == bls.PublicKeySize && bls.ValidG2Point(groupKey) {
 			if engine.dkgLoader != nil {
-				if keys, ok := engine.dkgLoader(epoch); ok && bytes.Equal(keys.GroupPublicKey, groupKey) {
+				if keys, ok := engine.dkgLoader(epoch, committee, params); ok && bytes.Equal(keys.GroupPublicKey, groupKey) {
+					if keys.Threshold != params.QuorumSize || keys.Size != params.Size {
+						return model.CommitteeConfig{}, nil, nil, fmt.Errorf(
+							"DKG key set is %d-of-%d, want %d-of-%d",
+							keys.Threshold, keys.Size, params.QuorumSize, params.Size,
+						)
+					}
 					config := model.CommitteeConfig{
-						Threshold:      uint32(engine.params.QuorumSize),
-						Size:           uint32(engine.params.Size),
+						Threshold:      uint32(params.QuorumSize),
+						Size:           uint32(params.Size),
 						GroupPublicKey: append([]byte(nil), groupKey...), CommitteeEpoch: epoch,
 					}
 					return config, keys, committeeIndex(committee), nil
 				}
 			}
-			return model.CommitteeConfig{}, nil, nil, fmt.Errorf("rotate_committee_keys carried a DKG group key but no local share is available for epoch %d", epoch)
+			return model.CommitteeConfig{}, nil, nil, fmt.Errorf("committee transition carried a DKG group key but no local share is available for epoch %d", epoch)
 		}
 	}
-	return deriveCommitteeKeys(committee, engine.current.NetworkID, epoch, engine.params.QuorumSize)
+	return deriveCommitteeKeys(committee, engine.current.NetworkID, epoch, params.QuorumSize)
 }
 
 // committeeIndex maps member IDs to their position in the sorted committee.
@@ -1155,20 +1408,23 @@ func committeeIndex(committee []model.CommitteeMember) map[string]int {
 // SetDKGLoader installs a source of locally held DKG shares keyed by committee
 // epoch. If the engine is already operating under a DKG-derived configuration,
 // it immediately switches to the matching local share.
-func (engine *Engine) SetDKGLoader(loader func(epoch uint64) (*bls.KeySet, bool)) {
+func (engine *Engine) SetDKGLoader(loader func(
+	epoch uint64, committee []model.CommitteeMember, params model.CommitteeParams,
+) (*bls.KeySet, bool)) {
 	engine.mu.Lock()
 	engine.dkgLoader = loader
 	needsLoad := loader != nil && len(engine.committeeConfig.GroupPublicKey) == bls.PublicKeySize
 	epoch := engine.committeeConfig.CommitteeEpoch
 	groupKey := append([]byte(nil), engine.committeeConfig.GroupPublicKey...)
 	committee := append([]model.CommitteeMember(nil), engine.committee...)
+	params := engine.params
 	engine.mu.Unlock()
 	if !needsLoad {
 		return
 	}
 	// Call the loader without the engine write lock; loaders may inspect public
 	// engine state and persisted shares during startup.
-	keys, ok := loader(epoch)
+	keys, ok := loader(epoch, committee, params)
 	if !ok || !bytes.Equal(keys.GroupPublicKey, groupKey) {
 		return
 	}
@@ -1701,6 +1957,70 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		}
 		state.Settings = *transition.Settings
 		return nil
+	case TransitionUpsertPathFamily:
+		if transition.PathFamily == nil || transition.PathFamily.ID == "" {
+			return fmt.Errorf("path family is required")
+		}
+		family := *transition.PathFamily
+		if err := validatePathFamily(*state, family, engineCommittee); err != nil {
+			return err
+		}
+		family = family.Normalized()
+		for index := range state.PathFamilies {
+			if state.PathFamilies[index].ID == family.ID {
+				state.PathFamilies[index] = family
+				return nil
+			}
+		}
+		state.PathFamilies = append(state.PathFamilies, family)
+		return nil
+	case TransitionRemovePathFamily:
+		if transition.TargetID == "" {
+			return fmt.Errorf("targetId is required")
+		}
+		for _, domain := range state.RoutingDomains {
+			if containsString(domain.PathFamilyIDs, transition.TargetID) {
+				return fmt.Errorf("path family %q is referenced by routing domain %q", transition.TargetID, domain.ID)
+			}
+		}
+		for index := range state.PathFamilies {
+			if state.PathFamilies[index].ID == transition.TargetID {
+				state.PathFamilies = append(state.PathFamilies[:index], state.PathFamilies[index+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("path family %q not found", transition.TargetID)
+	case TransitionUpsertRoutingDomain:
+		if transition.Domain == nil || transition.Domain.ID == "" {
+			return fmt.Errorf("routing domain is required")
+		}
+		authorization := *transition.Domain
+		if authorization.ID == "" {
+			authorization.ID = authorization.Key.ID()
+		}
+		if err := validateRoutingDomain(*state, authorization); err != nil {
+			return err
+		}
+		authorization = authorization.Normalized()
+		for index := range state.RoutingDomains {
+			if state.RoutingDomains[index].ID == authorization.ID {
+				state.RoutingDomains[index] = authorization
+				return nil
+			}
+		}
+		state.RoutingDomains = append(state.RoutingDomains, authorization)
+		return nil
+	case TransitionRemoveRoutingDomain:
+		if transition.TargetID == "" {
+			return fmt.Errorf("targetId is required")
+		}
+		for index := range state.RoutingDomains {
+			if state.RoutingDomains[index].ID == transition.TargetID {
+				state.RoutingDomains = append(state.RoutingDomains[:index], state.RoutingDomains[index+1:]...)
+				return nil
+			}
+		}
+		return fmt.Errorf("routing domain %q not found", transition.TargetID)
 	case TransitionUpdateAssignment:
 		if transition.Assignment == nil || transition.Assignment.ID == "" {
 			return fmt.Errorf("route assignment is required")
@@ -1729,24 +2049,16 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		if len(assignment.Primary.ManagerHops) > assignment.MaxHops {
 			return fmt.Errorf("primary path exceeds the assignment hop limit")
 		}
-		if assignment.Primary.Kind == model.PathKindViaManager || assignment.Primary.Kind == model.PathKindMultiHop {
-			if err := validateManagerPath(engineCommittee, assignment.Primary); err != nil {
-				return err
-			}
+		if err := validateAssignmentPath(engineCommittee, assignment.Primary); err != nil {
+			return err
 		}
 		for index := range assignment.Fallbacks {
 			assignment.Fallbacks[index] = assignment.Fallbacks[index].Normalized()
 			if len(assignment.Fallbacks[index].ManagerHops) > assignment.MaxHops {
 				return fmt.Errorf("fallback path exceeds the assignment hop limit")
 			}
-			switch assignment.Fallbacks[index].Kind {
-			case model.PathKindViaManager, model.PathKindMultiHop:
-				if err := validateManagerPath(engineCommittee, assignment.Fallbacks[index]); err != nil {
-					return err
-				}
-			case model.PathKindDirect:
-			default:
-				return fmt.Errorf("unknown path kind %q", assignment.Fallbacks[index].Kind)
+			if err := validateAssignmentPath(engineCommittee, assignment.Fallbacks[index]); err != nil {
+				return err
 			}
 		}
 		if assignment.UpdatedAt.IsZero() {
@@ -1772,6 +2084,12 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			}
 		}
 		return fmt.Errorf("assignment %q not found", transition.TargetID)
+	case TransitionSubmitManagerJoin:
+		return applySubmitManagerJoin(state, transition)
+	case TransitionReviewManagerJoin:
+		return applyReviewManagerJoin(state, transition)
+	case TransitionActivateCommittee:
+		return applyActivateCommittee(state, transition)
 	case TransitionUpdateCommittee:
 		return applyUpdateCommittee(state, transition)
 	case TransitionRotateCommittee:
@@ -1809,6 +2127,195 @@ func applyBudgetUsage(state *model.NetworkState, transition model.StateTransitio
 
 func committeeParamsForState(state model.NetworkState) (model.CommitteeParams, error) {
 	return model.CommitteeParamsFromConfig(state.CommitteeConfig)
+}
+
+func applySubmitManagerJoin(state *model.NetworkState, transition model.StateTransition) error {
+	request := transition.ManagerJoin
+	if request == nil || request.ID == "" {
+		return fmt.Errorf("manager join request is required")
+	}
+	if request.ManagerID == "" || request.PeerID == "" || request.Address == "" || len(request.PublicKey) == 0 {
+		return fmt.Errorf("manager join request is incomplete")
+	}
+	if request.Status != model.ManagerJoinPending {
+		return fmt.Errorf("new manager join request must be pending")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, request.RequestedAt); err != nil {
+		return fmt.Errorf("manager join requestedAt must be RFC3339: %w", err)
+	}
+	for _, member := range state.EngineCommittee {
+		if member.ID == request.ManagerID || member.PeerID == request.PeerID {
+			return fmt.Errorf("manager %q is already in the committee", request.ManagerID)
+		}
+	}
+	for index, existing := range state.ManagerJoins {
+		if existing.ID == request.ID || existing.ManagerID == request.ManagerID || existing.PeerID == request.PeerID {
+			if existing.Status == model.ManagerJoinPending || existing.Status == model.ManagerJoinApproved {
+				return fmt.Errorf("manager join request %q is still active", existing.ID)
+			}
+			state.ManagerJoins[index] = *request
+			return nil
+		}
+	}
+	state.ManagerJoins = append(state.ManagerJoins, *request)
+	return nil
+}
+
+func applyReviewManagerJoin(state *model.NetworkState, transition model.StateTransition) error {
+	if err := requireCommitteeAdminActor(transition); err != nil {
+		return err
+	}
+	request := transition.ManagerJoin
+	if request == nil || request.ID == "" {
+		return fmt.Errorf("manager join request is required")
+	}
+	if request.Status != model.ManagerJoinApproved && request.Status != model.ManagerJoinRejected {
+		return fmt.Errorf("manager join review status must be approved or rejected")
+	}
+	if request.ReviewedBy == "" {
+		return fmt.Errorf("manager join reviewer is required")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, request.ReviewedAt); err != nil {
+		return fmt.Errorf("manager join reviewedAt must be RFC3339: %w", err)
+	}
+	for index := range state.ManagerJoins {
+		if state.ManagerJoins[index].ID != request.ID {
+			continue
+		}
+		if state.ManagerJoins[index].Status != model.ManagerJoinPending {
+			return fmt.Errorf("manager join request %q is not pending", request.ID)
+		}
+		state.ManagerJoins[index].Status = request.Status
+		state.ManagerJoins[index].ReviewedBy = request.ReviewedBy
+		state.ManagerJoins[index].ReviewedAt = request.ReviewedAt
+		state.ManagerJoins[index].Reason = request.Reason
+		return nil
+	}
+	return fmt.Errorf("manager join request %q not found", request.ID)
+}
+
+func applyActivateCommittee(state *model.NetworkState, transition model.StateTransition) error {
+	if err := requireCommitteeAdminActor(transition); err != nil {
+		return err
+	}
+	if transition.CommitteeConfig == nil {
+		return fmt.Errorf("activated committee config is required")
+	}
+	currentParams, err := committeeParamsForState(*state)
+	if err != nil {
+		return fmt.Errorf("invalid current committee params: %w", err)
+	}
+	nextParams, err := model.CommitteeParamsFromConfig(*transition.CommitteeConfig)
+	if err != nil {
+		return fmt.Errorf("invalid activated committee params: %w", err)
+	}
+	if nextParams.Size < 3 {
+		return fmt.Errorf("activated committee must have at least three members")
+	}
+	if len(transition.Committee) != nextParams.Size {
+		return fmt.Errorf("activated committee has %d members, want %d", len(transition.Committee), nextParams.Size)
+	}
+	if err := validateCommitteeMembers(transition.Committee); err != nil {
+		return err
+	}
+	forwarding := 0
+	for _, member := range transition.Committee {
+		if member.ForwardingEnabled {
+			forwarding++
+		}
+	}
+	if forwarding == 0 {
+		return fmt.Errorf("activated committee must keep at least one forwarding member")
+	}
+	nextConfig := *transition.CommitteeConfig
+	if !nextConfig.Equal(nextParams.CommitteeConfig(nextConfig.CommitteeEpoch, nextConfig.GroupPublicKey)) {
+		return fmt.Errorf("activated committee config does not match its parameters")
+	}
+	if nextConfig.CommitteeEpoch != state.CommitteeConfig.CommitteeEpoch+1 {
+		return fmt.Errorf("activated committee epoch must advance by one")
+	}
+	if len(nextConfig.GroupPublicKey) != bls.PublicKeySize || !bls.ValidG2Point(nextConfig.GroupPublicKey) {
+		return fmt.Errorf("activated committee group key is invalid")
+	}
+
+	current := make(map[string]model.CommitteeMember, len(state.EngineCommittee))
+	for _, member := range state.EngineCommittee {
+		current[member.ID] = member
+	}
+	next := make(map[string]model.CommitteeMember, len(transition.Committee))
+	added := make([]model.CommitteeMember, 0)
+	removed := 0
+	for _, member := range transition.Committee {
+		next[member.ID] = member
+		existing, known := current[member.ID]
+		if !known {
+			added = append(added, member)
+			continue
+		}
+		if existing.PeerID != member.PeerID || existing.Address != member.Address ||
+			!bytes.Equal(existing.PublicKey, member.PublicKey) {
+			return fmt.Errorf("committee member %q may not be replaced by activate_committee", member.ID)
+		}
+	}
+	for _, member := range state.EngineCommittee {
+		if _, kept := next[member.ID]; !kept {
+			removed++
+		}
+	}
+	if len(added) > 0 && removed > 0 {
+		return fmt.Errorf("activate_committee may add or remove members, not both")
+	}
+	if len(added) == 0 && removed == 0 {
+		return fmt.Errorf("activate_committee must change committee membership")
+	}
+	if removed > currentParams.FaultLimit {
+		return fmt.Errorf("cannot remove %d committee members at once; fault limit is %d", removed, currentParams.FaultLimit)
+	}
+
+	approved := make(map[string]model.ManagerJoinRequest, len(state.ManagerJoins))
+	for _, request := range state.ManagerJoins {
+		if request.Status == model.ManagerJoinApproved {
+			approved[request.ManagerID] = request
+		}
+	}
+	for _, member := range added {
+		request, ok := approved[member.ID]
+		if !ok {
+			return fmt.Errorf("new committee member %q has no approved join request", member.ID)
+		}
+		if request.PeerID != member.PeerID || request.Address != member.Address ||
+			!bytes.Equal(request.PublicKey, member.PublicKey) {
+			return fmt.Errorf("committee member %q does not match its approved join request", member.ID)
+		}
+	}
+	activated := make(map[string]struct{}, len(added))
+	for _, member := range added {
+		activated[member.ID] = struct{}{}
+	}
+	for index := range state.ManagerJoins {
+		if _, used := activated[state.ManagerJoins[index].ManagerID]; used {
+			state.ManagerJoins[index].Status = model.ManagerJoinActivated
+		}
+	}
+	state.EngineCommittee = append([]model.CommitteeMember(nil), transition.Committee...)
+	state.CommitteeConfig = nextConfig
+	return nil
+}
+
+func requireCommitteeAdminActor(transition model.StateTransition) error {
+	if transition.Actor == nil {
+		return fmt.Errorf("committee action requires an authenticated actor")
+	}
+	if transition.Actor.Role == "system" && transition.Actor.ID == "system:committee-resize" &&
+		transition.Type == TransitionActivateCommittee {
+		return nil
+	}
+	switch transition.Actor.Role {
+	case model.RoleOwner, model.RoleAdmin, model.RoleNetworkAdmin:
+		return nil
+	default:
+		return fmt.Errorf("actor role %q may not change the committee", transition.Actor.Role)
+	}
 }
 
 // applyUpdateCommittee validates and stages a committee member change. The
@@ -1957,11 +2464,264 @@ func validateRoute(state model.NetworkState, route model.Route) error {
 		}
 	}
 	switch route.FlowClass {
-	case "", "latency", "throughput", "reliability", "cost":
+	case "", "latency", "throughput", "reliability", "cost", "realtime":
 	default:
 		return fmt.Errorf("route flow class %q is unknown", route.FlowClass)
 	}
 	return nil
+}
+
+func validatePathFamily(state model.NetworkState, family model.PathFamily, committee []model.CommitteeMember) error {
+	if family.ID == "" {
+		return fmt.Errorf("path family id is required")
+	}
+	switch family.Kind {
+	case model.PathKindDirect:
+		if len(family.ManagerHops) != 0 {
+			return fmt.Errorf("direct path family may not carry manager hops")
+		}
+	case model.PathKindViaManager, model.PathKindMultiHop:
+		path := model.PathSpec{ID: family.ID, Kind: family.Kind, ManagerHops: family.ManagerHops}
+		if err := validateManagerPath(committee, path); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("path family kind %q is unknown", family.Kind)
+	}
+	if len(family.SourceGroups) == 0 {
+		return fmt.Errorf("path family source groups are required")
+	}
+	for _, groupID := range family.SourceGroups {
+		if groupID == "*" {
+			continue
+		}
+		if err := requireGroups(&state, []string{groupID}); err != nil {
+			return err
+		}
+	}
+	if len(family.DestinationScopes) == 0 {
+		return fmt.Errorf("path family destination scopes are required")
+	}
+	peerScopes := 0
+	for _, scope := range family.DestinationScopes {
+		if scope == "*" {
+			continue
+		}
+		if err := validateDestinationScope(state, scope); err != nil {
+			return err
+		}
+		if strings.HasPrefix(scope, model.DestinationScopePeer) {
+			peerScopes++
+		}
+	}
+	existingPeerScopes := countPeerScopedRoutingObjects(state, family.ID, "")
+	if existingPeerScopes+peerScopes > maxPeerScopedRoutingObjects {
+		return fmt.Errorf("routing state exceeds the %d peer hot-key limit", maxPeerScopedRoutingObjects)
+	}
+	if len(family.FlowClasses) == 0 {
+		return fmt.Errorf("path family flow classes are required")
+	}
+	seenClasses := make(map[string]struct{}, len(family.FlowClasses))
+	for _, flowClass := range family.FlowClasses {
+		if !model.ValidFlowClass(flowClass) {
+			return fmt.Errorf("path family flow class %q is unknown", flowClass)
+		}
+		if _, duplicate := seenClasses[flowClass]; duplicate {
+			return fmt.Errorf("path family flow class %q repeats", flowClass)
+		}
+		seenClasses[flowClass] = struct{}{}
+	}
+	if family.MaxRTTMilliseconds < 0 || family.MaxJitterMilliseconds < 0 ||
+		family.MaxLossPercent < 0 || family.MinBandwidthMbps < 0 {
+		return fmt.Errorf("path family constraints cannot be negative")
+	}
+	if family.MaxLossPercent > 100 {
+		return fmt.Errorf("path family loss constraint cannot exceed 100 percent")
+	}
+	requiresRTT := containsString(family.FlowClasses, model.FlowClassLatency) ||
+		containsString(family.FlowClasses, model.FlowClassRealtime)
+	requiresBandwidth := containsString(family.FlowClasses, model.FlowClassThroughput) ||
+		containsString(family.FlowClasses, model.FlowClassRealtime)
+	requiresLoss := containsString(family.FlowClasses, model.FlowClassReliability) ||
+		containsString(family.FlowClasses, model.FlowClassRealtime)
+	if requiresRTT && family.MaxRTTMilliseconds == 0 {
+		return fmt.Errorf("path family must set an RTT SLA for latency or realtime traffic")
+	}
+	if containsString(family.FlowClasses, model.FlowClassRealtime) && family.MaxJitterMilliseconds == 0 {
+		return fmt.Errorf("path family must set a jitter SLA for realtime traffic")
+	}
+	if requiresBandwidth && family.MinBandwidthMbps == 0 {
+		return fmt.Errorf("path family must set a bandwidth SLA for throughput or realtime traffic")
+	}
+	if requiresLoss && family.MaxLossPercent == 0 {
+		return fmt.Errorf("path family must set a loss SLA for reliability or realtime traffic")
+	}
+	return nil
+}
+
+func validateRoutingDomain(state model.NetworkState, authorization model.RoutingDomainAuthorization) error {
+	if authorization.ID == "" {
+		return fmt.Errorf("routing domain id is required")
+	}
+	if err := authorization.Key.Validate(); err != nil {
+		return err
+	}
+	if len(state.EngineCommittee) > 0 && !managerIDExists(state.EngineCommittee, authorization.Key.SourceManagerID) {
+		return fmt.Errorf("routing domain references unknown source manager %q", authorization.Key.SourceManagerID)
+	}
+	if err := requireGroups(&state, []string{authorization.Key.SourceGroupID}); err != nil {
+		return err
+	}
+	if err := validateDestinationScope(state, authorization.Key.DestinationScope); err != nil {
+		return err
+	}
+	if strings.HasPrefix(authorization.Key.DestinationScope, model.DestinationScopePeer) {
+		if countPeerScopedRoutingObjects(state, "", authorization.ID) >= maxPeerScopedRoutingObjects {
+			return fmt.Errorf("routing domain exceeds the %d peer hot-key limit", maxPeerScopedRoutingObjects)
+		}
+	}
+	if len(authorization.PathFamilyIDs) == 0 {
+		return fmt.Errorf("routing domain requires at least one path family")
+	}
+	for _, familyID := range authorization.PathFamilyIDs {
+		var family model.PathFamily
+		found := false
+		for index := range state.PathFamilies {
+			if state.PathFamilies[index].ID == familyID {
+				family = state.PathFamilies[index]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("routing domain references unknown path family %q", familyID)
+		}
+		if !family.Covers(authorization.Key) {
+			return fmt.Errorf("path family %q does not cover routing domain %+v", familyID, authorization.Key)
+		}
+	}
+	if len(authorization.PolicyIDs) == 0 {
+		return fmt.Errorf("routing domain requires at least one policy")
+	}
+	sourceAuthorized := false
+	destinationAuthorized := false
+	for _, policyID := range authorization.PolicyIDs {
+		var policy model.Policy
+		found := false
+		for index := range state.Policies {
+			if state.Policies[index].ID == policyID {
+				policy = state.Policies[index]
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("routing domain references unknown policy %q", policyID)
+		}
+		if policy.Effect != model.EffectAllow {
+			return fmt.Errorf("routing domain policy %q must allow traffic", policyID)
+		}
+		if containsString(policy.SourceGroups, authorization.Key.SourceGroupID) {
+			sourceAuthorized = true
+		}
+		if destinationScopeMatchesPolicy(state, authorization.Key.DestinationScope, policy) {
+			destinationAuthorized = true
+		}
+	}
+	if !sourceAuthorized {
+		return fmt.Errorf("no routing-domain policy authorizes source group %q", authorization.Key.SourceGroupID)
+	}
+	if !destinationAuthorized {
+		return fmt.Errorf("no routing-domain policy authorizes destination scope %q", authorization.Key.DestinationScope)
+	}
+	if authorization.MaxHops < 0 {
+		return fmt.Errorf("routing domain max hops cannot be negative")
+	}
+	for _, service := range authorization.Services {
+		switch service.Protocol {
+		case "", "tcp", "udp", "icmp":
+		default:
+			return fmt.Errorf("routing domain service protocol %q is unknown", service.Protocol)
+		}
+		if service.StartPort > service.EndPort {
+			return fmt.Errorf("routing domain service port range is invalid")
+		}
+	}
+	return nil
+}
+
+func countPeerScopedRoutingObjects(state model.NetworkState, excludeFamilyID, excludeDomainID string) int {
+	count := 0
+	for _, family := range state.PathFamilies {
+		if family.ID == excludeFamilyID {
+			continue
+		}
+		for _, scope := range family.DestinationScopes {
+			if strings.HasPrefix(scope, model.DestinationScopePeer) {
+				count++
+			}
+		}
+	}
+	for _, domain := range state.RoutingDomains {
+		if domain.ID == excludeDomainID {
+			continue
+		}
+		if strings.HasPrefix(domain.Key.DestinationScope, model.DestinationScopePeer) {
+			count++
+		}
+	}
+	return count
+}
+
+func validateDestinationScope(state model.NetworkState, scope string) error {
+	kind, id, err := model.ParseDestinationScope(scope)
+	if err != nil {
+		return err
+	}
+	switch kind {
+	case model.DestinationScopeGroup:
+		return requireGroups(&state, []string{id})
+	case model.DestinationScopeRoute:
+		for _, route := range state.Routes {
+			if route.ID == id {
+				return nil
+			}
+		}
+		return fmt.Errorf("destination scope references unknown route %q", id)
+	case model.DestinationScopePeer:
+		if findPeerRecord(state, id) == nil {
+			return fmt.Errorf("destination scope references unknown peer %q", id)
+		}
+	case model.DestinationScopeResource:
+		// Resource objects are introduced by the API layer. Their identifiers
+		// remain certified through this scope until that model is wired in.
+	default:
+		return fmt.Errorf("unknown destination scope kind %q", kind)
+	}
+	return nil
+}
+
+func destinationScopeMatchesPolicy(state model.NetworkState, scope string, policy model.Policy) bool {
+	kind, id, _ := model.ParseDestinationScope(scope)
+	switch kind {
+	case model.DestinationScopeGroup:
+		return containsString(policy.DestinationGroups, id)
+	case model.DestinationScopePeer:
+		peer := findPeerRecord(state, id)
+		if peer == nil {
+			return false
+		}
+		for _, groupID := range peer.Groups {
+			if containsString(policy.DestinationGroups, groupID) {
+				return true
+			}
+		}
+		return false
+	default:
+		// Route and resource scopes are authorized by distribution policy and
+		// the certified route/resource object rather than a peer group.
+		return true
+	}
 }
 
 func groupContainsPeer(groups []model.Group, groupID, peerID string) bool {
@@ -1976,6 +2736,29 @@ func groupContainsPeer(groups []model.Group, groupID, peerID string) bool {
 		}
 	}
 	return false
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func validateAssignmentPath(committee []model.CommitteeMember, path model.PathSpec) error {
+	switch path.Kind {
+	case model.PathKindDirect:
+		if len(path.ManagerHops) != 0 {
+			return fmt.Errorf("direct path may not carry manager hops")
+		}
+	case model.PathKindViaManager, model.PathKindMultiHop:
+		return validateManagerPath(committee, path)
+	default:
+		return fmt.Errorf("unknown path kind %q", path.Kind)
+	}
+	return nil
 }
 
 func validateManagerPath(committee []model.CommitteeMember, path model.PathSpec) error {
@@ -2003,6 +2786,42 @@ func validateManagerPath(committee []model.CommitteeMember, path model.PathSpec)
 		}
 	}
 	return nil
+}
+
+func groupExists(state model.NetworkState, groupID string) bool {
+	for _, group := range state.Groups {
+		if group.ID == groupID {
+			return true
+		}
+	}
+	return false
+}
+
+func managerIDExists(committee []model.CommitteeMember, managerID string) bool {
+	for _, member := range committee {
+		if member.ID == managerID {
+			return true
+		}
+	}
+	return false
+}
+
+func findPathFamily(state model.NetworkState, id string) (model.PathFamily, bool) {
+	for _, family := range state.PathFamilies {
+		if family.ID == id {
+			return family, true
+		}
+	}
+	return model.PathFamily{}, false
+}
+
+func findPolicy(state model.NetworkState, id string) (model.Policy, bool) {
+	for _, policy := range state.Policies {
+		if policy.ID == id {
+			return policy, true
+		}
+	}
+	return model.Policy{}, false
 }
 
 func findSetupKeyByToken(state model.NetworkState, token string) *model.SetupKey {
@@ -2302,7 +3121,7 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 	if len(snapshot.Committee) != params.Size {
 		return ErrInvalidQC
 	}
-	if !config.Equal(snapshot.State.CommitteeConfig) {
+	if err := validateSnapshotCommitteeTransition(snapshot, config); err != nil {
 		return ErrInvalidQC
 	}
 	if len(config.GroupPublicKey) == 0 || !bls.ValidG2Point(config.GroupPublicKey) {
@@ -2366,7 +3185,7 @@ func ValidateClientSnapshot(snapshot model.SignedSnapshot) error {
 	if len(snapshot.Committee) != params.Size {
 		return ErrInvalidQC
 	}
-	if !config.Equal(snapshot.State.CommitteeConfig) {
+	if err := validateSnapshotCommitteeTransition(snapshot, config); err != nil {
 		return ErrInvalidQC
 	}
 	if len(config.GroupPublicKey) == 0 || !bls.ValidG2Point(config.GroupPublicKey) {
@@ -2411,6 +3230,60 @@ func ValidateClientSnapshot(snapshot model.SignedSnapshot) error {
 
 // leaderIDFor mirrors Engine.Leader for a committee snapshot, so a client can
 // check a certified snapshot's leader without holding committee state.
+func validateSnapshotCommitteeTransition(snapshot model.SignedSnapshot, signingConfig model.CommitteeConfig) error {
+	switch snapshot.Transition.Type {
+	case TransitionRotateCommittee, TransitionActivateCommittee:
+		nextConfig := snapshot.State.CommitteeConfig
+		if snapshot.Transition.CommitteeConfig == nil {
+			return fmt.Errorf("committee transition is missing its config")
+		}
+		nextParams, err := model.CommitteeParamsFromConfig(nextConfig)
+		if err != nil {
+			return err
+		}
+		if nextConfig.CommitteeEpoch != signingConfig.CommitteeEpoch+1 {
+			return fmt.Errorf("next committee epoch must advance by one")
+		}
+		if len(nextConfig.GroupPublicKey) == 0 || !bls.ValidG2Point(nextConfig.GroupPublicKey) {
+			return fmt.Errorf("next committee group key is invalid")
+		}
+		if !bytes.Equal(snapshot.Transition.CommitteeConfig.GroupPublicKey, nextConfig.GroupPublicKey) {
+			return fmt.Errorf("transition and state group keys differ")
+		}
+		if snapshot.Transition.Type == TransitionActivateCommittee {
+			if !snapshot.Transition.CommitteeConfig.Equal(nextConfig) {
+				return fmt.Errorf("activation transition and state committee configs differ")
+			}
+			if len(snapshot.Transition.Committee) != nextParams.Size {
+				return fmt.Errorf("activation committee size does not match its config")
+			}
+			if err := validateCommitteeMembers(snapshot.Transition.Committee); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		if !signingConfig.Equal(snapshot.State.CommitteeConfig) {
+			return fmt.Errorf("snapshot committee config changed without a committee transition")
+		}
+		return nil
+	}
+}
+
+func validateCommitteeMembers(committee []model.CommitteeMember) error {
+	seen := make(map[string]struct{}, len(committee))
+	for _, member := range committee {
+		if member.ID == "" || member.PeerID == "" || member.Address == "" || len(member.PublicKey) == 0 {
+			return fmt.Errorf("committee member %q is incomplete", member.ID)
+		}
+		if _, duplicate := seen[member.ID]; duplicate {
+			return fmt.Errorf("duplicate committee member %q", member.ID)
+		}
+		seen[member.ID] = struct{}{}
+	}
+	return nil
+}
+
 func leaderIDFor(committee []model.CommitteeMember, height, round uint64) string {
 	if len(committee) == 0 {
 		return ""

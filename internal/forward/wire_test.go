@@ -63,4 +63,17 @@ func TestEnvelopeWireRejectsMalformed(t *testing.T) {
 	if _, err := DecodeEnvelope(oversized); err == nil {
 		t.Fatal("oversized source length accepted")
 	}
+
+	emptyPayload := append([]byte{}, wire[:len(wire)-1]...)
+	if _, err := DecodeEnvelope(emptyPayload); !errors.Is(err, ErrMalformedEnvelope) {
+		t.Fatalf("empty payload error = %v", err)
+	}
+	tooLarge := append(append([]byte{}, wire[:len(wire)-1]...), make([]byte, MaxFrameSize+1)...)
+	if _, err := DecodeEnvelope(tooLarge); !errors.Is(err, ErrMalformedEnvelope) {
+		t.Fatalf("oversized payload error = %v", err)
+	}
+	maximum := append(append([]byte{}, wire[:len(wire)-1]...), make([]byte, MaxFrameSize)...)
+	if _, err := DecodeEnvelope(maximum); err != nil {
+		t.Fatalf("maximum payload rejected: %v", err)
+	}
 }
