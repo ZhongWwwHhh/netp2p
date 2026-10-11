@@ -145,7 +145,10 @@ func (reconciler *Reconciler) Reconcile(routes []Route) error {
 		record(reconciler.remove(current[destination]))
 	}
 
-	if len(desired) == 0 {
+	reconciler.mu.Lock()
+	managedState := len(current) > 0 || reconciler.chains
+	reconciler.mu.Unlock()
+	if len(desired) == 0 && managedState {
 		record(reconciler.removeChains())
 		reconciler.mu.Lock()
 		reconciler.chains = false
