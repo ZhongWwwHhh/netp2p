@@ -37,6 +37,11 @@ type ownerBootstrapRequest struct {
 	Password string `json:"password"`
 }
 
+type credentialsRequest struct {
+	Email    *string `json:"email,omitempty"`
+	Password *string `json:"password,omitempty"`
+}
+
 func (server *Server) handlePublicAuth(writer http.ResponseWriter, request *http.Request) bool {
 	path := strings.TrimSuffix(request.URL.Path, "/")
 	switch {
@@ -173,6 +178,81 @@ func (server *Server) handleLogout(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, map[string]string{"status": "signed out"})
 }
 
+func (server *Server) handleUserCredentials(writer http.ResponseWriter, request *http.Request, targetID string, identity auth.Identity) {
+	if targetID == "" {
+		writeError(writer, http.StatusNotFound, "not found")
+		return
+	}
+	target, found := server.findUserByID(targetID)
+	if !found {
+		writeError(writer, http.StatusNotFound, "user not found")
+		return
+	}
+	if identity.UserID != target.ID && !identity.Allows(auth.ModuleUsers, auth.OpUpdate) {
+		writeError(writer, http.StatusForbidden, "forbidden")
+		return
+	}
+	if target.Role == model.RoleOwner && identity.Role != model.RoleOwner {
+		writeError(writer, http.StatusForbidden, "only an owner may modify owner credentials")
+		return
+	}
+	var body credentialsRequest
+	if !server.decodeAuthBody(writer, request, &body) {
+		return
+	}
+	if body.Email == nil && body.Password == nil {
+		writeError(writer, http.StatusBadRequest, "email or password is required")
+		return
+	}
+	update := model.User{ID: target.ID}
+	if body.Email != nil {
+		email := normalizeEmail(*body.Email)
+		if email == "" {
+			writeError(writer, http.StatusBadRequest, "email must not be empty")
+			return
+		}
+		parsed, err := mail.ParseAddress(email)
+		if err != nil || strings.ToLower(parsed.Address) != email {
+			writeError(writer, http.StatusBadRequest, "invalid email")
+			return
+		}
+		if existing, exists := server.findUserByEmail(email); exists && existing.ID != target.ID {
+			writeError(writer, http.StatusConflict, "email already registered")
+			return
+		}
+		update.Email = email
+	}
+	if body.Password != nil && len(*body.Password) < 12 {
+		writeError(writer, http.StatusBadRequest, "a password of at least 12 characters is required")
+		return
+	}
+	if body.Password != nil {
+		update.PasswordVerifier = model.HashPassword(*body.Password)
+	} else {
+		// Email-only changes keep the existing password and its verifier
+		// intact, as required by the certified transition.
+		update.PasswordVerifier = target.PasswordVerifier
+	}
+	update.CredentialsChangedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	transition := model.StateTransition{
+		Type: bft.TransitionUpdateUserCredentials, TargetID: target.ID, User: &update,
+	}
+	_, err := server.accounts.SubmitAs(transition, auth.ActorOf(identity))
+	if err != nil {
+		if !server.recordAuthEvent(writer, target.ID, target.Email, "update_credentials", "failed", request) {
+			return
+		}
+		writeError(writer, http.StatusConflict, err.Error())
+		return
+	}
+	if !server.recordAuthEvent(writer, target.ID, update.Email, "update_credentials", "success", request) {
+		return
+	}
+	server.clearSessionCookie(writer)
+	updated, _ := server.findUserByID(target.ID)
+	writeJSON(writer, http.StatusOK, publicUsers([]model.User{updated})[0])
+}
+
 func (server *Server) handleOwnerBootstrap(writer http.ResponseWriter, request *http.Request) {
 	if !server.needsOwner() {
 		writeError(writer, http.StatusConflict, "owner already exists")
@@ -301,6 +381,15 @@ func (server *Server) hasGroup(id string) bool {
 func (server *Server) findUserByEmail(email string) (model.User, bool) {
 	for _, user := range server.accounts.Users() {
 		if normalizeEmail(user.Email) == email {
+			return user, true
+		}
+	}
+	return model.User{}, false
+}
+
+func (server *Server) findUserByID(id string) (model.User, bool) {
+	for _, user := range server.accounts.Users() {
+		if user.ID == id {
 			return user, true
 		}
 	}

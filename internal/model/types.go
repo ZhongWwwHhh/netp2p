@@ -270,6 +270,9 @@ type User struct {
 	Issued           string   `json:"issued,omitempty"`
 	LastLogin        string   `json:"lastLogin,omitempty"`
 	PasswordVerifier []byte   `json:"passwordVerifier,omitempty"`
+	// CredentialsChangedAt is the RFC3339 time of the last certified email or
+	// password change. Sessions issued before it are rejected by every manager.
+	CredentialsChangedAt string `json:"credentialsChangedAt,omitempty"`
 }
 
 // HashPassword returns a PHC-style Argon2id verifier with a random salt.

@@ -2,6 +2,7 @@ package bft
 
 import (
 	"testing"
+	"time"
 
 	"github.com/netp2p/netp2p/internal/model"
 )
@@ -128,6 +129,67 @@ func TestUserRoleAndOwnerInvariants(t *testing.T) {
 	})
 	if state.Users[0].Role != model.RoleAdmin {
 		t.Fatalf("role = %q", state.Users[0].Role)
+	}
+}
+
+func TestUpdateUserCredentials(t *testing.T) {
+	state := baseUserState()
+	apply(t, &state, model.StateTransition{
+		Type: TransitionRegisterUser,
+		User: &model.User{ID: "user-1", Email: "user@example.com", Role: model.RoleUser},
+	})
+	verifier := model.HashPassword("correct horse battery")
+	apply(t, &state, model.StateTransition{
+		Type:     TransitionUpdateUserCredentials,
+		TargetID: "user-1",
+		User:     &model.User{Email: " New@Example.Com ", PasswordVerifier: verifier, CredentialsChangedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+	})
+	user := state.Users[0]
+	if user.Email != "new@example.com" || user.Role != model.RoleUser || user.PasswordVerifier == nil {
+		t.Fatalf("user = %+v", user)
+	}
+	if user.CredentialsChangedAt == "" {
+		t.Fatal("credentialsChangedAt was not recorded")
+	}
+
+	err := ApplyTransition(&state, model.StateTransition{
+		Type:     TransitionUpdateUserCredentials,
+		TargetID: "user-1",
+		User:     &model.User{Role: model.RoleAdmin, PasswordVerifier: verifier, CredentialsChangedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+	})
+	if err == nil {
+		t.Fatal("credential update must not change role")
+	}
+	err = ApplyTransition(&state, model.StateTransition{
+		Type:     TransitionUpdateUserCredentials,
+		TargetID: "missing",
+		User:     &model.User{PasswordVerifier: verifier, CredentialsChangedAt: time.Now().UTC().Format(time.RFC3339Nano)},
+	})
+	if err == nil {
+		t.Fatal("unknown user was accepted")
+	}
+}
+
+func TestUpdateOwnerCredentialsRequiresOwnerActor(t *testing.T) {
+	state := baseUserState()
+	apply(t, &state, model.StateTransition{
+		Type: TransitionRegisterUser,
+		User: &model.User{ID: "owner-1", Email: "owner@example.com", Role: model.RoleOwner},
+	})
+	update := model.StateTransition{
+		Type:     TransitionUpdateUserCredentials,
+		TargetID: "owner-1",
+		User:     &model.User{PasswordVerifier: model.HashPassword("correct horse battery")},
+		Actor:    &model.Actor{ID: "admin-1", Role: model.RoleAdmin},
+	}
+	if err := ApplyTransition(&state, update); err == nil {
+		t.Fatal("an admin must not modify owner credentials")
+	}
+	update.User.CredentialsChangedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	update.Actor = &model.Actor{ID: "owner-1", Role: model.RoleOwner}
+	apply(t, &state, update)
+	if state.Users[0].Role != model.RoleOwner || state.Users[0].PasswordVerifier == nil {
+		t.Fatalf("owner = %+v", state.Users[0])
 	}
 }
 

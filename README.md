@@ -1,82 +1,45 @@
 # NetP2P
 
-基于 `github.com/libp2p/go-libp2p` 的去中心化、可管理 overlay 网络。项目借鉴 NetBird 的
-group/policy/route/network map 管理模型，但协议从头设计，**不使用 WireGuard**，也不兼容
-NetBird Management API。
+NetP2P is a decentralized overlay network with a 3-node BFT management committee, libp2p transport, certified network state, policy-based access, routes, DNS, quotas, and client packages for Linux and Windows.
 
-## 核心能力
+## Production entry points
 
-- **完全去中心化 manager**：3 节点 BFT committee（HotStuff-lite，`n=3, f=0`），
-  proposal → Ed25519 vote → `2f+1` QC → commit，client 验证 certified snapshot。
-- **libp2p 数据面**：身份、multiaddr、swarm、QUIC、NAT 穿透、relay 均由 libp2p 提供；
-  加密由 libp2p secure channel 承担。
-- **智能选路（规划中）**：按 RTT/丢包/抖动/带宽/成本为 flow 评分，而非简单 relay 兜底。
-- **流量配额（规划中）**：committee 维护权威 quota，peer/relay 上报聚合用量。
+- Primary WebUI: <https://console.netp2p.example:9443/>
+- Direct WebUIs: [fr](https://manager-1.netp2p.example:9443/), [sg](https://manager-2.netp2p.example:9443/), [us-phx](https://manager-3.netp2p.example:9443/)
 
-## 当前状态
+Use the primary name for normal access. A direct name is useful when diagnosing one manager. Sign in with an owner/administrator account; passwords are never stored in this repository.
 
-可运行的最小闭环：3 manager 完成 genesis，client 用 setup key 注册并获得 overlay IP 与
-certified snapshot，由 certified state 驱动的 policy 允许/拒绝 overlay ICMP 转发。数据面通过
-用户态 UDP packet endpoint 接入，**不依赖 TUN**。
-- Web 控制台：每个 manager 内嵌 Svelte 控制台；普通 HTTP 只提供页面和 libp2p/WebRTC
-  bootstrap，管理 API 跑在 `/netp2p/web-api/1.0.0` 的 libp2p HTTP 上。
+## Documentation
 
-- 架构：`docs/architecture.md`
-- 运维与部署：`docs/OPERATIONS.md`
-- NetBird 调研：`docs/netbird-research.md`
-- 路线图：`docs/roadmap.md`
-- 测试与运行：`docs/testing.md`
+Start at the [documentation map](docs/index.md).
 
-## 快速开始
+| Task | Document |
+| --- | --- |
+| Install and join | [Quickstart](docs/quickstart.md) |
+| Manage the network | [Web console](docs/console.md) |
+| Run the production committee | [Production](docs/production.md) |
+| Health, metrics, logs, backup | [Operations](docs/operations.md) |
+| Security model | [Security](docs/security.md) |
+| Linux client | [Linux](docs/clients/linux.md) |
+| Windows client | [Windows](docs/clients/windows.md) |
+| REST contract | [API](docs/api.md) and [OpenAPI](api/openapi.yaml) |
+| Troubleshooting | [Troubleshooting](docs/troubleshooting.md) |
+| Release process | [Release](docs/release.md) |
+| Test matrix | [Testing](docs/testing.md) |
 
-```bash
-make ui              # 构建 Svelte 控制台到 Go embed 目录（internal/web/dist 已入库）
-make build           # 构建内嵌 UI 的 Go binary
-make test            # 前端测试 + 单元 + 进程内 E2E
-scripts/e2e.sh       # Docker E2E（4 manager + 2 client，无 TUN）
-```
+## Development
 
-`internal/web/dist` 的构建产物已入库，因此不加 `make ui` 直接 `go build ./...`
-也能嵌入可用的控制台；改动前端后用 `make ui` 刷新并按需提交。
-
-启动 manager 后访问：
+Requirements are declared in `go.mod`, `ui/package.json`, and workflow files. Common commands:
 
 ```bash
-netp2pd --role manager --config deploy/state.json \
-  --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
-  --web-listen 0.0.0.0:8080
+make test         # UI tests, Go tests, race tests, vet
+make ui           # build the embedded web console
+make build        # build netp2pd and netp2p
+scripts/e2e.sh    # container userspace E2E; add --with-tun for kernel networking
 ```
 
-`http://127.0.0.1:8080` 会返回控制台和 `/api/bootstrap`。浏览器随后用 js-libp2p
-WebRTC 直连 manager，再通过 `@libp2p/http` 调用管理 API。
+`make release` builds Linux DEB/RPM/tarball, Windows MSI, checksums, and a CycloneDX SBOM. Tagged releases also publish manager and Caddy images to GHCR with digest files. See [Release](docs/release.md).
 
-## Release artifacts
+## Protocol status
 
-Tag releases build the Linux packages, tarball, Windows MSI, CycloneDX SBOM,
-`ghcr.io/zhongwwwhhh/netp2p-manager:$VERSION`, and
-`ghcr.io/zhongwwwhhh/netp2p-caddy:$VERSION` with the Cloudflare DNS module. The
-release publishes `netp2p-$VERSION-image-digest.txt` and
-`netp2p-caddy-$VERSION-image-digest.txt`; copy each `sha256:...` value into the
-matching Ansible digest variable. Digests can also be checked with:
-
-```bash
-docker buildx imagetools inspect ghcr.io/zhongwwwhhh/netp2p-manager:$VERSION \
-  --format '{{.Manifest.Digest}}'
-docker buildx imagetools inspect ghcr.io/zhongwwwhhh/netp2p-caddy:$VERSION \
-  --format '{{.Manifest.Digest}}'
-```
-
-When GHCR is unavailable, use a reachable local registry and record the digest
-only after a real push:
-
-```bash
-REGISTRY=127.0.0.1:5000
-docker build -t "$REGISTRY/netp2p-manager:$VERSION" .
-docker push "$REGISTRY/netp2p-manager:$VERSION"
-docker buildx imagetools inspect "$REGISTRY/netp2p-manager:$VERSION" \
-  --format '{{.Manifest.Digest}}'
-```
-
-`docker save`/`docker load` can transfer images without a registry, but the
-resulting image ID must be recorded as an image ID, not as a registry manifest
-digest. Do not use it to construct an `image@sha256:...` pin.
+The client/manager wire protocol is `3.0.0`; breaking protocol changes require coordinated manager and client upgrades. The REST API is still evolving: resource-level CRUD is marked as planned in [API](docs/api.md), while certified snapshot reads, generic authenticated transitions, and owner credential updates are implemented.

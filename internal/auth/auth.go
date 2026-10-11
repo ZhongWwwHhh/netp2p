@@ -289,7 +289,7 @@ func TransitionPermission(transitionType string) (Module, Operation, bool) {
 		return ModuleSettings, OpUpdate, true
 	case bft.TransitionRegisterUser:
 		return ModuleUsers, OpCreate, true
-	case bft.TransitionUpdateUserGroups, bft.TransitionUpdateUserRole, bft.TransitionSetUserBlocked:
+	case bft.TransitionUpdateUserGroups, bft.TransitionUpdateUserRole, bft.TransitionUpdateUserCredentials, bft.TransitionSetUserBlocked:
 		return ModuleUsers, OpUpdate, true
 	case bft.TransitionRemoveUser:
 		return ModuleUsers, OpDelete, true

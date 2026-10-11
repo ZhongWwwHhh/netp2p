@@ -243,6 +243,9 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"users": publicUsers(server.accounts.Users())})
+	case request.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/users/") && strings.HasSuffix(path, "/credentials"):
+		targetID := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/users/"), "/credentials")
+		server.handleUserCredentials(writer, request, targetID, identity)
 	case request.Method == http.MethodGet && path == "/api/v1/auth/events":
 		if !identity.Allows(auth.ModuleEvents, auth.OpRead) {
 			writeError(writer, http.StatusForbidden, "forbidden")
@@ -799,9 +802,16 @@ func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) 
 		if err != nil {
 			return auth.Identity{}, false
 		}
+		issuedAt, err := server.sessions.IssuedAt(token)
+		if err != nil {
+			return auth.Identity{}, false
+		}
 		for _, user := range server.accounts.Users() {
 			if user.ID != identity.UserID || user.Blocked {
 				continue
+			}
+			if changedAt, parseErr := time.Parse(time.RFC3339Nano, user.CredentialsChangedAt); parseErr == nil && issuedAt.Before(changedAt) {
+				return auth.Identity{}, false
 			}
 			identity.Email = user.Email
 			identity.Name = user.Name

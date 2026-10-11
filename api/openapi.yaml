@@ -1,0 +1,518 @@
+openapi: 3.0.3
+info:
+  title: NetP2P Management API
+  version: 0.3.0-draft
+  description: |
+    Contract for the NetP2P manager REST API. Paths with `x-status: planned`
+    do not exist in the current implementation and are reserved for v0.3.0.
+    The wire protocol is 3.0.0.
+  license:
+    name: Apache-2.0
+servers:
+  - url: https://console.netp2p.example:9443
+    description: Primary production round-robin endpoint
+  - url: https://manager-1.netp2p.example:9443
+    description: France direct manager
+  - url: https://manager-2.netp2p.example:9443
+    description: Singapore direct manager
+  - url: https://manager-3.netp2p.example:9443
+    description: US Phoenix direct manager
+tags:
+  - name: Bootstrap
+  - name: Auth
+  - name: Snapshot
+  - name: Users
+  - name: Setup Keys
+  - name: Transitions
+  - name: Operations
+security:
+  - sessionCookie: []
+  - bearerSession: []
+  - adminToken: []
+paths:
+  /healthz:
+    get:
+      tags: [Operations]
+      summary: Process liveness
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, example: ok }
+  /readyz:
+    get:
+      tags: [Operations]
+      summary: Committee and ledger readiness
+      security: []
+      responses:
+        "200":
+          description: Ready
+        "503":
+          description: Not ready; body includes readiness details
+  /api/bootstrap:
+    get:
+      tags: [Bootstrap]
+      summary: Browser and client bootstrap metadata
+      security: []
+      responses:
+        "200":
+          description: Manager bootstrap information
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Bootstrap" }
+  /api/v1/bootstrap/status:
+    get:
+      tags: [Bootstrap]
+      summary: Owner bootstrap state
+      security: []
+      responses:
+        "200":
+          description: Owner and local-login state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BootstrapStatus" }
+  /api/v1/bootstrap/owner:
+    post:
+      tags: [Bootstrap]
+      summary: Create the first owner
+      description: Returns 409 once an owner exists.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OwnerBootstrapRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/auth/status:
+    get:
+      tags: [Auth]
+      summary: Authentication availability and owner state
+      security: []
+      responses:
+        "200":
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BootstrapStatus" }
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Local email/password login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Clear browser session
+      security: []
+      responses:
+        "200":
+          description: Signed out
+  /api/v1/auth/session:
+    get:
+      tags: [Auth]
+      summary: Resolve the current session
+      responses:
+        "200": { $ref: "#/components/responses/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/session:
+    get:
+      tags: [Auth]
+      summary: Identity and permissions
+      responses:
+        "200":
+          description: Session identity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionView" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/snapshot:
+    get:
+      tags: [Snapshot]
+      summary: Latest or historical certified snapshot
+      parameters:
+        - in: query
+          name: height
+          schema: { type: integer, format: int64, minimum: 0 }
+      responses:
+        "200":
+          description: Certified snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignedSnapshot" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { $ref: "#/components/responses/ServiceUnavailable" }
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: List redacted users
+      responses:
+        "200":
+          description: Certified users without password verifiers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/users/{id}/credentials:
+    post:
+      tags: [Users]
+      summary: Update user email or password
+      description: |
+        Implemented in the current working tree and expected in v0.3.0. The
+        server derives the actor, protects owner records, stores an Argon2id
+        verifier, records credentialsChangedAt, and rejects older sessions.
+        At least one of email and password is required; each may be changed
+        independently.
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CredentialUpdate" }
+      responses:
+        "200":
+          description: Updated public user record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/setup-keys:
+    post:
+      tags: [Setup Keys]
+      summary: Create a setup key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetupKeyCreateRequest" }
+      responses:
+        "200":
+          description: One-time token and certified snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, snapshot]
+                properties:
+                  token: { type: string }
+                  snapshot: { $ref: "#/components/schemas/SignedSnapshot" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/transitions:
+    post:
+      tags: [Transitions]
+      summary: Submit an authenticated BFT transition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransitionRequest" }
+      responses:
+        "200":
+          description: New certified snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignedSnapshot" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/v1/presence:
+    get:
+      tags: [Operations]
+      summary: Client presence observations
+      responses:
+        "200": { description: Presence observations }
+  /api/v1/activity:
+    get:
+      tags: [Operations]
+      summary: Recent certified activity
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 500 } }
+        - { in: query, name: before, schema: { type: integer, format: int64, minimum: 0 } }
+      responses:
+        "200": { description: Activity entries }
+  /api/v1/events:
+    get:
+      tags: [Operations]
+      summary: Certified decision/audit events
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { in: query, name: before, schema: { type: integer, format: int64, minimum: 0 } }
+        - { in: query, name: type, schema: { type: string } }
+        - { in: query, name: actor, schema: { type: string } }
+      responses:
+        "200": { description: Audit events }
+  /api/v1/auth/events:
+    get:
+      tags: [Operations]
+      summary: Authentication audit events
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses:
+        "200": { description: Authentication events }
+  /api/v1/diagnostics:
+    get:
+      tags: [Operations]
+      summary: Operational diagnostics
+      responses:
+        "200": { description: Diagnostics object }
+  /api/v1/committee/status:
+    get:
+      tags: [Operations]
+      summary: Local committee connectivity and height view
+      responses:
+        "200": { description: Committee status }
+  /api/v1/link-view:
+    get:
+      tags: [Operations]
+      summary: Link view
+      responses:
+        "200": { description: Link segments }
+  /api/v1/assignments:
+    get:
+      tags: [Operations]
+      summary: Certified assignments and admissions
+      responses:
+        "200": { description: Assignments }
+  /api/v1/quota:
+    get:
+      tags: [Operations]
+      summary: Current quota usage
+      responses:
+        "200": { description: Quota usage }
+  /api/v1/quota/history:
+    get:
+      tags: [Operations]
+      summary: Quota history
+      parameters:
+        - in: query
+          name: period
+          schema: { type: string, enum: [daily, monthly], default: daily }
+      responses:
+        "200": { description: Quota history entries }
+  /api/v1/alerts:
+    get:
+      tags: [Operations]
+      summary: Active alerts
+      responses:
+        "200": { description: Alerts }
+  /api/v1/schema:
+    get:
+      tags: [Operations]
+      summary: WebAPI protocol identifier
+      responses:
+        "200": { description: Protocol schema name }
+  /api/v1/peers:
+    get: { tags: [Operations], x-status: planned, summary: List peers, responses: { "200": { description: Planned } } }
+  /api/v1/groups:
+    get: { tags: [Operations], x-status: planned, summary: List groups, responses: { "200": { description: Planned } } }
+  /api/v1/policies:
+    get: { tags: [Operations], x-status: planned, summary: List policies, responses: { "200": { description: Planned } } }
+  /api/v1/routes:
+    get: { tags: [Operations], x-status: planned, summary: List routes, responses: { "200": { description: Planned } } }
+  /api/v1/resources:
+    get: { tags: [Operations], x-status: planned, summary: List routing resources, responses: { "200": { description: Planned } } }
+  /api/v1/dns:
+    get: { tags: [Operations], x-status: planned, summary: DNS configuration, responses: { "200": { description: Planned } } }
+  /api/v1/tokens:
+    get: { tags: [Operations], x-status: planned, summary: List service-user PAT metadata, responses: { "200": { description: Planned } } }
+  /api/v1/settings:
+    get: { tags: [Operations], x-status: planned, summary: Get certified network settings, responses: { "200": { description: Planned } } }
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: netp2p_session
+    bearerSession:
+      type: http
+      scheme: bearer
+    adminToken:
+      type: http
+      scheme: bearer
+      description: Break-glass shared manager token.
+  parameters:
+    UserID:
+      in: path
+      name: id
+      required: true
+      schema: { type: string }
+  responses:
+    BadRequest:
+      description: Invalid request
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Unauthorized:
+      description: Missing or invalid credentials
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Forbidden:
+      description: Role does not permit this operation
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Not found
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Conflict:
+      description: State conflict or transition rejected
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    RateLimited:
+      description: Login lockout or rate limit
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    ServiceUnavailable:
+      description: Manager has no certified snapshot
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    BadGateway:
+      description: Certified response failed validation
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    Session:
+      description: Authenticated session; also sets a secure cookie
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SessionResponse" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Bootstrap:
+      type: object
+      description: Actual bootstrap payload from the embedded manager web server.
+      properties:
+        peerId: { type: string }
+        publicKey: { type: string }
+        webRTCAddresses: { type: array, items: { type: string } }
+        apiProtocol: { type: string }
+        apiBase: { type: string, example: /api/v1 }
+        networkId: { type: string }
+        version: { type: string }
+        protocolVersion: { type: string, example: "3.0.0" }
+        committee: { type: array, items: { type: object, additionalProperties: true } }
+        oidc: { type: object, nullable: true, additionalProperties: true }
+    BootstrapStatus:
+      type: object
+      required: [needsOwner, localLogin]
+      properties:
+        needsOwner: { type: boolean }
+        localLogin: { type: boolean }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+    OwnerBootstrapRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+        password: { type: string, format: password, minLength: 12 }
+    Identity:
+      type: object
+      required: [role]
+      properties:
+        subject: { type: string }
+        userId: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string }
+        static: { type: boolean }
+    Permissions:
+      type: object
+      description: Map of module to allowed operations.
+      additionalProperties:
+        type: array
+        items: { type: string, enum: [create, read, update, delete] }
+    SessionResponse:
+      type: object
+      required: [identity, permissions]
+      properties:
+        identity: { $ref: "#/components/schemas/Identity" }
+        permissions: { $ref: "#/components/schemas/Permissions" }
+        sessionToken: { type: string, writeOnly: true }
+        expiresAt: { type: string, format: date-time }
+    SessionView:
+      type: object
+      required: [identity, permissions]
+      properties:
+        identity: { $ref: "#/components/schemas/Identity" }
+        permissions: { $ref: "#/components/schemas/Permissions" }
+    User:
+      type: object
+      required: [id, role]
+      properties:
+        id: { type: string }
+        email: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [owner, admin, network_admin, auditor, usage_viewer, user] }
+        autoGroups: { type: array, items: { type: string } }
+        groups: { type: array, items: { type: string } }
+        issued: { type: string }
+        blocked: { type: boolean }
+        lastLogin: { type: string }
+    CredentialUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        email: { type: string, format: email }
+        password:
+          type: string
+          format: password
+          minLength: 12
+          description: Optional password-only or combined email/password update.
+    SetupKeyCreateRequest:
+      type: object
+      description: Name, type, groups, and expiry fields accepted by the current server.
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [one-off, reusable] }
+        groups: { type: array, items: { type: string } }
+        expiresAt: { type: string }
+    TransitionRequest:
+      type: object
+      required: [transition]
+      properties:
+        transition:
+          type: object
+          required: [type]
+          properties:
+            type: { type: string }
+          additionalProperties: true
+    SignedSnapshot:
+      type: object
+      description: Certified BFT snapshot. Exact protobuf-derived fields are pinned by protocol 3.0.0.
+      properties:
+        networkId: { type: string }
+        height: { type: integer, format: int64 }
+        stateHash: { type: string }
+        transitionHash: { type: string }
+        committeeEpoch: { type: integer, format: int64 }
+        state: { type: object, additionalProperties: true }
+        qc: { type: object, additionalProperties: true }

@@ -6,7 +6,7 @@
   import FilterBar from '../components/FilterBar.svelte';
   import FormField from '../components/FormField.svelte';
   import PageHeader from '../components/PageHeader.svelte';
-  import { network, submit } from '../stores/network.svelte';
+  import { network, refresh, submit } from '../stores/network.svelte';
   import { can, session } from '../stores/session.svelte';
   import { notify } from '../stores/toast.svelte';
   import type { User } from '../types';
@@ -15,8 +15,11 @@
 
   let query = $state('');
   let editing = $state<User | null>(null);
+  let credentialing = $state<User | null>(null);
   let pendingDelete = $state<User | null>(null);
   let busy = $state(false);
+  let credentialEmail = $state('');
+  let credentialPassword = $state('');
 
   const users = $derived(network.snapshot?.state.users ?? []);
   const filtered = $derived(
@@ -69,6 +72,29 @@
       notify(network.error || 'commit failed', 'error');
     }
   }
+
+  async function saveCredentials() {
+    if (!credentialing || !session.client) return;
+    if (credentialPassword.length < 12) {
+      notify('Password must contain at least 12 characters', 'error');
+      return;
+    }
+    busy = true;
+    try {
+      const input: { email?: string; password?: string } = { password: credentialPassword };
+      if (credentialEmail.trim()) input.email = credentialEmail.trim().toLowerCase();
+      await session.client.updateCredentials(credentialing.id, input);
+      await refresh();
+      notify(`Credentials for ${credentialing.id} committed`);
+      credentialing = null;
+      credentialEmail = '';
+      credentialPassword = '';
+    } catch (caught) {
+      notify(caught instanceof Error ? caught.message : String(caught), 'error');
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <div class="space-y-5">
@@ -108,6 +134,9 @@
           <div class="flex justify-end gap-1">
             {#if canUpdate}
               <button class="btn-ghost" onclick={() => (editing = { ...user })}>Role</button>
+              {#if user.role !== 'owner' && user.id !== session.identity?.userId}
+                <button class="btn-ghost" onclick={() => (credentialing = { ...user })}>Credentials</button>
+              {/if}
               <button class="btn-ghost" onclick={() => toggleBlocked(user)}>{user.blocked ? 'Unblock' : 'Block'}</button>
             {/if}
             {#if canDelete}
@@ -133,6 +162,23 @@
   {#snippet footer()}
     <button class="btn-secondary" onclick={() => (editing = null)} disabled={busy}>Cancel</button>
     <button class="btn-primary" onclick={saveRole} disabled={busy}>{busy ? 'Committing…' : 'Save'}</button>
+  {/snippet}
+</Drawer>
+
+<Drawer open={credentialing !== null} title={credentialing ? `Credentials for ${credentialing.id}` : 'Credentials'} onClose={() => (credentialing = null)}>
+  {#if credentialing}
+    <div class="space-y-4">
+      <FormField label="New email" hint="Leave blank to keep the current email.">
+        <input class="input" type="email" autocomplete="off" bind:value={credentialEmail} />
+      </FormField>
+      <FormField label="New password" hint="At least 12 characters. The verifier is stored; the password is never retained.">
+        <input class="input" type="password" autocomplete="new-password" bind:value={credentialPassword} required minlength="12" />
+      </FormField>
+    </div>
+  {/if}
+  {#snippet footer()}
+    <button class="btn-secondary" onclick={() => (credentialing = null)} disabled={busy}>Cancel</button>
+    <button class="btn-primary" onclick={saveCredentials} disabled={busy}>{busy ? 'Committing…' : 'Save'}</button>
   {/snippet}
 </Drawer>
 

@@ -51,6 +51,26 @@ func (fake *fakeAccountDirectory) SubmitAs(
 	if transition.User != nil {
 		fake.users = append(fake.users, *transition.User)
 	}
+	if transition.Type == "update_user_credentials" {
+		targetID := transition.TargetID
+		if targetID == "" && transition.User != nil {
+			targetID = transition.User.ID
+		}
+		for index := range fake.users {
+			if fake.users[index].ID != targetID {
+				continue
+			}
+			if transition.User.Email != "" {
+				fake.users[index].Email = transition.User.Email
+			}
+			if transition.User.PasswordVerifier != nil {
+				fake.users[index].PasswordVerifier = transition.User.PasswordVerifier
+			}
+			if transition.User.Email != "" || transition.User.PasswordVerifier != nil {
+				fake.users[index].CredentialsChangedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			}
+		}
+	}
 	if transition.Record != nil {
 		record := *transition.Record
 		record.Token = ""
@@ -445,5 +465,94 @@ func TestUsersEndpointDoesNotReturnPasswordVerifier(t *testing.T) {
 		if strings.Contains(recorder.Body.String(), forbidden) {
 			t.Fatalf("users response leaked %q: %s", forbidden, recorder.Body.String())
 		}
+	}
+}
+
+func TestUserCredentialsLifecycle(t *testing.T) {
+	server, accounts, _ := newLocalAuthTestServer(t)
+	accounts.users = []model.User{{
+		ID: "owner-1", Email: "owner@example.com", Role: model.RoleOwner,
+		PasswordVerifier: model.HashPassword("original password"),
+	}}
+	loginBody := bytes.NewBufferString(`{"email":"owner@example.com","password":"original password"}`)
+	loginRecorder := httptest.NewRecorder()
+	server.handleAPI(loginRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", loginBody))
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("login status = %d body %q", loginRecorder.Code, loginRecorder.Body.String())
+	}
+	var login struct {
+		SessionToken string `json:"sessionToken"`
+	}
+	if err := json.Unmarshal(loginRecorder.Body.Bytes(), &login); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/users/owner-1/credentials",
+		bytes.NewBufferString(`{"password":"correct horse battery"}`))
+	request.Header.Set("Authorization", "Bearer "+login.SessionToken)
+	recorder := httptest.NewRecorder()
+	server.handleAPI(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("credential status = %d body %q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "correct horse battery") || strings.Contains(body, "passwordVerifier") || strings.Contains(body, "argon2id") {
+		t.Fatalf("credential response leaked secrets: %s", body)
+	}
+	if !model.VerifyPassword("correct horse battery", accounts.users[0].PasswordVerifier) {
+		t.Fatal("certified verifier was not updated")
+	}
+
+	oldRequest := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
+	oldRequest.Header.Set("Authorization", "Bearer "+login.SessionToken)
+	if _, ok := server.authenticate(oldRequest); ok {
+		t.Fatal("session issued before credential change remained valid")
+	}
+
+	oldLogin := bytes.NewBufferString(`{"email":"owner@example.com","password":"original password"}`)
+	oldRecorder := httptest.NewRecorder()
+	server.handleAPI(oldRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", oldLogin))
+	if oldRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("old password status = %d", oldRecorder.Code)
+	}
+	newLogin := bytes.NewBufferString(`{"email":"owner@example.com","password":"correct horse battery"}`)
+	newRecorder := httptest.NewRecorder()
+	server.handleAPI(newRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", newLogin))
+	if newRecorder.Code != http.StatusOK {
+		t.Fatalf("new password status = %d body %q", newRecorder.Code, newRecorder.Body.String())
+	}
+}
+
+func TestUserCredentialsAuthorization(t *testing.T) {
+	server, accounts, _ := newLocalAuthTestServer(t)
+	accounts.users = []model.User{
+		{ID: "owner-1", Email: "owner@example.com", Role: model.RoleOwner, PasswordVerifier: model.HashPassword("owner password 1")},
+		{ID: "admin-1", Email: "admin@example.com", Role: model.RoleAdmin, PasswordVerifier: model.HashPassword("admin password")},
+		{ID: "user-1", Email: "user@example.com", Role: model.RoleUser, PasswordVerifier: model.HashPassword("user password 1")},
+	}
+	adminToken, _, err := server.sessions.Issue(auth.Identity{UserID: "admin-1", Role: model.RoleAdmin}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/users/owner-1/credentials",
+		bytes.NewBufferString(`{"password":"correct horse battery"}`))
+	request.Header.Set("Authorization", "Bearer "+adminToken)
+	recorder := httptest.NewRecorder()
+	server.handleAPI(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("admin changing owner status = %d body %q", recorder.Code, recorder.Body.String())
+	}
+
+	userToken, _, err := server.sessions.Issue(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/users/admin-1/credentials",
+		bytes.NewBufferString(`{"password":"correct horse battery"}`))
+	request.Header.Set("Authorization", "Bearer "+userToken)
+	recorder = httptest.NewRecorder()
+	server.handleAPI(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("user changing admin status = %d body %q", recorder.Code, recorder.Body.String())
 	}
 }

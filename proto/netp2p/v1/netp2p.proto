@@ -107,6 +107,8 @@ message User {
   bool blocked = 6;
   string issued = 7;
   string last_login = 8;
+  bytes password_verifier = 9;
+  string credentials_changed_at = 10;
 }
 
 // Actor records who submitted a state transition. It is assigned by the manager

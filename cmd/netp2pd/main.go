@@ -61,6 +61,9 @@ func main() {
 	adminAction := flag.String("action", "", "admin action")
 	adminFile := flag.String("file", "", "JSON record file for upsert actions")
 	adminTarget := flag.String("target", "", "target ID for remove actions")
+	adminEmail := flag.String("email", "", "user email for update-user-credentials")
+	adminNewEmail := flag.String("new-email", "", "replacement user email for update-user-credentials")
+	adminPasswordFile := flag.String("password-file", "", "file containing the replacement password")
 	metricsListen := flag.String("metrics-listen", "", "manager or client Prometheus /metrics address")
 	otelEndpoint := flag.String("otel-endpoint", "", "OTLP/HTTP trace endpoint")
 	alertWebhook := flag.String("alert-webhook", "", "manager alert webhook URL")
@@ -168,7 +171,8 @@ func main() {
 		<-ctx.Done()
 		daemonState.stopClient()
 	case "admin":
-		if err := runAdmin(ctx, cfg.Manager, cfg.AdminToken, cfg.AdminAction, cfg.AdminFile, cfg.AdminTarget); err != nil {
+		credentials := adminCredentialOptions{email: *adminEmail, newEmail: *adminNewEmail, passwordFile: *adminPasswordFile}
+		if err := runAdmin(ctx, cfg.Manager, cfg.AdminToken, cfg.AdminAction, cfg.AdminFile, cfg.AdminTarget, credentials); err != nil {
 			log.Fatal(err)
 		}
 	case "seedgen":

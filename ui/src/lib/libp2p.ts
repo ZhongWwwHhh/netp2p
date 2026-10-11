@@ -75,6 +75,11 @@ export async function apiClient(bootstrap: Bootstrap) {
       session: () => request('/api/v1/session') as Promise<SessionInfo>,
       users: () => request('/api/v1/users').then((body) =>
         ((body as { users?: User[] } | null)?.users ?? [])),
+      updateCredentials: async (userId: string, input: { email?: string; password?: string }) =>
+        request(`/api/v1/users/${encodeURIComponent(userId)}/credentials`, {
+          method: 'POST',
+          body: JSON.stringify(input),
+        }) as Promise<User>,
       activity: (limit = 100) => request(`/api/v1/activity?limit=${limit}`).then((body) =>
         ((body as { entries?: ActivityEntry[] } | null)?.entries ?? []).map(snapshot)),
       events: (limit = 200) => request(`/api/v1/events?limit=${limit}`).then((body) =>

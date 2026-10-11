@@ -22,6 +22,7 @@ export interface ApiClient {
   presence(): Promise<Presence[]>;
   session(): Promise<SessionInfo>;
   users(): Promise<User[]>;
+  updateCredentials(userId: string, input: { email?: string; password?: string }): Promise<User>;
   activity(limit?: number): Promise<ActivityEntry[]>;
   events(limit?: number): Promise<AuditEvent[]>;
   diagnostics(): Promise<Diagnostics>;

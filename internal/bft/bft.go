@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/netip"
 	"sort"
 	"strings"
@@ -24,39 +25,40 @@ import (
 )
 
 const (
-	CommitteeSize              = model.DefaultCommitteeSize
-	FaultLimit                 = model.DefaultFaultLimit
-	QuorumSize                 = model.DefaultQuorumSize
-	TransitionRegisterPeer     = "register_peer"
-	TransitionGenesis          = "genesis"
-	TransitionUpsertGroup      = "upsert_group"
-	TransitionRemoveGroup      = "remove_group"
-	TransitionUpsertPolicy     = "upsert_policy"
-	TransitionRemovePolicy     = "remove_policy"
-	TransitionUpsertRoute      = "upsert_route"
-	TransitionRemoveRoute      = "remove_route"
-	TransitionUpsertBudget     = "upsert_budget"
-	TransitionRemoveBudget     = "remove_budget"
-	TransitionUpsertSetupKey   = "upsert_setup_key"
-	TransitionRemoveSetupKey   = "remove_setup_key"
-	TransitionRevokeSetupKey   = "revoke_setup_key"
-	TransitionUpdatePeer       = "update_peer"
-	TransitionUpsertNS         = "upsert_nameserver"
-	TransitionRemoveNS         = "remove_nameserver"
-	TransitionUpsertZone       = "upsert_zone"
-	TransitionRemoveZone       = "remove_zone"
-	TransitionUpdateDNS        = "update_dns_settings"
-	TransitionRegisterUser     = "register_user"
-	TransitionUpdateUserGroups = "update_user_groups"
-	TransitionUpdateUserRole   = "update_user_role"
-	TransitionRemoveUser       = "remove_user"
-	TransitionSetUserBlocked   = "set_user_blocked"
-	TransitionUpdateSettings   = "update_network_settings"
-	TransitionUpdateAssignment = "update_route_assignment"
-	TransitionRemoveAssignment = "remove_route_assignment"
-	TransitionUpdateCommittee  = "update_committee"
-	TransitionRotateCommittee  = "rotate_committee_keys"
-	TransitionUpdateBudgetUse  = "update_budget_usage"
+	CommitteeSize                   = model.DefaultCommitteeSize
+	FaultLimit                      = model.DefaultFaultLimit
+	QuorumSize                      = model.DefaultQuorumSize
+	TransitionRegisterPeer          = "register_peer"
+	TransitionGenesis               = "genesis"
+	TransitionUpsertGroup           = "upsert_group"
+	TransitionRemoveGroup           = "remove_group"
+	TransitionUpsertPolicy          = "upsert_policy"
+	TransitionRemovePolicy          = "remove_policy"
+	TransitionUpsertRoute           = "upsert_route"
+	TransitionRemoveRoute           = "remove_route"
+	TransitionUpsertBudget          = "upsert_budget"
+	TransitionRemoveBudget          = "remove_budget"
+	TransitionUpsertSetupKey        = "upsert_setup_key"
+	TransitionRemoveSetupKey        = "remove_setup_key"
+	TransitionRevokeSetupKey        = "revoke_setup_key"
+	TransitionUpdatePeer            = "update_peer"
+	TransitionUpsertNS              = "upsert_nameserver"
+	TransitionRemoveNS              = "remove_nameserver"
+	TransitionUpsertZone            = "upsert_zone"
+	TransitionRemoveZone            = "remove_zone"
+	TransitionUpdateDNS             = "update_dns_settings"
+	TransitionRegisterUser          = "register_user"
+	TransitionUpdateUserGroups      = "update_user_groups"
+	TransitionUpdateUserRole        = "update_user_role"
+	TransitionUpdateUserCredentials = "update_user_credentials"
+	TransitionRemoveUser            = "remove_user"
+	TransitionSetUserBlocked        = "set_user_blocked"
+	TransitionUpdateSettings        = "update_network_settings"
+	TransitionUpdateAssignment      = "update_route_assignment"
+	TransitionRemoveAssignment      = "remove_route_assignment"
+	TransitionUpdateCommittee       = "update_committee"
+	TransitionRotateCommittee       = "rotate_committee_keys"
+	TransitionUpdateBudgetUse       = "update_budget_usage"
 )
 
 var (
@@ -1536,6 +1538,50 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 			}
 		}
 		user.Role = transition.User.Role
+		return nil
+	case TransitionUpdateUserCredentials:
+		target := transitionUserID(transition)
+		user := findUser(*state, target)
+		if user == nil {
+			return fmt.Errorf("user %q not found", target)
+		}
+		if transition.User == nil {
+			return fmt.Errorf("user credentials record is required")
+		}
+		if transition.User.Role != "" && transition.User.Role != user.Role {
+			return fmt.Errorf("credential updates cannot change role")
+		}
+		if transition.User.Blocked != user.Blocked {
+			return fmt.Errorf("credential updates cannot change blocked state")
+		}
+		if user.Role == model.RoleOwner {
+			if transition.Actor == nil || (transition.Actor.Role != model.RoleOwner && !transition.Actor.Static) {
+				return fmt.Errorf("only an owner may modify owner credentials")
+			}
+		}
+		email := strings.ToLower(strings.TrimSpace(transition.User.Email))
+		passwordVerifier := append([]byte(nil), transition.User.PasswordVerifier...)
+		if email != "" {
+			parsed, err := mail.ParseAddress(email)
+			if err != nil || strings.ToLower(parsed.Address) != email {
+				return fmt.Errorf("valid normalized email is required")
+			}
+			for _, other := range state.Users {
+				if other.ID != user.ID && other.Email == email {
+					return fmt.Errorf("email %q is already registered", email)
+				}
+			}
+			user.Email = email
+		}
+		if len(passwordVerifier) == 0 {
+			return fmt.Errorf("password verifier is required")
+		}
+		user.PasswordVerifier = passwordVerifier
+		changedAt, err := time.Parse(time.RFC3339Nano, transition.User.CredentialsChangedAt)
+		if err != nil {
+			return fmt.Errorf("valid credentialsChangedAt is required")
+		}
+		user.CredentialsChangedAt = changedAt.UTC().Format(time.RFC3339Nano)
 		return nil
 	case TransitionSetUserBlocked:
 		user := findUser(*state, transitionUserID(transition))

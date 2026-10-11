@@ -15,7 +15,13 @@ import (
 	"github.com/netp2p/netp2p/internal/p2p"
 )
 
-func runAdmin(ctx context.Context, managerAddr, token, action, file, target string) error {
+type adminCredentialOptions struct {
+	email        string
+	newEmail     string
+	passwordFile string
+}
+
+func runAdmin(ctx context.Context, managerAddr, token, action, file, target string, credentials adminCredentialOptions) error {
 	info, err := peer.AddrInfoFromString(managerAddr)
 	if err != nil {
 		return fmt.Errorf("invalid manager address: %w", err)
@@ -36,9 +42,15 @@ func runAdmin(ctx context.Context, managerAddr, token, action, file, target stri
 		fmt.Println(string(payload))
 		return nil
 	}
-	transition, err := buildTransition(action, file, target)
-	if err != nil {
-		return err
+	var transition model.StateTransition
+	var buildErr error
+	if action == "update-user-credentials" {
+		transition, buildErr = buildAdminCredentialsTransition(ctx, node, info.ID, token, target, credentials)
+	} else {
+		transition, buildErr = buildTransition(action, file, target)
+	}
+	if buildErr != nil {
+		return buildErr
 	}
 	adminCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -53,6 +65,60 @@ func runAdmin(ctx context.Context, managerAddr, token, action, file, target stri
 	}, "", "  ")
 	fmt.Println(string(encoded))
 	return nil
+}
+
+func buildAdminCredentialsTransition(
+	ctx context.Context, node *p2p.Node, managerID peer.ID, token, targetID string,
+	options adminCredentialOptions,
+) (model.StateTransition, error) {
+	transition := model.StateTransition{Type: bft.TransitionUpdateUserCredentials}
+	if targetID == "" {
+		email := strings.ToLower(strings.TrimSpace(options.email))
+		if email == "" {
+			return transition, fmt.Errorf("--email or --target is required")
+		}
+		queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		payload, err := manager.QueryAdmin(queryCtx, node, managerID, token, "snapshot")
+		if err != nil {
+			return transition, fmt.Errorf("query user directory: %w", err)
+		}
+		var snapshot model.SignedSnapshot
+		if err := json.Unmarshal(payload, &snapshot); err != nil {
+			return transition, fmt.Errorf("decode snapshot: %w", err)
+		}
+		for _, user := range snapshot.State.Users {
+			if strings.EqualFold(user.Email, email) {
+				targetID = user.ID
+				break
+			}
+		}
+		if targetID == "" {
+			return transition, fmt.Errorf("user %q not found", email)
+		}
+	}
+	update := model.User{ID: targetID}
+	if newEmail := strings.ToLower(strings.TrimSpace(options.newEmail)); newEmail != "" {
+		update.Email = newEmail
+	}
+	if options.passwordFile != "" {
+		password, err := os.ReadFile(options.passwordFile)
+		if err != nil {
+			return transition, fmt.Errorf("read password file: %w", err)
+		}
+		password = []byte(strings.TrimRight(string(password), "\r\n"))
+		if len(password) < 12 {
+			return transition, fmt.Errorf("password file must contain at least 12 characters")
+		}
+		update.PasswordVerifier = model.HashPassword(string(password))
+	}
+	if update.Email == "" && update.PasswordVerifier == nil {
+		return transition, fmt.Errorf("--new-email or --password-file is required")
+	}
+	update.CredentialsChangedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	transition.TargetID = targetID
+	transition.User = &update
+	return transition, nil
 }
 
 // adminQueries maps read-only CLI actions to admin protocol queries.

@@ -310,6 +310,7 @@ export type StateTransition = (
   | { type: 'remove_zone'; targetId: string }
   | { type: 'update_dns_settings'; dnsSettings: DNSSettings }
   | { type: 'update_user_role'; user: User }
+  | { type: 'update_user_credentials'; targetId: string; user: Partial<User> }
   | { type: 'set_user_blocked'; user: User }
   | { type: 'remove_user'; targetId: string }
   | { type: 'update_network_settings'; settings: NetworkSettings }

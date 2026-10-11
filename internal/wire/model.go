@@ -221,14 +221,16 @@ func RouteAssignmentFromProto(message *pb.RouteAssignment) model.RouteAssignment
 
 func UserToProto(user model.User) *pb.User {
 	return &pb.User{
-		Id:         user.ID,
-		Email:      user.Email,
-		Name:       user.Name,
-		Role:       user.Role,
-		AutoGroups: cloneStrings(user.AutoGroups),
-		Blocked:    user.Blocked,
-		Issued:     user.Issued,
-		LastLogin:  user.LastLogin,
+		Id:                   user.ID,
+		Email:                user.Email,
+		Name:                 user.Name,
+		Role:                 user.Role,
+		AutoGroups:           cloneStrings(user.AutoGroups),
+		Blocked:              user.Blocked,
+		Issued:               user.Issued,
+		LastLogin:            user.LastLogin,
+		PasswordVerifier:     cloneBytes(user.PasswordVerifier),
+		CredentialsChangedAt: user.CredentialsChangedAt,
 	}
 }
 
@@ -237,14 +239,16 @@ func UserFromProto(message *pb.User) model.User {
 		return model.User{}
 	}
 	return model.User{
-		ID:         message.GetId(),
-		Email:      message.GetEmail(),
-		Name:       message.GetName(),
-		Role:       message.GetRole(),
-		AutoGroups: cloneStrings(message.GetAutoGroups()),
-		Blocked:    message.GetBlocked(),
-		Issued:     message.GetIssued(),
-		LastLogin:  message.GetLastLogin(),
+		ID:                   message.GetId(),
+		Email:                message.GetEmail(),
+		Name:                 message.GetName(),
+		Role:                 message.GetRole(),
+		AutoGroups:           cloneStrings(message.GetAutoGroups()),
+		Blocked:              message.GetBlocked(),
+		Issued:               message.GetIssued(),
+		LastLogin:            message.GetLastLogin(),
+		PasswordVerifier:     cloneBytes(message.GetPasswordVerifier()),
+		CredentialsChangedAt: message.GetCredentialsChangedAt(),
 	}
 }
 

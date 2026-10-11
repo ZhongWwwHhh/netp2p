@@ -88,6 +88,30 @@ func (manager *SessionManager) Verify(token string, now time.Time) (Identity, er
 	return session.Identity, nil
 }
 
+// IssuedAt exposes the certified timestamp used by the web layer to invalidate
+// sessions issued before a target user's credentials changed.
+func (manager *SessionManager) IssuedAt(token string) (time.Time, error) {
+	if manager == nil {
+		return time.Time{}, fmt.Errorf("session manager is not configured")
+	}
+	if !strings.HasPrefix(token, LocalSessionPrefix) {
+		return time.Time{}, fmt.Errorf("invalid session token")
+	}
+	encoded, signature, ok := strings.Cut(strings.TrimPrefix(token, LocalSessionPrefix), ".")
+	if !ok || encoded == "" || signature == "" || !hmac.Equal([]byte(signature), []byte(manager.sign(encoded))) {
+		return time.Time{}, fmt.Errorf("invalid session signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("decode session: %w", err)
+	}
+	var session localSession
+	if err := json.Unmarshal(payload, &session); err != nil {
+		return time.Time{}, fmt.Errorf("decode session: %w", err)
+	}
+	return session.IssuedAt, nil
+}
+
 func (manager *SessionManager) sign(encoded string) string {
 	mac := hmac.New(sha256.New, manager.key)
 	_, _ = mac.Write([]byte(encoded))
