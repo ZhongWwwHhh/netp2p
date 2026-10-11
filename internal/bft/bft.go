@@ -913,7 +913,6 @@ func (engine *Engine) ProcessVote(vote Vote) (model.QuorumCertificate, bool, err
 	if vote.Height <= engine.height {
 		return model.QuorumCertificate{}, false, ErrStaleHeight
 	}
-	engine.expireRoundLocked(vote.Height)
 	key := proposalKey{Height: vote.Height, Round: vote.Round}
 	proposal, ok := engine.proposals[key]
 	if !ok || !bytes.Equal(StateHash(proposal.State), vote.StateHash) {

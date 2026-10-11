@@ -1088,6 +1088,55 @@ func TestCompetingTransitionsConvergeWithThreeEngines(t *testing.T) {
 	}
 }
 
+func TestProcessVoteAcceptsProposalAfterLocalDeadline(t *testing.T) {
+	engines, _ := newBFTTestEngines(t)
+	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
+	followers := make([]*Engine, 0, len(engines)-1)
+	for _, engine := range engines {
+		if engine != leader {
+			followers = append(followers, engine)
+		}
+	}
+
+	proposal, leaderVote, err := leader.Propose(model.StateTransition{
+		Type: TransitionUpsertGroup, Group: &model.Group{ID: "deadline"},
+	}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	votes := make([]Vote, 0, len(followers))
+	for _, follower := range followers {
+		vote, err := follower.ProcessProposal(proposal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		votes = append(votes, vote)
+	}
+
+	// Transport and BLS work can cross a short deadline. Deadline expiry is
+	// not itself a view change: an explicit Propose/ProcessProposal retry owns
+	// that transition, so this stored proposal remains votable.
+	leader.roundDeadline = time.Now().Add(-time.Millisecond)
+	_, ready, err := leader.ProcessVote(leaderVote)
+	if err != nil || ready {
+		t.Fatalf("leader vote after deadline: ready=%v err=%v", ready, err)
+	}
+	var qc model.QuorumCertificate
+	ready = false
+	for _, vote := range votes {
+		qc, ready, err = leader.ProcessVote(vote)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			break
+		}
+	}
+	if !ready || qc.Height != 1 || qc.Round != 0 {
+		t.Fatalf("stored proposal did not reach quorum: ready=%v qc=%+v", ready, qc)
+	}
+}
+
 func TestProcessProposalSigningFailureDoesNotMutate(t *testing.T) {
 	engines, _ := newBFTTestEngines(t)
 	leader := engineForMember(t, engines, engines[0].Leader(1, 0).ID)
