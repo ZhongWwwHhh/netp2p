@@ -9,9 +9,12 @@ package dns
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -116,16 +119,9 @@ func (resolver *Resolver) ListenAndServe() error {
 	mux := dns.NewServeMux()
 	mux.HandleFunc(".", resolver.handle)
 
-	tcpListener, err := net.Listen("tcp", resolver.listen)
+	packetConn, tcpListener, err := listenDNSPair(resolver.listen)
 	if err != nil {
-		return fmt.Errorf("listen dns tcp %s: %w", resolver.listen, err)
-	}
-	// UDP and TCP must use the same port so a truncated UDP reply can be
-	// retried by the stub resolver over TCP.
-	packetConn, err := net.ListenPacket("udp", tcpListener.Addr().String())
-	if err != nil {
-		_ = tcpListener.Close()
-		return fmt.Errorf("listen dns udp %s: %w", tcpListener.Addr().String(), err)
+		return err
 	}
 	udpServer := &dns.Server{PacketConn: packetConn, Handler: mux}
 	tcpServer := &dns.Server{Listener: tcpListener, Handler: mux}
@@ -149,6 +145,48 @@ func (resolver *Resolver) ListenAndServe() error {
 		}
 	}()
 	return nil
+}
+
+// listenDNSPair binds UDP and TCP on the same port. A zero port is selected
+// from a range outside Windows' UDP exclusions because the OS can otherwise
+// hand one protocol a port the other protocol cannot bind.
+func listenDNSPair(listen string) (net.PacketConn, net.Listener, error) {
+	host, requestedPort, err := net.SplitHostPort(listen)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen dns %s: %w", listen, err)
+	}
+	if requestedPort != "0" {
+		tcpListener, err := net.Listen("tcp", listen)
+		if err != nil {
+			return nil, nil, fmt.Errorf("listen dns tcp %s: %w", listen, err)
+		}
+		packetConn, err := net.ListenPacket("udp", tcpListener.Addr().String())
+		if err == nil {
+			return packetConn, tcpListener, nil
+		}
+		_ = tcpListener.Close()
+		return nil, nil, fmt.Errorf("listen dns udp %s: %w", tcpListener.Addr().String(), err)
+	}
+
+	const attempts = 128
+	for attempt := 0; attempt < attempts; attempt++ {
+		var seed [2]byte
+		if _, err := rand.Read(seed[:]); err != nil {
+			return nil, nil, fmt.Errorf("select dns ephemeral port: %w", err)
+		}
+		port := 20000 + int(binary.BigEndian.Uint16(seed[:])%30000)
+		address := net.JoinHostPort(host, strconv.Itoa(port))
+		tcpListener, err := net.Listen("tcp", address)
+		if err != nil {
+			continue
+		}
+		packetConn, err := net.ListenPacket("udp", address)
+		if err == nil {
+			return packetConn, tcpListener, nil
+		}
+		_ = tcpListener.Close()
+	}
+	return nil, nil, fmt.Errorf("listen dns on a dual-protocol ephemeral port after %d attempts", attempts)
 }
 
 func (resolver *Resolver) Shutdown() error {

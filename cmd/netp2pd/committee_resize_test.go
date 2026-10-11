@@ -201,9 +201,18 @@ func TestCommitteeResizeWatcherActivatesFourthManager(t *testing.T) {
 	if !ok || activation.Transition.Type != bft.TransitionActivateCommittee {
 		t.Fatalf("activation snapshot missing or invalid: ok=%v type=%q", ok, activation.Transition.Type)
 	}
+	postActivation, err := meshes[0].Submit(model.StateTransition{
+		Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "post-activation"},
+	})
+	if err != nil {
+		t.Fatalf("submit post-activation transition: %v", err)
+	}
+	if postActivation.Height <= activation.Height {
+		t.Fatalf("post-activation height = %d, want greater than %d", postActivation.Height, activation.Height)
+	}
 
-	targetIDs := make([]string, 0, len(activation.Transition.Committee))
-	for _, member := range activation.Transition.Committee {
+	targetIDs := make([]string, 0, len(postActivation.Committee))
+	for _, member := range postActivation.Committee {
 		targetIDs = append(targetIDs, member.ID)
 	}
 	sort.Strings(targetIDs)
@@ -212,11 +221,14 @@ func TestCommitteeResizeWatcherActivatesFourthManager(t *testing.T) {
 		t.Fatal("candidate did not persist its activated DKG share")
 	}
 	candidateEngine, err := bft.NewEngineWithKeySet(
-		activation.State, activation.Transition.Committee, candidateID, candidatePrivateKey,
+		postActivation.State, postActivation.Committee, candidateID, candidatePrivateKey,
 		activatedParams, candidateKeys, 2,
 	)
 	if err != nil {
 		t.Fatalf("create activated candidate engine: %v", err)
+	}
+	if err := candidateEngine.CatchUp(postActivation); err != nil {
+		t.Fatalf("catch up activated candidate engine: %v", err)
 	}
 	candidateEngine.SetDKGLoader(func(epoch uint64, committee []model.CommitteeMember, params model.CommitteeParams) (*bls.KeySet, bool) {
 		currentIDs := make([]string, 0, len(committee))
@@ -225,7 +237,7 @@ func TestCommitteeResizeWatcherActivatesFourthManager(t *testing.T) {
 		}
 		return dkg.LoadShare(candidateDataDir, epoch, candidateID, currentIDs, params.QuorumSize)
 	})
-	candidateMesh, err := manager.NewCommitteeMesh(candidateNode, candidateEngine, activation.Transition.Committee)
+	candidateMesh, err := manager.NewCommitteeMesh(candidateNode, candidateEngine, postActivation.Committee)
 	if err != nil {
 		t.Fatalf("create candidate mesh: %v", err)
 	}

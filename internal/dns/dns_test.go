@@ -450,15 +450,9 @@ func startTruncatingUpstream(t *testing.T, answer string) string {
 
 func startUpstreamHandler(t *testing.T, answer string, onRequest func(*dns.Msg, bool)) string {
 	t.Helper()
-	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	packetConn, tcpListener, err := listenDNSPair("127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen upstream tcp: %v", err)
-	}
-	packetConn, err := net.ListenPacket("udp", tcpListener.Addr().String())
-	if err != nil {
-		_ = packetConn.Close()
-		_ = tcpListener.Close()
-		t.Fatalf("listen upstream udp: %v", err)
+		t.Fatalf("listen upstream: %v", err)
 	}
 	mux := dns.NewServeMux()
 	mux.HandleFunc(".", func(writer dns.ResponseWriter, request *dns.Msg) {

@@ -30,9 +30,10 @@ On POSIX:
 ./test/loadtest/run.sh architecture
 ```
 
-The command writes a JSON verification manifest under
-`tmp/doc/verification/`. Manifests include sizes, durations, p99 values,
-memory use, storage use, and pass/fail thresholds.
+The command writes a JSON verification manifest to a local, untracked
+verification directory; use `--output` to choose an explicit path. Manifests
+include sizes, durations, p99 values, memory use, storage use, and pass/fail
+thresholds.
 
 ## Scenarios
 
