@@ -81,9 +81,10 @@ Do not edit identity/profile files manually.
 ## Upgrade and rollback
 
 1. Capture `netp2p status --json` and confirm `ready`.
-2. Install the new DEB/RPM.
-3. Restart the service.
-4. Confirm version, protocol, `ready`, the same overlay IP, and traffic.
+2. Run `netp2p down`, then stop the service.
+3. Install the new DEB/RPM.
+4. Start the service and run `netp2p up`.
+5. Confirm version, protocol, `ready`, the same overlay IP, and traffic.
 
 Roll back by installing the previous package and restarting. Preserve
 `/var/lib/netp2p` unless intentionally re-enrolling.
@@ -92,6 +93,10 @@ Roll back by installing the previous package and restarting. Preserve
 
 ```bash
 sudo netp2p down
+sudo systemctl stop netp2p-client
 sudo apt remove netp2p      # Debian/Ubuntu
 sudo dnf remove netp2p      # RHEL-family
 ```
+
+Remove `/var/lib/netp2p` only when you are intentionally retiring or
+re-enrolling the machine.

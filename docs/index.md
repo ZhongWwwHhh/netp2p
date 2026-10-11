@@ -25,6 +25,7 @@ task you want to complete.
 ## Clients
 
 - [Client guides and CLI](clients/index.md)
+- [CLI reference](clients/cli.md)
 - [Linux client](clients/linux/index.md)
 - [Windows client](clients/windows/index.md)
 - [Docker client](clients/docker.md)
@@ -52,5 +53,7 @@ task you want to complete.
 - [REST API](reference/api.md)
 - [Release](reference/release.md)
 - [Testing](reference/testing.md)
+- [Web console testing](reference/testing-web.md)
 - [Performance baseline](reference/performance-baseline.md)
+- [Link trust model](reference/link-trust-model.md)
 - [Roadmap](reference/roadmap.md)

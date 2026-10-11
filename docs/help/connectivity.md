@@ -13,9 +13,12 @@ Fix problems where peers cannot reach each other.
 Test both directions and both protocols:
 
 ```bash
-ping <peer-overlay-ip>
+netp2p ping <peer-overlay-ip>
 nc -vz <peer-overlay-ip> <tcp-port>
 ```
+
+On Windows, use `netp2p ping` and `Test-NetConnection <peer-overlay-ip> -Port
+<tcp-port>` from an elevated PowerShell window.
 
 On each client:
 
@@ -41,6 +44,6 @@ policy, routes, and peer presence in the console.
 ## Data points that matter
 
 * Overlay IPs of both peers (from `netp2p ip`)
-* Path type per peer (direct/relay)
+* Path type per peer (`direct`, `via-manager`, or `multi-hop`)
 * Forwarding drop counters
 * The exact policy that should allow the flow

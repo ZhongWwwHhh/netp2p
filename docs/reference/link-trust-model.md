@@ -427,7 +427,7 @@ RouteAssignment
 - observer signature；
 - TTL、seq、probe token 和频控。
 
-实现 `/netp2p/link/probe/1.0.0`：`ProbeRequest{kind, nonce, bytes}` + `ProbeReply{nonce, receivedBytes}`，length-prefixed JSON header，bandwidth probe 后紧跟 `bytes` 原始字节。manager 与 client 都注册 `ProbeResponder`。
+实现 `/netp2p/link/probe/3.0.0`：`ProbeRequest{kind, nonce, bytes}` + `ProbeReply{nonce, receivedBytes}`，length-prefixed JSON header，bandwidth probe 后紧跟 `bytes` 原始字节。manager 与 client 都注册 `ProbeResponder`。
 
 ### Phase C：Manager mesh 观测网（已实现）
 
@@ -436,7 +436,7 @@ RouteAssignment
 - manager 之间 gossip signed observation；
 - 每 10–30 秒生成确定性 `LinkView`。
 
-`internal/link.Prober` 每个周期测量全部 committee peer（`manager_mesh`）和 certified state 中的 client（`access`）；总带宽突发受 `NetworkSettings.ProbeBandwidthBudgetKB` 限制，目标轮换以保证公平。观测经 `/netp2p/link/gossip/1.0.0` 交换，`Publish` 只替换本机观测并保留远端观测。
+`internal/link.Prober` 每个周期测量全部 committee peer（`manager_mesh`）和 certified state 中的 client（`access`）；总带宽突发受 `NetworkSettings.ProbeBandwidthBudgetKB` 限制，目标轮换以保证公平。观测经 `/netp2p/link/gossip/3.0.0` 交换，`Publish` 只替换本机观测并保留远端观测。
 
 ### Phase D：EigenSpeed 聚合（已实现）
 

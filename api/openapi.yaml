@@ -1,10 +1,11 @@
 openapi: 3.0.3
 info:
   title: NetP2P Management API
-  version: 0.3.1
+  version: 0.3.4
   description: |
     Contract for the NetP2P manager REST API. Paths with `x-status: planned`
-    do not exist in the current implementation and are reserved for v0.3.1.
+    do not exist in the current implementation and are reserved for a future
+    release.
     The wire protocol is 3.0.0.
   license:
     name: Apache-2.0
@@ -179,7 +180,7 @@ paths:
       tags: [Users]
       summary: Update user email or password
       description: |
-        Implemented in the current working tree and expected in v0.3.1. The
+        Implemented in the current release. The
         server derives the actor, protects owner records, stores an Argon2id
         verifier, records credentialsChangedAt, and rejects older sessions.
         At least one of email and password is required; each may be changed

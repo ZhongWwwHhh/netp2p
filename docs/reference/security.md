@@ -2,7 +2,7 @@
 
 ## Control plane
 
-Three managers form a HotStuff-style BFT committee. A client mutation becomes a signed proposal, receives Ed25519 votes, forms a quorum certificate, and commits a certified snapshot. For production `n=3/f=0/quorum=3`, all three managers must sign. Clients verify snapshots against the embedded committee configuration and reject incomplete or untrusted certificates.
+Three managers form a HotStuff-style BFT committee. A client mutation becomes a signed proposal, receives BLS threshold-share votes, forms a quorum certificate, and commits a certified snapshot. For production `n=3/f=0/quorum=3`, all three managers must sign. Clients verify snapshots against the embedded committee configuration and reject incomplete or untrusted certificates.
 
 DKG establishes the committee's threshold/group key material. Per-manager private shares, identity keys, seeds, and the SQLite ledger are local secrets. The public certified snapshot contains committee public configuration, not private shares.
 
@@ -12,9 +12,9 @@ DKG establishes the committee's threshold/group key material. Per-manager privat
 - Passwords are stored only as Argon2id verifiers, never plaintext or reversible hashes.
 - Login attempts are rate limited; five failures lock the account for 15 minutes.
 - Sessions are signed local tokens issued through secure, HTTP-only, SameSite cookies. A static admin token is supported as break-glass and is not a replacement for user accounts.
-- The working tree adds a certified credentials endpoint and CLI. It stores Argon2id verifiers, rejects pre-change sessions through `credentialsChangedAt`, protects owner records, and writes auth audit events. Email and password can be updated independently. Self-service password recovery is still not implemented; recoveries remain controlled, audited operational procedures.
+Certified credential changes are available through the API and manager admin CLI. They store Argon2id verifiers, reject pre-change sessions through `credentialsChangedAt`, protect owner records, and write auth audit events. Email and password can be updated independently. Self-service password recovery is not implemented; recoveries remain controlled, audited operational procedures.
 
-Planned v0.3 controls: self-service recovery, service-user PATs with scopes/expiry/rotation, and complete credential audit exports.
+Planned controls include self-service recovery, service-user PATs with scopes, expiry and rotation, and complete credential audit exports.
 
 ## Authorization
 

@@ -5,20 +5,28 @@ key.
 
 ## Audience
 
-Use this when you are starting a new network and will run its first manager.
+Use this for a local evaluation or development network with one reachable
+manager. For a production committee, start with
+[self-hosted installation](../self-hosted/install.md) instead.
 
 ## Prerequisites
 
 - A host for the first manager.
-- Installed `netp2pd` and `netp2p` binaries.
+- `netp2pd` and `netp2p` installed from a release package or tarball, with the
+  release checksum verified.
 - An owner email address.
 - A password of at least 12 characters.
 
+Release artifacts and checksums are published on the
+[project release page](https://github.com/ZhongWwwHhh/netp2p/releases). Do not
+use unverified binaries from a random mirror.
+
 ## Create bootstrap files
 
-Run this on the manager host. It creates the seed, runtime configuration, owner
-credentials, and an initial reusable setup key. Generated secrets are written to
-protected files and are printed only when explicitly requested.
+Run this on the manager host. It creates the development seed, runtime
+configuration, owner credentials, and an initial reusable setup key. Generated
+secrets are written to protected files and are printed only when explicitly
+requested.
 
 ```bash
 netp2p init network \

@@ -31,4 +31,4 @@ Implemented today: setup-key enrollment, TUN or userspace networking, overlay
 DNS, status/doctor/netcheck, manager failover, and bidirectional peer probes.
 
 Not yet available: macOS PKG, mobile clients, auto-update, and multi-profile
-support. See the [roadmap](../roadmap.md) for planned work.
+support. See the [roadmap](../reference/roadmap.md) for planned work.

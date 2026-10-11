@@ -36,10 +36,22 @@ can strand a manager on the old version. Always use an atomic all-stop/all-start
    docker compose create --force-recreate
    ```
 
-4. Start all three managers together.
-5. Validate each `/readyz`, confirm equal heights, HTTPS, metrics, and run a
+4. Stop all three manager containers together. These examples assume the Compose
+   service is named `manager`:
+
+   ```bash
+   docker compose stop manager
+   ```
+
+5. Start all three managers together:
+
+   ```bash
+   docker compose start manager
+   ```
+
+6. Validate each `/readyz`, confirm equal heights, HTTPS, metrics, and run a
    client login plus traffic probe.
-6. Keep the previous digest and backup until soak validation passes.
+7. Keep the previous digest and backup until soak validation passes.
 
 Never roll one manager at a time for a committee upgrade.
 
@@ -50,8 +62,13 @@ Never roll one manager at a time for a committee upgrade.
 3. Stop all three managers together.
 4. Revert image/config pins to the prior tested release. Preserve
    `/var/lib/netp2p`, manager identity, seed/share material, and ledger history.
-5. Recreate and start all three together.
-6. Re-run readiness and client checks.
+5. Recreate all three without starting:
+
+   ```bash
+   docker compose create --force-recreate
+   ```
+
+6. Start all three together, then re-run readiness and client checks.
 
 Do not restore a single-node old snapshot over a newer committee ledger.
 Committee-wide restore requires the [backup/restore procedure](backup-restore.md).

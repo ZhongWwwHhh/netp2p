@@ -10,6 +10,8 @@ owner account on the web console.
 ## Prerequisites
 
 - Three Linux hosts (amd64 or arm64) with Docker Engine and the Docker Compose plugin.
+- Enough disk for the SQLite ledger, DKG shares, logs, and backup retention on
+  every manager; the exact size depends on peer and event volume.
 - DNS A records pointing each manager hostname to its public IPv4, and a round-robin
   record for the console entry. Use direct (grey-cloud) DNS; do not proxy UDP paths
   through a CDN.
@@ -42,7 +44,48 @@ sudo chown 999:999 /var/lib/netp2p
 
 ### 2. Render configuration
 
-Place the runtime configuration, seed-derived manager bundle, and Caddyfile under
+Generate production material on a trusted administrator machine. The command
+requires exactly three managers:
+
+```bash
+mkdir -p ./netp2p-bootstrap
+chmod 700 ./netp2p-bootstrap
+
+netp2p init production \
+  --network example-network \
+  --overlay-cidr 100.64.0.0/24 \
+  --output-dir ./netp2p-bootstrap \
+  --manager manager-1,manager-1.netp2p.example,203.0.113.11,4001 \
+  --manager manager-2,manager-2.netp2p.example,203.0.113.12,4001 \
+  --manager manager-3,manager-3.netp2p.example,203.0.113.13,4001
+```
+
+The output contains:
+
+| File | Visibility |
+| --- | --- |
+| `network.json` | Public network manifest, shared by every manager |
+| `client-trust.json` | Public client trust bundle |
+| `manager-<id>.json` | Private bundle for one manager only |
+| `owner-bootstrap.txt` | First-owner procedure |
+| `README.txt` | Deployment summary |
+
+Use this mapping on each manager host:
+
+| Source | Destination | Mode |
+| --- | --- | --- |
+| `network.json` | `/etc/netp2p/network.json` | `0644` |
+| `manager-<id>.json` | `/etc/netp2p/manager.json` | `0600`, owned by the manager service account |
+| Caddy configuration | `/etc/netp2p/Caddyfile` | `0644` |
+
+Keep `client-trust.json` with your client-distribution process. Never copy a
+manager bundle, session secret, admin token, or DKG share to a client.
+
+Copy only the matching private bundle to each host. Never place the whole
+bootstrap directory on every manager, in source control, or in an unencrypted
+backup.
+
+Place the public manifest, the matching manager bundle, and the Caddyfile under
 `/etc/netp2p/`. Use an infrastructure tool such as Ansible to keep the three hosts
 consistent. The manager container runs read-only as `999:999` without
 `NET_ADMIN`; Caddy terminates HTTPS on 9443 and proxies to `127.0.0.1:18080`.
@@ -99,3 +142,12 @@ Require HTTP 200, `ready`, equal BFT heights, and `3/3` committee connectivity.
 
 Then enroll a client per the [client guides](../clients/index.md) and verify
 bidirectional connectivity with `netp2p ping`.
+
+## Troubleshooting
+
+- **Bootstrap generation fails with the wrong manager count**: the production
+  generator requires exactly three `--manager` inputs.
+- **A manager rejects its bundle**: confirm the bundle's manager ID matches the
+  host and that the public manifest is the same on all three hosts.
+- **Certificate or console errors**: use the DNS names in the manifest and check
+  that TCP 9443 is open before inspecting Caddy logs.

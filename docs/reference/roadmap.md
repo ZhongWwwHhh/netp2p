@@ -45,7 +45,7 @@
 
 - [x] direct 与 circuit relay 候选发现（libp2p hole punching + static relay）。
 - [x] B-score 链路评分：加权 RTT/loss/bandwidth/cost，归一化区间由 Web Settings 中的 relay advantage 阈值参数化。
-- [x] RTT/loss/jitter/bandwidth probe（`/netp2p/link/probe/1.0.0`）：manager 主动测量 mesh 与 client access 链路，有界突发受 `ProbeBandwidthBudgetKB` 约束。
+- [x] RTT/loss/jitter/bandwidth probe（`/netp2p/link/probe/3.0.0`）：manager 主动测量 mesh 与 client access 链路，有界突发受 `ProbeBandwidthBudgetKB` 约束。
 - [x] EigenSpeed 式 manager mesh 链路观测网与 client 不可信隔离：trimmed median + 幂迭代主特征向量 + 离群降权，access 段独立于 mesh 矩阵。
 - [x] 评分收敛到 `internal/path.Score`（删除 `link.directScore`），未知带宽不再被硬排除；scheduler 对指标抖动做容差抑制，并在单次扫描内收敛所有发生变化的 peer pair（避免每个 assignment 各占一个 30s 冷却窗口导致多 peer 网络收敛过慢）。
 - [x] flow class 用户可选（`Route`/`Policy.FlowClass` + `NetworkSettings.DefaultFlowClass` 接入 `path.Score` 权重）。
@@ -73,7 +73,7 @@
 
 ## Phase 6：生产化
 
-- [x] committee reconfiguration、key rotation、灾难恢复（`docs/upgrade.md`）。
+- [x] committee reconfiguration、key rotation、灾难恢复（[self-hosted upgrade](../self-hosted/upgrade.md)）。
 - [x] threshold signature（BLS12-381，替代 2f+1 独立 Ed25519 签名）。
 - [x] metrics、审计、混沌测试（`internal/metrics`、`/api/v1/events`、`internal/chaos`）。
 - [x] 审计 actor 归属：服务端写入 `StateTransition.Actor`，纳入 transition hash 与 QC。
@@ -116,7 +116,7 @@
 
 - [x] 安全加固：setup key 查表改用 `hmac.Equal` 常量时间比较；告警 webhook 强制 `https`（`--allow-insecure-webhook` 才能用 http）；`doctor` 在 seed 含 `keySeed` 时输出 WARN 建议启用 DKG。
 - [x] `internal/crypto/bls` Pedersen DKG 原语：成员多项式承诺（G2 compressed）、share 验证（`g^share == Π C_k^{x^k}`）、群公钥与全体成员 share 公钥派生、`NewKeySetFromShares` 兼容已有签名/聚合路径。
-- [x] `internal/dkg` + `/netp2p/control/dkg/2.0.0`：两轮 commit→share 加一轮结果广播与就绪屏障；仅 committee 成员参与，按 peer 身份鉴权。
+- [x] `internal/dkg` + `/netp2p/control/dkg/3.0.0`：两轮 commit→share 加一轮结果广播与就绪屏障；仅 committee 成员参与，按 peer 身份鉴权。
 - [x] share 持久化：`<dataDir>/dkg-share-<epoch>.json`（原子写）；`SetDKGLoader` 让 manager 重启后继续用本地 share 签名。
 - [x] BFT 接线：`rotate_committee_keys` 可携带经校验的 DKG `GroupPublicKey`，engine 在 commit/catch-up 时采用本地 DKG share；缺省仍走确定性 seed 派生。
 - [x] CLI：`--dkg`（默认 off，全体 manager 需同开）跑一轮 ceremony 后由 leader 提交轮换；`--rotate-committee-keys` 单独提交确定性轮换。
@@ -134,5 +134,5 @@
 - [x] `internal/tun` 抽出 `RouteConfigurator`（`SetUp`/`AddAddress`/`SetMTU`/`AddRoute`/`DelRoute`/`AddHostRoute`/`DelHostRoute`/`DefaultGateway`）；Device 不再直接调用 `ip`。
 - [x] Linux 保持 iproute2 实现与既有命令序列（单测不变）；darwin 用 `ifconfig`/`route`，windows 用 `netsh`/`route`。
 - [x] darwin/windows 通过 `golang.zx2c4.com/wireguard/tun`（新增依赖）创建 utun/Wintun 设备；其他平台返回 `ErrUnsupported`。
-- [x] `netp2pd --role doctor` 报告平台 TUN 可用性与所需权限；`docs/upgrade.md` 补齐各平台特权要求。
+- [x] `netp2pd --role doctor` 报告平台 TUN 可用性与所需权限；[client guides](../clients/index.md) 补齐各平台特权要求。
 - [x] 验收：`GOOS=darwin`/`GOOS=windows` `go build ./...` 通过；Linux `internal/tun` 测试全绿（真机运行验证不在本轮范围）。

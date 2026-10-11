@@ -1,9 +1,18 @@
 # Performance baseline
 
+Use this page to compare a release against a recorded baseline on the same
+hardware and runner class. It is not a service-level SLO.
+
 Collected on 2026-10-10 with Go 1.25.7, Windows 11, amd64, and an Intel
 i7-11800H (16 logical CPUs). Values are one `go test -bench` run with the
 default one-second bench time and `-benchmem`; they establish the first local
 baseline rather than a service-level SLO.
+
+Reproduce the benchmark set with:
+
+```bash
+go test ./... -run '^$' -bench . -benchmem -count=1
+```
 
 | Benchmark | Result |
 | --- | ---: |

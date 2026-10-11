@@ -50,7 +50,7 @@ netp2p doctor
 netp2p netcheck
 netp2p down
 netp2p debug bundle
-netp2p service status
+Get-Service NetP2P
 netp2p tray
 ```
 
@@ -67,12 +67,27 @@ Get-Content "$env:ProgramData\NetP2P\logs\netp2pd.log" -Tail 200
 Use `netp2p doctor` before changing Wintun, firewall, NRPT, antivirus, or
 VPN-adapter settings.
 
+## Start, stop, and disconnect
+
+```powershell
+netp2p down
+netp2p service stop
+netp2p service start
+netp2p up
+```
+
+`down` disconnects the overlay and restores local networking. Stopping the
+service also stops the daemon. The client profile is retained, so `up` after a
+restart does not require a new setup key.
+
 ## Upgrade and rollback
 
 1. Capture `netp2p status --json`.
-2. Run the new MSI over the old installation.
-3. Restart the NetP2P service.
-4. Confirm version, protocol, `ready`, overlay IP, and bidirectional traffic.
+2. Run `netp2p down`, then stop the NetP2P service.
+3. Run the new MSI over the old installation.
+4. Start the NetP2P service and run `netp2p up`.
+5. Confirm version, protocol, `ready`, the same overlay IP, and bidirectional
+   traffic.
 
 To roll back, stop/disable the service, install the prior MSI, and restart.
 Preserve the client profile unless intentionally re-enrolling.
@@ -86,4 +101,5 @@ netp2p service stop
 
 Then remove NetP2P from **Settings > Apps** or `msiexec /x <product-code>`.
 Verify the service, adapter, and NRPT rules are gone if uninstall was
-interrupted.
+interrupted. Remove the client profile only when you are intentionally retiring
+the machine.

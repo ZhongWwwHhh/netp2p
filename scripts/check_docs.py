@@ -121,7 +121,16 @@ def archive_members(path: Path, data: bytes):
         yield from deb_members(label, data)
 
 
-def extracted_members(path: Path) -> list[Path]:
+def _bounded_stderr(stderr: bytes | None) -> str:
+    if not stderr:
+        return ""
+    text = stderr.decode("utf-8", "replace").strip()
+    if len(text) > 2000:
+        text = text[:2000] + "..."
+    return text.replace("\r", " ").replace("\n", " | ")
+
+
+def extracted_members(path: Path) -> tuple[list[tuple[str, bytes]], list[str]]:
     """Extract package formats that need a platform decoder.
 
     CI installs the helper tools before release scanning. When a helper is
@@ -129,27 +138,78 @@ def extracted_members(path: Path) -> list[Path]:
     not silently require platform packages.
     """
     suffix = path.suffix.lower()
-    with tempfile.TemporaryDirectory(prefix="netp2p-release-scan-") as directory:
-        output = Path(directory)
-        try:
-            if suffix == ".msi" and shutil.which("msiextract"):
-                subprocess.run(
+    if suffix == ".msi":
+        if not shutil.which("msiextract"):
+            return [], []
+    elif suffix == ".rpm":
+        if not (shutil.which("rpm2cpio") and shutil.which("cpio")):
+            return [], []
+    else:
+        return [], []
+
+    directory = tempfile.mkdtemp(prefix="netp2p-release-scan-")
+    output = Path(directory)
+    findings: list[str] = []
+    try:
+        if suffix == ".msi":
+            try:
+                result = subprocess.run(
                     ["msiextract", "--directory", str(output), str(path)],
-                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False,
                 )
-            elif suffix == ".rpm" and shutil.which("rpm2cpio") and shutil.which("cpio"):
-                payload = output / "payload.cpio"
+            except OSError as error:
+                return [], [f"{path.name}: MSI extraction failed: {error}"]
+            if result.returncode != 0:
+                diagnostic = _bounded_stderr(result.stderr)
+                detail = f": {diagnostic}" if diagnostic else ""
+                return [], [f"{path.name}: MSI extraction failed with exit code {result.returncode}{detail}"]
+        else:
+            payload = output / "payload.cpio"
+            try:
                 with payload.open("wb") as stream:
-                    subprocess.run(["rpm2cpio", str(path)], check=True, stdout=stream)
-                subprocess.run(
+                    result = subprocess.run(
+                        ["rpm2cpio", str(path)], stdout=stream,
+                        stderr=subprocess.PIPE, check=False,
+                    )
+            except OSError as error:
+                return [], [f"{path.name}: RPM extraction failed while running rpm2cpio: {error}"]
+            if result.returncode != 0:
+                diagnostic = _bounded_stderr(result.stderr)
+                detail = f": {diagnostic}" if diagnostic else ""
+                return [], [f"{path.name}: rpm2cpio failed with exit code {result.returncode}{detail}"]
+
+            try:
+                cpio_payload = payload.read_bytes()
+            except OSError as error:
+                return [], [f"{path.name}: RPM extraction failed while reading rpm2cpio payload: {error}"]
+            try:
+                result = subprocess.run(
                     ["cpio", "-id", "--quiet", "--no-absolute-filenames"],
-                    check=True, cwd=output, input=payload.read_bytes(),
+                    cwd=output, input=cpio_payload,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False,
                 )
-            else:
-                return []
-        except (OSError, subprocess.SubprocessError):
-            return []
-        return [item for item in output.rglob("*") if item.is_file()]
+            except OSError as error:
+                return [], [f"{path.name}: RPM extraction failed while running cpio: {error}"]
+            if result.returncode != 0:
+                diagnostic = _bounded_stderr(result.stderr)
+                detail = f": {diagnostic}" if diagnostic else ""
+                return [], [f"{path.name}: cpio failed with exit code {result.returncode}{detail}"]
+
+        members: list[tuple[str, bytes]] = []
+        extracted_files = [item for item in output.rglob("*") if item.is_file()]
+        for item in extracted_files:
+            relative = item.relative_to(output).as_posix()
+            try:
+                members.append((relative, item.read_bytes()))
+            except FileNotFoundError:
+                findings.append(f"{path.name}:{relative}: missing extracted member")
+            except OSError as error:
+                findings.append(f"{path.name}:{relative}: unreadable extracted member: {error}")
+        if not extracted_files:
+            findings.append(f"{path.name}: extraction produced no files")
+        return members, findings
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def scan_release_artifacts(directory: Path, values: list[str]) -> list[str]:
@@ -159,15 +219,22 @@ def scan_release_artifacts(directory: Path, values: list[str]) -> list[str]:
         if not path.is_file():
             continue
         files += 1
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            relative = path.relative_to(directory).as_posix()
+            findings.append(f"{relative}: unreadable release artifact: {error}")
+            continue
         if denied_values(data, values):
             findings.append(f"{path}: contains a denied deployment value")
         for label, payload in archive_members(path, data):
             if denied_values(payload, values):
                 findings.append(f"{label}: contains a denied deployment value")
-        for extracted in extracted_members(path):
-            if denied_values(extracted.read_bytes(), values):
-                findings.append(f"{label}:{extracted.name}: contains a denied deployment value")
+        extracted, package_findings = extracted_members(path)
+        findings.extend(package_findings)
+        for relative, payload in extracted:
+            if denied_values(payload, values):
+                findings.append(f"{path.name}:{relative}: contains a denied deployment value")
     if not files:
         findings.append(f"{directory}: no release artifacts found")
     return findings

@@ -23,6 +23,17 @@ Implemented public authentication routes:
 
 The current release implements `POST /api/v1/users/{id}/credentials`. It submits a certified `update_user_credentials` transition, records `credentialsChangedAt`, and rejects sessions issued before that timestamp.
 
+Log in and retain the HTTP-only session cookie:
+
+```bash
+curl -fsS --cookie-jar netp2p-cookies.txt \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"owner@example.com","password":"<password>"}' \
+  https://manager-1.netp2p.example:9443/api/v1/auth/login
+```
+
+Remove `netp2p-cookies.txt` when the API session is no longer needed.
+
 The endpoint accepts an email and/or password, and each can be changed independently. Email-only changes preserve the existing password. A password must contain at least 12 characters and is stored only as an Argon2id verifier. Password changes reject previously issued local sessions. Self-service password reset remains a controlled operational procedure.
 
 ## Implemented API model
@@ -46,7 +57,7 @@ Implemented reads and actions:
 | `GET /api/v1/snapshot[?height=N]` | latest or historical certified snapshot |
 | `GET /api/v1/session` | identity and permission matrix |
 | `GET /api/v1/users` | redacted certified user records |
-| `POST /api/v1/users/{id}/credentials` | certified email and/or password update (working tree) |
+| `POST /api/v1/users/{id}/credentials` | certified email and/or password update |
 | `GET /api/v1/presence` | client presence observations |
 | `GET /api/v1/activity[?limit=&before=]` | recent certified activity snapshots |
 | `GET /api/v1/events[?limit=&before=&type=&actor=]` | certified decision/audit events |
@@ -62,7 +73,10 @@ Implemented reads and actions:
 | `POST /api/v1/setup-keys` | create a setup key; token is returned once |
 | `POST /api/v1/transitions` | authenticated generic BFT transition |
 
-The working tree also exposes the same certified credential change through the manager admin CLI:
+`GET /api/v1/auth/session` and `GET /api/v1/session` both resolve the current
+session. Use `/api/v1/auth/session` in authentication-focused clients.
+
+The manager admin CLI exposes the same certified credential change:
 
 ```bash
 # admin.yaml contains role: admin, manager, action:
@@ -80,11 +94,11 @@ Operationally implemented outside the authenticated API:
 - `GET /readyz`
 - `GET /metrics` on the restricted metrics listener
 
-## Planned v0.3 resources
+## Planned API resources
 
 The roadmap adds explicit resource APIs while retaining transition compatibility:
 
-- Self-service recovery, scoped administration, and complete credential auditing (certified email/password updates, session revocation, and last-owner protection are implemented in the working tree).
+- Self-service recovery, scoped administration, and complete credential auditing.
 - Dedicated peers, groups, policies, routes, resources, DNS, setup keys, events, tokens, and settings APIs.
 - A `Resource` model for IP, CIDR, DNS name, wildcard DNS name, and service/port destinations.
 - Routing-peer HA with multiple gateways, metric/failover, health state, and events.

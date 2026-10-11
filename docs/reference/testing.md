@@ -71,7 +71,7 @@ Cover every new route with authentication, RBAC, invalid-input, oversize-body, a
 
 ## Production validation
 
-Before promoting a build on `fr`, `sg`, and `us-phx`:
+Before promoting a build to a three-manager production committee:
 
 1. All `/readyz` endpoints return ready with equal height.
 2. Committee is 3/3 and quorum is 3.

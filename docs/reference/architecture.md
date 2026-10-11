@@ -17,22 +17,23 @@ NetP2P 是一个可管理的去中心化 overlay 网络。项目使用 `github.c
 
 | 协议 | 用途 |
 | --- | --- |
-| `/netp2p/control/login/2.0.0` | 提交身份、OIDC JWT/setup key 与设备信息 |
-| `/netp2p/control/sync/2.0.0` | 请求 certified snapshot 与增量同步（含 admission 摘要） |
-| `/netp2p/control/state-update/2.0.0` | 分发 proposal、vote、QC、snapshot 与 catch-up 交换 |
-| `/netp2p/control/admin/2.0.0` | 带凭证的 state transition 提交（CLI / Web 共用一处鉴权） |
-| `/netp2p/web-api/2.0.0` | 浏览器控制台的 HTTP-over-libp2p API |
-| `/netp2p/presence/2.0.0` | committee 之间交换观测在线状态（非认证） |
-| `/netp2p/link/probe/2.0.0` | 采集 RTT、丢包、抖动、带宽估计与路径能力 |
-| `/netp2p/link/gossip/2.0.0` | manager mesh 交换签名的链路观测 |
-| `/netp2p/data/frame/2.0.0` | 传输 overlay frame 或服务流量（二进制分帧，含 via-manager 信封） |
-| `/netp2p/data/quota/2.0.0` | 上报聚合用量（增量），不逐包上报 |
+| `/netp2p/control/login/3.0.0` | 提交身份、OIDC JWT/setup key 与设备信息 |
+| `/netp2p/control/sync/3.1.0` | 请求 certified snapshot、增量同步与 heartbeat（含 admission 摘要） |
+| `/netp2p/control/state-update/3.0.0` | 分发 proposal、vote、QC、snapshot 与 catch-up 交换 |
+| `/netp2p/control/admin/3.0.0` | 带凭证的 state transition 提交（CLI / Web 共用一处鉴权） |
+| `/netp2p/web-api/3.0.0` | 浏览器控制台的 HTTP-over-libp2p API |
+| `/netp2p/presence/3.0.0` | committee 之间交换观测在线状态（非认证） |
+| `/netp2p/link/probe/3.0.0` | 采集 RTT、丢包、抖动、带宽估计与路径能力 |
+| `/netp2p/link/gossip/3.0.0` | manager mesh 交换签名的链路观测 |
+| `/netp2p/data/frame/3.0.0` | 传输 overlay frame 或服务流量（二进制分帧，含 via-manager 信封） |
+| `/netp2p/data/quota/3.0.0` | 上报聚合用量（增量），不逐包上报 |
 
-协议版本由 `internal/version.ProtocolVersion` 统一决定，并嵌入每个协议 id。控制面 payload 是 protobuf（`proto/netp2p/v1`，`internal/wire` 负责领域模型 ↔ protobuf 转换），数据面帧保持紧凑二进制。高版本协议通过 libp2p multistream negotiation 与 capability exchange 兼容：版本不一致时显式拒绝连接（见 `docs/upgrade.md`）。
+协议版本由 `internal/version.ProtocolVersion` 统一决定，并嵌入每个协议 id；sync framing 单独使用 `3.1.0`。控制面 payload 是 protobuf（`proto/netp2p/v1`，`internal/wire` 负责领域模型 ↔ protobuf 转换），数据面帧保持紧凑二进制。版本不一致时通过 libp2p protocol negotiation 显式拒绝连接。
 
 ## 控制面
 
-普通 client 不参与共识。Manager 是一个 BFT committee，建议初始容错为 `n = 3f + 1`：
+普通 client 不参与共识。Manager 是一个 BFT committee。通用 BFT 配置可选择
+`n = 3f + 1` 以获得容错；当前生产默认是一致性优先的 `n=3/f=0/quorum=3`：
 
 1. client、admin API 或 IdP 同步产生 proposal；
 2. proposal 进入 committee decision log；
@@ -45,22 +46,24 @@ Policy、group、peer、route、quota、committee membership 的变更都是 sta
 
 Client 保留最近 certified snapshot。Manager 短暂不可用时继续使用已有策略；manager 恢复后通过 epoch 与 decision log 追平状态。
 
-### v0 实现
+### 当前实现
 
-当前代码实现固定 `n = 4, f = 1` 的 HotStuff-lite committee：
+committee 参数来自生产 manifest 与 certified `CommitteeConfig`，不再依赖硬编码
+committee 规模。当前生产 bootstrap 生成 `3/0/3`：
 
 - 每轮由 `leader = committee[(height + round) % n]` 发起 proposal；proposal 携带完整 `NetworkState`；
-- committee 成员用 BLS12-381 密钥分片对 `state_hash` 与 `transition_hash` 签名，`2f + 1 = 3` 个分片聚合为 `QuorumCertificate`（`AggregateSignature` + `SignerBitmap` + `CommitteeEpoch`）；
+- committee 成员用 BLS12-381 DKG share 对 `state_hash` 与 `transition_hash` 签名，`quorum` 个分片聚合为 `QuorumCertificate`（`AggregateSignature` + `SignerBitmap` + `CommitteeEpoch`）；
 - commit 生成 `SignedSnapshot{epoch, height, stateHash, state, committee, committeeConfig, qc}`；
 - client 用 `ValidateSnapshot` 校验 state hash、聚合签名（群公钥 pairing）、`SignerBitmap` 中 ≥ threshold 的贡献者、epoch 一致性与 leader 一致性；
-- committee 成员之间通过 `/netp2p/control/state-update/2.0.0` 交换 proposal、vote、QC 和 snapshot；
-- 冷启动由静态 seed 描述 committee，height-1 leader 提交 genesis。
+- committee 成员之间通过 `/netp2p/control/state-update/3.0.0` 交换 proposal、vote、QC 和 snapshot；
+- 生产冷启动必须完成 DKG；每个 manager 本地持久化自己的 share，公共 manifest 只包含群公钥与成员公钥；
+- 开发 fixture 可以使用显式 development seed；生产路径要求 manifest、manager bundle 和 DKG material。
 
 `StateHash`/`TransitionHash` 使用 deterministic protobuf（`proto.MarshalOptions{Deterministic: true}`）计算，替代旧的 canonical JSON，保证跨进程、跨二进制一致且不受字段顺序或 HTML 转义影响。
 
-**BLS 阈值签名**：`internal/crypto/bls` 从网络 seed + `CommitteeEpoch` 确定性派生 Shamir 分片（t=3, n=4），群公钥写入 `CommitteeConfig`。Ed25519 继续承担 libp2p PeerID 与传输身份；BLS 只用于共识投票与 QC。任何 3 个分片可聚合验证，2 个不能。
+**BLS 阈值签名**：生产使用 DKG 生成的 BLS share；群公钥写入 `CommitteeConfig`。Ed25519 继续承担 libp2p PeerID 与传输身份；BLS 只用于共识投票与 QC。客户端验证聚合签名与 signer bitmap。
 
-**Committee 重配置**：`update_committee` 可在一次 transition 内替换最多 `f = 1` 个成员（必须保留至少一个 forwarding 成员，新成员需合法 PeerID/地址/BLS 公钥）；`rotate_committee_keys` 递增 `CommitteeEpoch` 并重新派生分片。commit 时先记录签名所用 committee，再原子替换，保证旧 epoch 的投票与新 epoch 的快照都被正确拒绝/接受。v0 规模固定为 4，不允许改变 committee size。
+**Committee 重配置**：`update_committee` 在一次 transition 内最多替换 `f` 个成员。对当前 `3/0/3` 配置而言，不能通过单成员替换获得容错窗口；成员变更应作为受控迁移处理。`rotate_committee_keys` 递增 `CommitteeEpoch` 并通过 DKG 重新生成分片。commit 时先记录签名所用 committee，再原子替换，保证旧 epoch 的投票与新 epoch 的快照被正确拒绝或接受。
 
 ### Catch-up 与 View Change
 
@@ -71,7 +74,7 @@ Client 保留最近 certified snapshot。Manager 短暂不可用时继续使用�
 
 ### Admin 管理面
 
-libp2p 协议 `/netp2p/control/admin/1.0.0` 接受带静态 token 的 `StateTransition`（upsert/remove group、policy、route、budget、setup key）。Manager 验证 token 后经 BFT Submit 认证，返回 certified snapshot。CLI 通过 `netp2pd --role admin` 提交。
+libp2p 协议 `/netp2p/control/admin/3.0.0` 接受带静态 token 的 `StateTransition`（upsert/remove group、policy、route、budget、setup key 等）。Manager 验证 token 后经 BFT Submit 认证，返回 certified snapshot。CLI 通过 `netp2pd --role admin` 提交。
 
 ### 权限模型（角色 × 模块 × 操作）
 
@@ -211,7 +214,7 @@ overlay frame 建立在 libp2p secure stream 上。数据面通过一个统一�
 当前 v0 数据流：
 
 1. 本地 endpoint 收到 IPv4 packet，按目标 overlay IP 查找 `PeerRecord`；
-2. 先用 conntrack flow 判断是否为已放行连接的回复；否则用 certified state 对 source→destination 方向执行 policy，允许则经 `/netp2p/data/frame/1.0.0` 发给对端；
+2. 先用 conntrack flow 判断是否为已放行连接的回复；否则用 certified state 对 source→destination 方向执行 policy，允许则经 `/netp2p/data/frame/3.0.0` 发给对端；
 3. 接收端校验 `RemotePeer()`、source overlay IP、目标为本机 overlay IP，再走同样的 flow → policy 判定；
 4. userspace 模式下，若收到 ICMP echo request，接收端生成 echo reply 并经 frame stream 发回请求方；TUN 模式交给内核。
 5. 目标不是 overlay peer 时，按 certified `Route` 解析 gateway（见下节）；命中则经同一 `sendToPeer` 送给 gateway，否则丢弃。
@@ -259,7 +262,7 @@ Gateway（`internal/exitnode`，Linux + TUN only）：
 
 **路径热备（客户端本地）**：客户端把 last-known-good path 与 path admission 状态持久化到 `<dataDir>/paths.json`（明文 JSON，`temp+rename` 原子写，TTL 24h），重启后仍只在 certified assignment 的 primary+fallback 集合内调整顺序：持久化的 LKG（未过期、仍在集合内、未被判定失败）优先，否则回落 certified 顺序，准入失败的路径永不被选中。选择成功与准入结论变化时去抖（≤1s）落盘。文件损坏或缺失视为无缓存，不影响认证状态。
 
-**配额**：`internal/quota` 的 `TokenBucket` 做真实限速（rate + burst），`Enforcer` 按 route → group → peer 优先级解析预算（同优先级取最具体匹配，`block` 优先于其它动作），动作语义为 `block` / `throttle`（有界延迟，上限 250ms）/ `degrade` / `switch_path`。客户端在出方向准入，manager 在转发方向按源 peer/assignment 准入并做 per-peer 有界队列与 backpressure。用量以增量经 `/netp2p/data/quota/2.0.0` 上报（默认 30s 或累计 64KB 触发），manager 聚合后经 `update_budget_usage` 写入 certified `TrafficBudget.UsedDailyBytes/UsedMonthlyBytes`，提交频率硬上限 60s 一次，避免共识 churn。日/月重置由 certified 时间戳驱动，跨 manager 确定性一致。
+**配额**：`internal/quota` 的 `TokenBucket` 做真实限速（rate + burst），`Enforcer` 按 route → group → peer 优先级解析预算（同优先级取最具体匹配，`block` 优先于其它动作），动作语义为 `block` / `throttle`（有界延迟，上限 250ms）/ `degrade` / `switch_path`。客户端在出方向准入，manager 在转发方向按源 peer/assignment 准入并做 per-peer 有界队列与 backpressure。用量以增量经 `/netp2p/data/quota/3.0.0` 上报（默认 30s 或累计 64KB 触发），manager 聚合后经 `update_budget_usage` 写入 certified `TrafficBudget.UsedDailyBytes/UsedMonthlyBytes`，提交频率硬上限 60s 一次，避免共识 churn。日/月重置由 certified 时间戳驱动，跨 manager 确定性一致。
 
 ## 可观测性
 
@@ -289,4 +292,4 @@ stateDiagram-v2
     Reconfigured --> Certified: subsequent heights
 ```
 
-**Schema 版本策略**：protobuf schema 位于 `proto/netp2p/v1/`，生成的 `.pb.go` 提交入库，使 `go build ./...` 无需 protoc；`make proto` 幂等。schema 不兼容变更必须同时递增 `internal/version.ProtocolVersion` 并整体升级 committee（v0 无跨版本兼容，见 `docs/upgrade.md`）。
+**Schema 版本策略**：protobuf schema 位于 `proto/netp2p/v1/`，生成的 `.pb.go` 提交入库，使 `go build ./...` 无需 protoc；`make proto` 幂等。schema 不兼容变更必须同时递增 `internal/version.ProtocolVersion` 并整体升级 committee（当前无跨协议版本兼容，见 [self-hosted upgrade](../self-hosted/upgrade.md)）。

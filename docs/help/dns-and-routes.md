@@ -27,6 +27,17 @@ On Linux, inspect the current resolver:
 
 ```bash
 cat /etc/resolv.conf
+resolvectl status
+ip route show table main
+```
+
+On Windows, inspect DNS and routes from elevated PowerShell:
+
+```powershell
+Get-DnsClientNrptRule
+Get-NetRoute -AddressFamily IPv4
+Resolve-DnsName some-overlay-name.<overlay-domain>
+Resolve-DnsName example.com
 ```
 
 ## Fixes
