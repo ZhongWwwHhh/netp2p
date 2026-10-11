@@ -59,6 +59,7 @@ type Client struct {
 	admissionQueue  []netproto.AdmissionReport
 	admissionWaiter *admissionWaiter
 	pathStore       *pathStore
+	pingWaiters     map[uint16]chan packet.IPv4Packet
 	stateStore      *clientStateStore
 	synthesizeICMP  bool
 	routesReady     bool

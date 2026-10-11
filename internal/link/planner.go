@@ -7,6 +7,7 @@ import (
 
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/path"
+	"github.com/netp2p/netp2p/internal/protocol"
 )
 
 // accessConfidenceFactor discounts manager-observed client links relative to
@@ -16,10 +17,11 @@ const accessConfidenceFactor = 0.6
 
 // AssignmentInput is the certified state needed by the planner.
 type AssignmentInput struct {
-	State     model.NetworkState
-	Committee []model.CommitteeMember
-	View      LinkView
-	Allowed   map[string]map[string][]model.Service
+	State      model.NetworkState
+	Committee  []model.CommitteeMember
+	View       LinkView
+	Admissions map[string]map[string]protocol.AdmissionReport
+	Allowed    map[string]map[string][]model.Service
 }
 
 // AssignmentFor returns a certified-style assignment for a policy-allowed peer
@@ -35,7 +37,7 @@ func AssignmentFor(input AssignmentInput, sourcePeerID, destinationPeerID string
 	}
 	settings := input.State.Settings
 	route, hasRoute := routeFor(input.State, source, destination)
-	options := pathOptions{Settings: settings}
+	options := pathOptions{Settings: settings, Admissions: input.Admissions}
 	if hasRoute {
 		options.Route = &route
 		options.BudgetLimits = forwardingCostLimits(input.State, route.BudgetIDs)
@@ -102,6 +104,7 @@ type pathOptions struct {
 	Settings     model.NetworkSettings
 	Route        *model.Route
 	BudgetLimits []uint64
+	Admissions   map[string]map[string]protocol.AdmissionReport
 }
 
 func candidatePaths(source, destination string, managers []model.CommitteeMember, view LinkView, options pathOptions) []scoredPath {
@@ -114,16 +117,25 @@ func candidatePaths(source, destination string, managers []model.CommitteeMember
 	if options.Settings.DirectPathEnabled {
 		spec := model.PathSpec{Kind: model.PathKindDirect, Confidence: 0.5}
 		spec.ID = AssignmentID(source, destination) + "-direct"
-		// The manager mesh cannot measure the peer-to-peer direct link, so the
-		// direct candidate is scored with unknown metrics: bandwidth stays
-		// unknown (not zero, which would trip the minimum-bandwidth constraint)
-		// and stability is assumed healthy. Direct therefore wins by default,
-		// and only loses when it is disabled or when a via-manager path's
-		// measured advantage clears the scoring window and switch penalty.
-		profile := path.LinkProfile{PathID: spec.ID, Type: path.PathDirect, Stability: 1}
-		// A direct path has no forwarding cost, so budget limits never exclude
-		// it; it still honours an AllowedTypes filter through path.Score.
-		result = append(result, scoredPath{Spec: spec, Score: path.Score(profile, constraints), Metric: metric})
+		// The manager mesh cannot measure the peer-to-peer direct link, so an
+		// unobserved direct candidate keeps its previous optimistic profile.
+		// Client admission is authoritative: a failed probe removes the
+		// candidate, while a successful probe confirms it.
+		stability := 1.0
+		includeDirect := true
+		if confirmed, ok := latestAdmission(options.Admissions, source, destination, spec.ID); ok {
+			if !confirmed.OK {
+				includeDirect = false
+			}
+			spec.Confidence = 1
+		}
+		if includeDirect {
+			profile := path.LinkProfile{PathID: spec.ID, Type: path.PathDirect, Stability: stability}
+			// A direct path has no forwarding cost, so budget limits never
+			// exclude it; it still honours an AllowedTypes filter through
+			// path.Score.
+			result = append(result, scoredPath{Spec: spec, Score: path.Score(profile, constraints), Metric: metric})
+		}
 	}
 	if !options.Settings.ViaManagerEnabled {
 		return result
@@ -132,6 +144,18 @@ func candidatePaths(source, destination string, managers []model.CommitteeMember
 		appendViaManagerPath(&result, source, destination, hops, view, constraints, options.BudgetLimits, metric)
 	}
 	return result
+}
+
+// latestAdmission reports the newest client observation for a path. Managers
+// retain one report per source/path; the timestamp tie-break keeps restarts
+// deterministic when clock precision is coarse.
+func latestAdmission(admissions map[string]map[string]protocol.AdmissionReport, source, destination, pathID string) (protocol.AdmissionReport, bool) {
+	paths, ok := admissions[source]
+	if !ok {
+		return protocol.AdmissionReport{}, false
+	}
+	report, ok := paths[pathID]
+	return report, ok
 }
 
 // maxCandidatePaths bounds path enumeration so a large committee cannot blow up

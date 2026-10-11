@@ -61,6 +61,8 @@ type ClientManagerStatus struct {
 	State           ClientState
 	ActiveManager   peer.ID
 	ManagerEndpoint string
+	Managers        []string
+	ActiveIndex     int
 	LastError       string
 	SnapshotHeight  uint64
 	NextAction      string
@@ -86,6 +88,43 @@ type persistedClientState struct {
 	ActiveManager    string               `json:"activeManager,omitempty"`
 	Snapshot         model.SignedSnapshot `json:"snapshot"`
 	Self             model.PeerRecord     `json:"self"`
+}
+
+// RecoveryBootstrap contains only the fields needed to configure a daemon
+// restart before it can connect to a manager. The certified snapshot itself
+// remains private to the client state store.
+type RecoveryBootstrap struct {
+	LocalPeerID      string
+	NetworkID        string
+	ManagerEndpoints []string
+}
+
+// LoadRecoveryBootstrap validates the persisted certified snapshot and returns
+// its manager failover endpoints so an upgrade can retain a first-run profile
+// while resuming the existing local identity.
+func LoadRecoveryBootstrap(stateDir string) (RecoveryBootstrap, error) {
+	store := loadClientStateStore(filepath.Join(stateDir, "state.json"))
+	state := store.data
+	if state.Version != 1 || state.LocalPeerID == "" {
+		return RecoveryBootstrap{}, fmt.Errorf("client recovery state is absent or unsupported")
+	}
+	if err := bft.ValidateClientSnapshot(state.Snapshot); err != nil {
+		return RecoveryBootstrap{}, fmt.Errorf("client recovery snapshot is invalid: %w", err)
+	}
+	endpoints := make([]string, 0, len(state.ManagerEndpoints))
+	for _, endpoint := range state.ManagerEndpoints {
+		if endpoint != "" {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	if len(endpoints) == 0 {
+		return RecoveryBootstrap{}, fmt.Errorf("client recovery state has no manager endpoints")
+	}
+	return RecoveryBootstrap{
+		LocalPeerID:      state.LocalPeerID,
+		NetworkID:        state.Snapshot.State.NetworkID,
+		ManagerEndpoints: endpoints,
+	}, nil
 }
 
 // pathStore persists the last-known-good path per destination and the local
@@ -468,13 +507,26 @@ func (client *Client) State() ClientState {
 	return client.connectionState
 }
 
+func (client *Client) activeManagerIndexLocked() int {
+	if len(client.manager.ID) == 0 {
+		return -1
+	}
+	for index, address := range client.managerAddresses {
+		info, err := peer.AddrInfoFromString(address)
+		if err == nil && info.ID == client.manager.ID {
+			return index
+		}
+	}
+	return -1
+}
+
 // ManagerStatus returns the operator-facing manager failover view.
 func (client *Client) ManagerStatus() ClientManagerStatus {
 	client.mu.RLock()
 	defer client.mu.RUnlock()
 	return ClientManagerStatus{
 		State: client.connectionState, ActiveManager: client.manager.ID,
-		ManagerEndpoint: client.managerAddress(), LastError: client.lastManagerError,
+		ManagerEndpoint: client.managerAddress(), Managers: append([]string(nil), client.managerAddresses...), ActiveIndex: client.activeManagerIndexLocked(), LastError: client.lastManagerError,
 		SnapshotHeight: client.snapshot.Height, NextAction: client.nextActionLocked(),
 	}
 }

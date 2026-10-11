@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/protocol"
 )
 
 func TestPlannerGeneratesDirectAndManagerFallback(t *testing.T) {
@@ -71,6 +72,55 @@ func TestPlannerRejectsUnknownHopsAndDisabledViaManager(t *testing.T) {
 	assignment, ok := AssignmentFor(AssignmentInput{State: state, Committee: committee}, "client-a", "client-b", 5)
 	if !ok || assignment.Primary.Kind != model.PathKindDirect || len(assignment.Fallbacks) != 0 {
 		t.Fatalf("unexpected assignment %+v ok=%v", assignment, ok)
+	}
+}
+
+func TestPlannerDropsDirectPathAfterFailedAdmission(t *testing.T) {
+	state, committee, view := twoManagerRouteFixture(t, nil)
+	directPath := AssignmentID("client-a", "client-b") + "-direct"
+	admissions := map[string]map[string]protocol.AdmissionReport{
+		"client-a": {
+			directPath: {AssignmentID: AssignmentID("client-a", "client-b"), PathID: directPath, OK: false, ObservedAt: time.Now().UTC()},
+		},
+	}
+
+	assignment, ok := AssignmentFor(AssignmentInput{
+		State: state, Committee: committee, View: view, Admissions: admissions,
+	}, "client-a", "client-b", 5)
+	if !ok {
+		t.Fatal("assignment not generated")
+	}
+	if assignment.Primary.Kind == model.PathKindDirect {
+		t.Fatalf("failed direct admission remained primary: %+v", assignment.Primary)
+	}
+	if assignment.Primary.Kind != model.PathKindViaManager || len(assignment.Primary.ManagerHops) == 0 {
+		t.Fatalf("planner did not fail over to a manager path: %+v", assignment.Primary)
+	}
+	for _, path := range assignment.Paths() {
+		if path.ID == directPath {
+			t.Fatalf("failed direct path remained a candidate: %+v", path)
+		}
+	}
+}
+
+func TestPlannerConfirmsDirectPathAfterSuccessfulAdmission(t *testing.T) {
+	state, committee, view := twoManagerRouteFixture(t, nil)
+	assignmentID := AssignmentID("client-a", "client-b")
+	directPath := assignmentID + "-direct"
+	admissions := map[string]map[string]protocol.AdmissionReport{
+		"client-a": {
+			directPath: {AssignmentID: assignmentID, PathID: directPath, OK: true, RTTMs: 2, ObservedAt: time.Now().UTC()},
+		},
+	}
+
+	assignment, ok := AssignmentFor(AssignmentInput{
+		State: state, Committee: committee, View: view, Admissions: admissions,
+	}, "client-a", "client-b", 5)
+	if !ok {
+		t.Fatal("assignment not generated")
+	}
+	if assignment.Primary.ID != directPath || assignment.Primary.Confidence != 1 {
+		t.Fatalf("confirmed direct primary = %+v", assignment.Primary)
 	}
 }
 

@@ -20,8 +20,13 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 	collector.RecordSyncRequest()
 	collector.RecordSyncError()
 	collector.RecordSyncTimeout()
-	collector.BFTSubmitAttempts.Add(2)
-	collector.BFTSubmitFailures.Add(1)
+	collector.SetBFTView(3, 1)
+	collector.SetBFTHeightLag(4, 6)
+	collector.RecordBFTRoundTimeout()
+	collector.RecordBFTSubmit("accepted", 4, false)
+	collector.RecordBFTSubmit("round_timeout", 5, true)
+	collector.BFTCatchUps.Add(1)
+	collector.BFTCatchupFailures.Add(2)
 
 	recorder := httptest.NewRecorder()
 	collector.Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))
@@ -47,8 +52,27 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 		t.Fatalf("sync counters missing from exposition:\n%s", body)
 	}
 	if !strings.Contains(body, "netp2p_bft_submit_attempts_total 2") ||
-		!strings.Contains(body, "netp2p_bft_submit_failures_total 1") {
+		!strings.Contains(body, "netp2p_bft_submit_failures_total 1") ||
+		!strings.Contains(body, `netp2p_bft_submit_attempts_by_result_total{result="accepted",round="4"} 1`) ||
+		!strings.Contains(body, `netp2p_bft_submit_attempts_by_result_total{result="round_timeout",round="5"} 1`) ||
+		!strings.Contains(body, `netp2p_bft_submit_failures_by_result_total{result="round_timeout",round="5"} 1`) {
 		t.Fatalf("BFT submit counters missing from exposition:\n%s", body)
+	}
+	if !strings.Contains(body, `result="accepted"`) ||
+		!strings.Contains(body, `result="round_timeout"`) ||
+		!strings.Contains(body, `round="4"`) ||
+		!strings.Contains(body, `round="5"`) {
+		t.Fatalf("BFT submit labels missing from exposition:\n%s", body)
+	}
+	if !strings.Contains(body, "netp2p_bft_round 3") ||
+		!strings.Contains(body, "netp2p_bft_uncommitted_proposals 1") ||
+		!strings.Contains(body, "netp2p_bft_round_timeouts_total 1") ||
+		!strings.Contains(body, "netp2p_bft_height_lag 2") {
+		t.Fatalf("BFT view metrics missing from exposition:\n%s", body)
+	}
+	if !strings.Contains(body, "netp2p_bft_catchup_success_total 1") ||
+		!strings.Contains(body, "netp2p_bft_catchup_failures_total 2") {
+		t.Fatalf("BFT catch-up metrics missing from exposition:\n%s", body)
 	}
 	if !strings.Contains(body, "go_goroutines") {
 		t.Fatalf("go goroutine metric missing from exposition:\n%s", body)
@@ -90,6 +114,10 @@ func TestBFTCommitHelpers(t *testing.T) {
 	nilCollector.RecordSyncRequest()
 	nilCollector.RecordSyncError()
 	nilCollector.RecordSyncTimeout()
+	nilCollector.SetBFTView(1, 1)
+	nilCollector.SetBFTHeightLag(1, 2)
+	nilCollector.RecordBFTRoundTimeout()
+	nilCollector.RecordBFTSubmit("accepted", 1, false)
 }
 
 func gaugeValue(t *testing.T, gauge prometheus.Gauge) float64 {

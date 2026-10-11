@@ -271,6 +271,12 @@ func TestClientManagerFailoverBetweenThreeEndpoints(t *testing.T) {
 	if status.State != ClientStateReady {
 		t.Fatalf("state after second failover = %q, want ready", status.State)
 	}
+	if len(status.Managers) != 3 {
+		t.Fatalf("failover endpoint count = %d, want 3", len(status.Managers))
+	}
+	if status.ActiveIndex != 2 {
+		t.Fatalf("active failover index = %d, want 2", status.ActiveIndex)
+	}
 
 	_ = local.Host.Network().ClosePeer(managers[2].Host.ID())
 	managers[2].Close()

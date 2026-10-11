@@ -42,7 +42,7 @@ func Validate(path string, allowFirstRun bool) (string, error) {
 		return "", err
 	}
 
-	target := cfg.Manager != "" || cfg.TrustPath != ""
+	target := cfg.Manager != "" || cfg.TrustPath != "" || len(cfg.ManagerEndpoints) > 0
 	credentials := cfg.SetupKey != "" || cfg.SetupKeyFile != "" || cfg.SSO
 	if !target && !credentials {
 		if !allowFirstRun {

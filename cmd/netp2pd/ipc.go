@@ -10,13 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/netp2p/netp2p/internal/client"
 	"github.com/netp2p/netp2p/internal/runtimeconfig"
 	"github.com/netp2p/netp2p/internal/version"
 	"gopkg.in/yaml.v3"
 )
+
+var activeClient atomic.Pointer[client.Client]
 
 type ipcState struct {
 	mu         sync.RWMutex
@@ -206,7 +211,7 @@ func (state *ipcState) reloadConfig() error {
 	if err != nil {
 		return fmt.Errorf("reload runtime config: %w", err)
 	}
-	if err := validateRuntimeConfig(cfg); err != nil && !runtimeconfig.IsUnprovisionedClientError(err) {
+	if err := hydrateClientRecovery(&cfg); err != nil {
 		return fmt.Errorf("reload runtime config: %w", err)
 	}
 	if cfg.Role == "client" && cfg.StatusFile == "" {
@@ -392,11 +397,43 @@ func doctorNextAction(state, lastErr, clientState, clientNextAction string) stri
 }
 
 func (state *ipcState) handlePing(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet {
+	if request.Method == http.MethodGet {
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "version": version.Version})
+		return
+	}
+	if request.Method != http.MethodPost {
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "version": version.Version})
+	current := activeClient.Load()
+	if current == nil {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]any{"error": "client data plane is not active"})
+		return
+	}
+	if err := request.ParseForm(); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": "parse ping request"})
+		return
+	}
+	target := net.ParseIP(request.FormValue("target"))
+	if target == nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"error": "invalid target"})
+		return
+	}
+	timeout := 3 * time.Second
+	if raw := request.FormValue("timeout_ms"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 || value > 10000 {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"error": "invalid timeout_ms"})
+			return
+		}
+		timeout = time.Duration(value) * time.Millisecond
+	}
+	elapsed, err := current.Ping(request.Context(), target, timeout)
+	if err != nil {
+		writeJSON(writer, http.StatusGatewayTimeout, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "rttMs": float64(elapsed.Microseconds()) / 1000})
 }
 
 func writeJSON(writer http.ResponseWriter, status int, payload any) {

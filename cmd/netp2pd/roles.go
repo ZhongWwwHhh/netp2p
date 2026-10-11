@@ -406,6 +406,7 @@ func runManager(ctx context.Context, options managerOptions) error {
 	go netManager.RunLinkProbe(ctx)
 	if !degraded {
 		go netManager.RunScheduler(ctx)
+		go netManager.RunCatchUp(ctx)
 		go netManager.RunQuotaSettlement(ctx)
 	}
 	go netManager.RunAlerting(ctx)

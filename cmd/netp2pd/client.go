@@ -115,6 +115,8 @@ func runClient(ctx context.Context, options clientOptions) error {
 		return err
 	}
 	defer netClient.Close()
+	defer activeClient.Store(nil)
+	activeClient.Store(netClient)
 	if resolver != nil {
 		netClient.SetDNSResolver(resolver)
 		netClient.SetDNSUpstreams(upstreams)
@@ -184,7 +186,7 @@ func clientStatus(node *p2p.Node, netClient *client.Client, options clientOption
 		"peerID": node.Host.ID().String(), "overlayIP": netClient.Self().OverlayIP,
 		"height": netClient.SnapshotHeight(), "packetListen": options.packetListen,
 		"mode": clientMode(tunDevice), "assignments": paths,
-		"state": string(netClient.State()), "manager": netClient.ManagerStatus().ActiveManager.String(),
+		"state": string(netClient.State()), "manager": netClient.ManagerStatus().ActiveManager.String(), "managerFailover": managerFailoverView(netClient.ManagerStatus()),
 		"pathDiagnostics": netClient.PathDiagnostics(), "nextAction": netClient.NextAction(),
 	})
 }
@@ -221,6 +223,12 @@ func trustManagerEndpoints(trust config.ClientTrust) []string {
 		addresses = append(addresses, address)
 	}
 	return addresses
+}
+
+func managerFailoverView(status client.ClientManagerStatus) map[string]any {
+	return map[string]any{
+		"configured": len(status.Managers), "activeIndex": status.ActiveIndex,
+	}
 }
 
 func managerAddrInfos(addresses []string) ([]peer.AddrInfo, error) {

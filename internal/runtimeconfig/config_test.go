@@ -92,7 +92,7 @@ func TestPackagedRuntimeIsUnprovisionedClientProfile(t *testing.T) {
 	if cfg.Role != "client" {
 		t.Fatalf("packaged role = %q, want client", cfg.Role)
 	}
-	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "manager or trust") {
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "manager, trust or managerEndpoints") {
 		t.Fatalf("unprovisioned client profile validation = %v, want missing manager/trust", err)
 	}
 
@@ -101,6 +101,36 @@ func TestPackagedRuntimeIsUnprovisionedClientProfile(t *testing.T) {
 	cfg.SetupKeyFile = "/etc/netp2p/setup-key"
 	if err := Validate(cfg); err != nil {
 		t.Fatalf("provisioned packaged profile should validate: %v", err)
+	}
+}
+
+func TestManagerEndpointFailoverProfileValidates(t *testing.T) {
+	cfg := Default()
+	cfg.Role = "client"
+	cfg.NetworkID = "netp2p-production"
+	cfg.ManagerEndpoints = []string{
+		"/ip4/192.0.2.1/udp/4001/quic-v1/p2p/12D3KooWExample1",
+		"/ip4/192.0.2.2/udp/4001/quic-v1/p2p/12D3KooWExample2",
+	}
+	cfg.SetupKeyFile = "/etc/netp2p/setup-key"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate manager-endpoint profile: %v", err)
+	}
+}
+
+func TestRecoveredClientProfileDoesNotNeedSetupKey(t *testing.T) {
+	cfg := Default()
+	cfg.Role = "client"
+	cfg.NetworkID = "netp2p-production"
+	cfg.ManagerEndpoints = []string{"/ip4/192.0.2.1/udp/4001/quic-v1/p2p/12D3KooWExample"}
+	cfg.ResumeFromState = true
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate recovered profile: %v", err)
+	}
+	cfg.ResumeFromState = false
+	err := Validate(cfg)
+	if err == nil || !IsUnprovisionedClientError(err) {
+		t.Fatalf("Validate non-recovered profile = %v, want unprovisioned error", err)
 	}
 }
 

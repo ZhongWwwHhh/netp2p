@@ -18,6 +18,7 @@ import (
 
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 	"github.com/netp2p/netp2p/internal/crypto/bls"
+	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/wire"
 	"github.com/netp2p/netp2p/internal/wire/pb"
@@ -100,6 +101,8 @@ type Engine struct {
 	proposals       map[proposalKey]Proposal
 	votes           map[proposalKey][]Vote
 	committed       map[uint64]model.SignedSnapshot
+	knownHeight     uint64
+	metrics         *metrics.Metrics
 	listeners       []func(model.SignedSnapshot)
 }
 
@@ -311,6 +314,34 @@ func (engine *Engine) CurrentRound() uint64 {
 	engine.mu.RLock()
 	defer engine.mu.RUnlock()
 	return engine.currentRound
+}
+
+// SetMetrics attaches optional engine-local BFT observability and publishes a
+// snapshot of state restored from the local ledger.
+func (engine *Engine) SetMetrics(collector *metrics.Metrics) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	engine.metrics = collector
+	if collector == nil {
+		return
+	}
+	engine.metrics.BFTHeight.Set(float64(engine.height))
+	engine.publishViewLocked()
+	engine.publishHeightLagLocked()
+}
+
+// UncommittedProposals reports proposals retained for the next height.
+func (engine *Engine) UncommittedProposals() int {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return engine.uncommittedProposalCountLocked()
+}
+
+// KnownHeight is the highest locally committed or authenticated remote height.
+func (engine *Engine) KnownHeight() uint64 {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return engine.knownHeight
 }
 
 // AdvanceExpiredRound rotates an idle local view after its deadline. Tests and
@@ -654,11 +685,13 @@ func (engine *Engine) clearUncommittedHeightLocked(height uint64) {
 			delete(engine.votes, key)
 		}
 	}
+	engine.publishViewLocked()
 }
 
 func (engine *Engine) startRoundLocked(round uint64) {
 	engine.currentRound = round
 	engine.roundDeadline = time.Now().Add(engine.roundTimeout)
+	engine.publishViewLocked()
 }
 
 func (engine *Engine) expireRoundLocked(height uint64) {
@@ -671,6 +704,43 @@ func (engine *Engine) expireRoundLocked(height uint64) {
 	engine.clearUncommittedHeightLocked(height)
 	engine.currentRound++
 	engine.roundDeadline = time.Now().Add(engine.roundTimeout)
+	engine.metrics.RecordBFTRoundTimeout()
+	engine.publishViewLocked()
+}
+
+func (engine *Engine) uncommittedProposalCountLocked() int {
+	next := engine.height + 1
+	count := 0
+	for key := range engine.proposals {
+		if key.Height == next {
+			count++
+		}
+	}
+	return count
+}
+
+func (engine *Engine) publishViewLocked() {
+	engine.metrics.SetBFTView(engine.currentRound, engine.uncommittedProposalCountLocked())
+}
+
+func (engine *Engine) publishHeightLagLocked() {
+	engine.metrics.SetBFTHeightLag(engine.height, engine.knownHeight)
+}
+
+func (engine *Engine) observeCertifiedHeightLocked(height uint64) {
+	if height > engine.knownHeight {
+		engine.knownHeight = height
+	}
+	engine.publishHeightLagLocked()
+}
+
+// ObserveCertifiedHeight records a height already validated by the caller. It
+// lets a manager report a lagging ledger even when a gap prevents CatchUp from
+// adopting the snapshot immediately.
+func (engine *Engine) ObserveCertifiedHeight(height uint64) {
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	engine.observeCertifiedHeightLocked(height)
 }
 
 func (engine *Engine) hasUncommittedHeightLocked(height uint64) bool {
@@ -717,6 +787,7 @@ func (engine *Engine) CatchUp(snapshot model.SignedSnapshot) error {
 		return fmt.Errorf("invalid snapshot: %w", err)
 	}
 	engine.mu.Lock()
+	engine.observeCertifiedHeightLocked(snapshot.Height)
 	if snapshot.Height <= engine.height {
 		engine.mu.Unlock()
 		return ErrStaleHeight
@@ -985,6 +1056,7 @@ func (engine *Engine) Commit(proposal Proposal, qc model.QuorumCertificate) (mod
 	}
 	engine.current = NormalizeState(proposal.State)
 	engine.height = proposal.Height
+	engine.observeCertifiedHeightLocked(proposal.Height)
 	engine.currentRound = 0
 	engine.startRoundLocked(0)
 	// The certificate was produced under the committee and key configuration

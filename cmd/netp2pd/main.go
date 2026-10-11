@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/netp2p/netp2p/internal/client"
 	"github.com/netp2p/netp2p/internal/config"
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/runtimeconfig"
@@ -99,7 +100,7 @@ func main() {
 		alertWebhook: alertWebhook, alertWebhookSecret: alertWebhookSecret, alertAllowInsecure: alertAllowInsecure,
 		alertInterval: alertInterval, alertDropCount: alertDropCount, alertDropRate: alertDropRate, ipcPath: ipcPath,
 	})
-	if err := validateRuntimeConfig(cfg); err != nil && !runtimeconfig.IsUnprovisionedClientError(err) {
+	if err := hydrateClientRecovery(&cfg); err != nil {
 		log.Fatal(err)
 	}
 	if cfg.Role == "client" && cfg.StatusFile == "" {
@@ -225,7 +226,10 @@ func clientOptionsFromRuntimeConfig(cfg runtimeConfig) (clientOptions, error) {
 	}
 	metricsListen := cfg.MetricsListen
 	managerAddr := cfg.Manager
-	managerEndpoints := make([]string, 0)
+	managerEndpoints := append([]string(nil), cfg.ManagerEndpoints...)
+	if managerAddr == "" && len(managerEndpoints) > 0 {
+		managerAddr = managerEndpoints[0]
+	}
 	if cfg.TrustPath != "" {
 		trust, err := config.LoadClientTrust(cfg.TrustPath)
 		if err != nil {
@@ -252,6 +256,28 @@ func clientOptionsFromRuntimeConfig(cfg runtimeConfig) (clientOptions, error) {
 		sso: cfg.SSO, ssoIssuer: cfg.SSOIssuer, ssoClientID: cfg.SSOClientID, seedPath: cfg.SeedPath,
 		trustPath: cfg.TrustPath, managerEndpoints: managerEndpoints, metricsListen: metricsListen,
 	}, nil
+}
+
+// hydrateClientRecovery lets a service upgrade start from a first-run profile
+// while state.json retains the peer identity and manager failover set. Invalid
+// or absent recovery state is treated as first-run, not as a fatal error.
+func hydrateClientRecovery(cfg *runtimeConfig) error {
+	if cfg.Role != "client" || cfg.Manager != "" || cfg.TrustPath != "" || len(cfg.ManagerEndpoints) > 0 {
+		if err := validateRuntimeConfig(*cfg); err != nil && !runtimeconfig.IsUnprovisionedClientError(err) {
+			return err
+		}
+		return nil
+	}
+	bootstrap, err := client.LoadRecoveryBootstrap(filepath.Join(cfg.DataDir, "client"))
+	if err == nil {
+		cfg.NetworkID = bootstrap.NetworkID
+		cfg.ManagerEndpoints = bootstrap.ManagerEndpoints
+		cfg.ResumeFromState = true
+	}
+	if err := validateRuntimeConfig(*cfg); err != nil && !runtimeconfig.IsUnprovisionedClientError(err) {
+		return err
+	}
+	return nil
 }
 
 func containsString(values []string, want string) bool {

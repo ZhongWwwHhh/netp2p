@@ -561,17 +561,7 @@ func (mesh *CommitteeMesh) CatchUp(ctx context.Context) error {
 // current leader: the transition is forwarded to the leader and the caller
 // waits for the committed snapshot.
 func (mesh *CommitteeMesh) Submit(transition model.StateTransition) (model.SignedSnapshot, error) {
-	mesh.mu.Lock()
-	collector := mesh.metrics
-	mesh.mu.Unlock()
-	if collector != nil {
-		collector.BFTSubmitAttempts.Inc()
-	}
-	snapshot, err := mesh.submit(transition)
-	if err != nil && collector != nil {
-		collector.BFTSubmitFailures.Inc()
-	}
-	return snapshot, err
+	return mesh.submit(transition)
 }
 
 func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.SignedSnapshot, error) {
@@ -583,6 +573,12 @@ func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.Signe
 	// conflicting transitions at the same height.
 	mesh.submitMu.Lock()
 	defer mesh.submitMu.Unlock()
+	mesh.mu.Lock()
+	collector := mesh.metrics
+	mesh.mu.Unlock()
+	recordSubmit := func(result string, round uint64, failed bool) {
+		collector.RecordBFTSubmit(result, round, failed)
+	}
 
 	// ApplyTransition is deterministic, so a transition that cannot apply is
 	// rejected before proposing rather than burning every committee round and
@@ -591,6 +587,7 @@ func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.Signe
 	probe := mesh.engine.CurrentState()
 	probe.EngineCommittee = mesh.engine.CommitteeMembers()
 	if err := bft.ApplyTransition(&probe, transition); err != nil {
+		recordSubmit("invalid_transition", mesh.engine.CurrentRound(), true)
 		return model.SignedSnapshot{}, err
 	}
 
@@ -615,15 +612,17 @@ func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.Signe
 		startRound++
 	}
 	for attempt := uint64(0); attempt < uint64(params.Size); attempt++ {
+		round := startRound + attempt
 		// Every proposal attempt owns a fresh probe generation and response
 		// channel. A late ack from a prior attempt can neither complete this
 		// readiness check nor leak into a later attempt.
 		readiness, err := mesh.ensureCommitteeAvailable()
 		if err != nil {
+			recordSubmit("committee_unavailable", round, true)
 			return model.SignedSnapshot{}, err
 		}
-		round := startRound + attempt
 		if err := mesh.validateProposalRound(round, readiness); err != nil {
+			recordSubmit("invalid_round", round, true)
 			return model.SignedSnapshot{}, err
 		}
 		height := mesh.engine.Height() + 1
@@ -633,10 +632,12 @@ func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.Signe
 		} else {
 			leaderPeer, ok := mesh.peerSnapshot()[leader.ID]
 			if !ok {
+				recordSubmit("leader_unknown", round, true)
 				continue
 			}
 			round := round
 			if err := mesh.send(leaderPeer, model.CommitteeEnvelope{Type: "forward", Transition: &transition, Round: round}); err != nil {
+				recordSubmit("leader_unreachable", round, true)
 				continue
 			}
 		}
@@ -649,11 +650,14 @@ func (mesh *CommitteeMesh) submit(transition model.StateTransition) (model.Signe
 			select {
 			case snapshot := <-subscriber:
 				if snapshot.Height > startHeight && bytes.Equal(bft.TransitionHash(snapshot.Transition), transitionHash) {
+					recordSubmit("accepted", round, false)
 					return snapshot, nil
 				}
 			case <-roundDeadline:
 				rotating = false
+				recordSubmit("round_timeout", round, true)
 			case <-totalTimeout:
+				recordSubmit("quorum_timeout", round, true)
 				return model.SignedSnapshot{}, fmt.Errorf("timed out waiting for BFT quorum after height %d", startHeight)
 			}
 		}

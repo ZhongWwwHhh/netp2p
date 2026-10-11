@@ -372,6 +372,9 @@ func (client *Client) handleFrameWithAdmission(remote peer.ID, raw []byte, admit
 		debugDrop("inbound: source %s does not own %s", source.OverlayIP, ipPacket.Source())
 		return
 	}
+	if isEchoReply(ipPacket) && client.deliverDiagnosticPing(ipPacket) {
+		return
+	}
 	if isEchoReply(ipPacket) && client.deliverAdmission(ipPacket) {
 		return
 	}

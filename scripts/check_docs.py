@@ -9,9 +9,15 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import shutil
+import argparse
+import io
 import subprocess
 import sys
+import tarfile
+import tempfile
 import urllib.parse
+import zipfile
 from pathlib import Path
 
 
@@ -50,6 +56,121 @@ SECRET_REF_RES = [
 ]
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(<([^>]+)>|\[[^\]]*\]\(([^)\s]+)")
+
+
+def load_denylist(path: str) -> list[str]:
+    values: list[str] = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def denied_values(data: bytes, values: list[str]) -> bool:
+    return any(value.encode("utf-8") in data for value in values)
+
+
+def tar_members(label: str, payload: bytes):
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
+            for member in archive:
+                if not member.isfile():
+                    continue
+                stream = archive.extractfile(member)
+                if stream is None:
+                    continue
+                yield f"{label}:{member.name}", stream.read()
+    except (tarfile.TarError, OSError):
+        return
+
+
+def deb_members(label: str, data: bytes):
+    if not data.startswith(b"!<arch>\n"):
+        return
+    position = len(b"!<arch>\n")
+    while position + 60 <= len(data):
+        header = data[position:position + 60]
+        name = header[:16].decode("ascii", "replace").rstrip()
+        try:
+            size = int(header[48:58].decode("ascii").strip())
+        except ValueError:
+            return
+        position += 60
+        payload = data[position:position + size]
+        yield f"{label}:{name}", payload
+        if name.startswith(("control.tar", "data.tar")):
+            yield from tar_members(f"{label}:{name}", payload)
+        position += size + (size & 1)
+
+
+def archive_members(path: Path, data: bytes):
+    label = path.name
+    suffixes = {path.suffix.lower(), "".join(path.suffixes[-2:]).lower()}
+    if ".tar" in suffixes or ".tar.gz" in suffixes or ".tgz" in suffixes:
+        yield from tar_members(label, data)
+    elif path.suffix.lower() == ".zip":
+        try:
+            with zipfile.ZipFile(path) as archive:
+                for name in archive.namelist():
+                    if not name.endswith("/"):
+                        yield f"{label}:{name}", archive.read(name)
+        except (zipfile.BadZipFile, OSError):
+            return
+    elif path.suffix.lower() == ".deb":
+        yield from deb_members(label, data)
+
+
+def extracted_members(path: Path) -> list[Path]:
+    """Extract package formats that need a platform decoder.
+
+    CI installs the helper tools before release scanning. When a helper is
+    absent locally, only the raw file scan is performed; local development does
+    not silently require platform packages.
+    """
+    suffix = path.suffix.lower()
+    with tempfile.TemporaryDirectory(prefix="netp2p-release-scan-") as directory:
+        output = Path(directory)
+        try:
+            if suffix == ".msi" and shutil.which("msiextract"):
+                subprocess.run(
+                    ["msiextract", "--directory", str(output), str(path)],
+                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            elif suffix == ".rpm" and shutil.which("rpm2cpio") and shutil.which("cpio"):
+                payload = output / "payload.cpio"
+                with payload.open("wb") as stream:
+                    subprocess.run(["rpm2cpio", str(path)], check=True, stdout=stream)
+                subprocess.run(
+                    ["cpio", "-id", "--quiet", "--no-absolute-filenames"],
+                    check=True, cwd=output, input=payload.read_bytes(),
+                )
+            else:
+                return []
+        except (OSError, subprocess.SubprocessError):
+            return []
+        return [item for item in output.rglob("*") if item.is_file()]
+
+
+def scan_release_artifacts(directory: Path, values: list[str]) -> list[str]:
+    findings: list[str] = []
+    files = 0
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        files += 1
+        data = path.read_bytes()
+        if denied_values(data, values):
+            findings.append(f"{path}: contains a denied deployment value")
+        for label, payload in archive_members(path, data):
+            if denied_values(payload, values):
+                findings.append(f"{label}: contains a denied deployment value")
+        for extracted in extracted_members(path):
+            if denied_values(extracted.read_bytes(), values):
+                findings.append(f"{label}:{extracted.name}: contains a denied deployment value")
+    if not files:
+        findings.append(f"{directory}: no release artifacts found")
+    return findings
 
 
 def tracked_files() -> list[str]:
@@ -109,6 +230,12 @@ def check_markdown_links(path: str, lines: list[str], findings: list[str]) -> No
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--release-dir", type=Path, help="recursive release artifact directory to scan")
+    parser.add_argument("--denylist", help="file containing one private deployment value per line")
+    args = parser.parse_args()
+    if bool(args.release_dir) != bool(args.denylist):
+        parser.error("--release-dir and --denylist must be used together")
     files = tracked_files()
     failures: list[str] = []
     for name in files:
@@ -138,13 +265,18 @@ def main() -> int:
             check_markdown_links(name, lines, md_findings)
             failures.extend(f"{name}: {finding}" for finding in md_findings)
 
+    if args.release_dir:
+        release_values = load_denylist(args.denylist)
+        failures.extend(scan_release_artifacts(args.release_dir, release_values))
+
     if failures:
         print("docs hygiene failures:", file=sys.stderr)
         for failure in failures:
             print(f"  {failure}", file=sys.stderr)
         print(f"{len(failures)} finding(s)", file=sys.stderr)
         return 1
-    print(f"docs hygiene OK ({len(files)} tracked files checked)")
+    release_count = len(list(args.release_dir.rglob("*"))) if args.release_dir else 0
+    print(f"docs hygiene OK ({len(files)} tracked files, {release_count} release entries checked)")
     return 0
 
 

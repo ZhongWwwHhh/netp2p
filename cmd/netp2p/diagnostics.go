@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/netp2p/netp2p/internal/packet"
+	"github.com/netp2p/netp2p/internal/runtimeconfig"
 	"github.com/netp2p/netp2p/internal/tun"
 	"github.com/netp2p/netp2p/internal/version"
 )
@@ -42,17 +45,28 @@ func runPing(args []string) error {
 	if *packetListen != "" {
 		cfg.PacketListen = *packetListen
 	}
+
+	var status map[string]any
+	var statusErr error
+	client := newIPCClient(cfg.IPC.Path)
+	statusCtx, cancelStatus := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelStatus()
+	statusErr = client.call(statusCtx, "GET", "/v1/status", nil, &status)
 	sourceIP := net.ParseIP(*source)
-	if sourceIP == nil {
-		client := newIPCClient(cfg.IPC.Path)
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		var status map[string]any
-		if err := client.call(ctx, "GET", "/v1/status", nil, &status); err == nil {
-			if clientStatus, ok := status["client"].(map[string]any); ok {
-				sourceIP = net.ParseIP(fmt.Sprint(clientStatus["overlayIP"]))
-			}
+	var clientStatus map[string]any
+	if sourceIP == nil && statusErr == nil {
+		if value, ok := status["client"].(map[string]any); ok {
+			clientStatus = value
+			sourceIP = net.ParseIP(fmt.Sprint(clientStatus["overlayIP"]))
 		}
+	}
+	if *packetListen == "" && statusString(clientStatus, "mode") == "tun" {
+		elapsed, err := daemonPing(cfg, target, *timeout)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("64 bytes from %s: time=%s\n", target, elapsed.Round(time.Microsecond))
+		return nil
 	}
 	if sourceIP == nil {
 		return fmt.Errorf("source overlay IP is unknown; pass --source")
@@ -97,6 +111,33 @@ func runPing(args []string) error {
 	return nil
 }
 
+type diagnosticCheck struct {
+	name   string
+	detail string
+	err    error
+}
+
+func daemonPing(cfg runtimeconfig.Config, target net.IP, timeout time.Duration) (time.Duration, error) {
+	if timeout <= 0 || timeout > 4*time.Second {
+		timeout = 3 * time.Second
+	}
+	client := newIPCClient(cfg.IPC.Path)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	defer cancel()
+	endpoint := fmt.Sprintf("/v1/ping?target=%s&timeout_ms=%d", url.QueryEscape(target.String()), timeout.Milliseconds())
+	var payload struct {
+		OK    bool    `json:"ok"`
+		RTTMs float64 `json:"rttMs"`
+		Error string  `json:"error"`
+	}
+	if err := client.call(ctx, http.MethodPost, endpoint, nil, &payload); err != nil {
+		return 0, fmt.Errorf("daemon ping: %w", err)
+	}
+	if !payload.OK {
+		return 0, fmt.Errorf("daemon ping: %s", payload.Error)
+	}
+	return time.Duration(payload.RTTMs * float64(time.Millisecond)), nil
+}
 func runNetcheck(args []string) error {
 	flags := flag.NewFlagSet("netcheck", flag.ContinueOnError)
 	configPath := flags.String("config", defaultConfigPath(), "runtime config path")
@@ -111,46 +152,99 @@ func runNetcheck(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var status map[string]any
-	daemonErr := client.call(ctx, "GET", "/v1/status", nil, &status)
-	checkErrors := make([]error, 0, 5)
-	printCheck("version", version.Version, nil)
-	printCheck("daemon", fmt.Sprint(status["state"]), daemonErr)
-	checkErrors = append(checkErrors, daemonErr)
-	if cfg.Manager != "" {
-		printCheck("manager", cfg.Manager, nil)
-	} else {
-		managerErr := errors.New("not configured")
-		printCheck("manager", "not configured", managerErr)
-		checkErrors = append(checkErrors, managerErr)
+	statusErr := client.call(ctx, "GET", "/v1/status", nil, &status)
+	if clientStatus, ok := status["client"].(map[string]any); ok {
+		for key, value := range clientStatus {
+			if _, exists := status[key]; !exists {
+				status[key] = value
+			}
+		}
 	}
-	if conn, err := net.ListenPacket("udp", cfg.PacketListen); err == nil {
-		_ = conn.Close()
-		printCheck("packet endpoint", cfg.PacketListen, nil)
-	} else {
-		printCheck("packet endpoint", cfg.PacketListen, err)
-		checkErrors = append(checkErrors, err)
+	checks := netcheckChecks(status, cfg, statusErr)
+	for _, check := range checks {
+		printCheck(check.name, check.detail, check.err)
 	}
-	if cfg.NoDNS {
-		printCheck("dns", "disabled", nil)
-	} else if conn, err := net.ListenPacket("udp", cfg.DNSListen); err == nil {
-		_ = conn.Close()
-		printCheck("dns", cfg.DNSListen, nil)
-	} else {
-		printCheck("dns", cfg.DNSListen, err)
-		checkErrors = append(checkErrors, err)
-	}
-	if cfg.NoTun {
-		printCheck("tun", "disabled", nil)
-	} else if device, err := tun.Open(cfg.TunName, nil); err == nil {
-		_ = device.Close()
-		printCheck("tun", cfg.TunName, nil)
-	} else {
-		printCheck("tun", cfg.TunName, err)
-		checkErrors = append(checkErrors, err)
-	}
-	return aggregateNetcheckErrors(checkErrors)
+	return aggregateNetcheckErrors(checkErrors(checks))
 }
 
+func checkErrors(checks []diagnosticCheck) []error {
+	errorsList := make([]error, 0, len(checks))
+	for _, check := range checks {
+		errorsList = append(errorsList, check.err)
+	}
+	return errorsList
+}
+
+// netcheckChecks consumes the daemon's live status. In particular, manager
+// failover belongs to certified runtime state, and the packet endpoint must not
+// be probed by taking ownership of it away from the daemon.
+func netcheckChecks(status map[string]any, cfg runtimeconfig.Config, statusErr error) []diagnosticCheck {
+	checks := make([]diagnosticCheck, 0, 7)
+	checks = append(checks, diagnosticCheck{name: "version", detail: version.Version})
+	checks = append(checks, diagnosticCheck{name: "daemon", detail: fmt.Sprint(status["state"]), err: statusErr})
+
+	activeManager := statusString(status, "manager")
+	endpointCount := failoverCount(status)
+	if activeManager != "" {
+		checks = append(checks, diagnosticCheck{name: "manager", detail: activeManager})
+		checks = append(checks, diagnosticCheck{name: "manager failover", detail: fmt.Sprintf("%d configured", max(endpointCount, 1))})
+	} else if cfg.Manager != "" {
+		checks = append(checks, diagnosticCheck{name: "manager", detail: cfg.Manager})
+		checks = append(checks, diagnosticCheck{name: "manager failover", detail: "active endpoint only"})
+	} else {
+		checks = append(checks, diagnosticCheck{name: "manager", detail: "not configured", err: errors.New("not configured")})
+		checks = append(checks, diagnosticCheck{name: "manager failover", detail: "none configured", err: errors.New("not configured")})
+	}
+
+	mode := statusString(status, "mode")
+	switch {
+	case mode == "tun":
+		checks = append(checks, diagnosticCheck{name: "packet endpoint", detail: "active TUN data path"})
+	case cfg.PacketListen != "":
+		connection, err := net.DialTimeout("udp", cfg.PacketListen, 100*time.Millisecond)
+		if err == nil {
+			_ = connection.Close()
+		}
+		checks = append(checks, diagnosticCheck{name: "packet endpoint", detail: cfg.PacketListen, err: err})
+	default:
+		checks = append(checks, diagnosticCheck{name: "packet endpoint", detail: "not configured", err: errors.New("not configured")})
+	}
+
+	if cfg.NoDNS {
+		checks = append(checks, diagnosticCheck{name: "dns", detail: "disabled"})
+	} else if conn, err := net.ListenPacket("udp", cfg.DNSListen); err == nil {
+		_ = conn.Close()
+		checks = append(checks, diagnosticCheck{name: "dns", detail: cfg.DNSListen})
+	} else {
+		checks = append(checks, diagnosticCheck{name: "dns", detail: cfg.DNSListen, err: err})
+	}
+	if cfg.NoTun {
+		checks = append(checks, diagnosticCheck{name: "tun", detail: "disabled"})
+	} else if device, err := tun.Open(cfg.TunName, nil); err == nil {
+		_ = device.Close()
+		checks = append(checks, diagnosticCheck{name: "tun", detail: cfg.TunName})
+	} else {
+		checks = append(checks, diagnosticCheck{name: "tun", detail: cfg.TunName, err: err})
+	}
+	return checks
+}
+
+func statusString(status map[string]any, key string) string {
+	if status == nil {
+		return ""
+	}
+	value, _ := status[key].(string)
+	return value
+}
+
+func failoverCount(status map[string]any) int {
+	if status == nil {
+		return 0
+	}
+	failover, _ := status["managerFailover"].(map[string]any)
+	count, _ := failover["configured"].(float64)
+	return int(count)
+}
 func aggregateNetcheckErrors(checks []error) error {
 	failures := make([]string, 0, len(checks))
 	for _, check := range checks {

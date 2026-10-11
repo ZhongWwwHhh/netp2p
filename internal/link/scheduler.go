@@ -9,6 +9,7 @@ import (
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/policy"
+	"github.com/netp2p/netp2p/internal/protocol"
 )
 
 const (
@@ -32,6 +33,7 @@ type Scheduler struct {
 	manager       Submitter
 	committee     []model.CommitteeMember
 	view          func() LinkView
+	admissions    func() map[string]map[string]protocol.AdmissionReport
 	allowed       AllowedFn
 	leader        func() bool
 	interval      time.Duration
@@ -66,6 +68,13 @@ func (scheduler *Scheduler) SetAutomaticLeader(leader func() bool) {
 // zero cooldown lets deterministic callers reconcile back to back.
 func (scheduler *Scheduler) SetCooldown(cooldown time.Duration) {
 	scheduler.cooldown = cooldown
+}
+
+// SetAdmissions supplies client path observations. They are evidence, not
+// certified state: the planner uses them to remove a direct path that failed
+// admission and to prefer one that succeeded.
+func (scheduler *Scheduler) SetAdmissions(admissions func() map[string]map[string]protocol.AdmissionReport) {
+	scheduler.admissions = admissions
 }
 
 // SetStabilization adjusts how long a newly certified assignment is protected
@@ -127,7 +136,13 @@ func (scheduler *Scheduler) Reconcile(state model.NetworkState) error {
 				continue
 			}
 			existing, found := findAssignment(state, source.PeerID, destination.PeerID)
-			next, ok := AssignmentFor(AssignmentInput{State: state, Committee: scheduler.committee, View: view}, source.PeerID, destination.PeerID, scheduler.threshold)
+			var admissions map[string]map[string]protocol.AdmissionReport
+			if scheduler.admissions != nil {
+				admissions = scheduler.admissions()
+			}
+			next, ok := AssignmentFor(AssignmentInput{
+				State: state, Committee: scheduler.committee, View: view, Admissions: admissions,
+			}, source.PeerID, destination.PeerID, scheduler.threshold)
 			if !ok {
 				continue
 			}

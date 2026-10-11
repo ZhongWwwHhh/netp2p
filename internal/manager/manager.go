@@ -106,7 +106,9 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 	node.Handle(p2p.SyncProtocol, manager.handleSync)
 	node.Handle(p2p.QuotaProtocol, manager.handleQuotaReport)
 	engine.OnCommit(manager.onCommit)
+	engine.SetMetrics(config.Metrics)
 	if snapshot, exists := engine.LatestSnapshot(); exists && manager.metrics != nil {
+		engine.ObserveCertifiedHeight(snapshot.Height)
 		manager.metrics.RestoreBFTSnapshot(snapshot.Height, config.InitialCertifiedAt)
 		manager.metrics.CertifiedPeers.Set(float64(len(snapshot.State.Peers)))
 	}
@@ -150,6 +152,7 @@ func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
 // route assignments. Transitions remain quorum-certified.
 func (manager *Manager) RunScheduler(ctx context.Context) {
 	scheduler := link.NewScheduler(manager, manager.engine.CommitteeMembers(), manager.LinkView)
+	scheduler.SetAdmissions(manager.Admissions)
 	scheduler.SetAutomaticLeader(func() bool {
 		height := manager.engine.Height()
 		round := manager.engine.CurrentRound()
@@ -157,6 +160,38 @@ func (manager *Manager) RunScheduler(ctx context.Context) {
 		return leader.ID != "" && leader.ID == manager.engine.LocalID()
 	})
 	scheduler.Run(ctx, manager.engine.CurrentState)
+}
+
+// RunCatchUp periodically repairs a manager that misses one or more heights
+// while quorum stayed available. Catch-up is idempotent; a current manager is a
+// successful no-op.
+func (manager *Manager) RunCatchUp(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			start := manager.engine.Height()
+			catchContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := manager.mesh.CatchUp(catchContext)
+			cancel()
+			if manager.metrics != nil {
+				if err == nil {
+					manager.metrics.BFTCatchUps.Inc()
+				} else {
+					manager.metrics.BFTCatchupFailures.Inc()
+				}
+			}
+			if err != nil && ctx.Err() == nil {
+				log.Printf("committee catch-up: %v", err)
+			}
+			if err == nil && manager.engine.Height() > start {
+				log.Printf("committee catch-up advanced from height %d to %d", start, manager.engine.Height())
+			}
+		}
+	}
 }
 
 // RunAlerting evaluates the local operational rules on a timer and delivers
@@ -249,6 +284,7 @@ func (manager *Manager) DisconnectedMembers() []string {
 func (manager *Manager) ReconcileAssignments() error {
 	scheduler := link.NewScheduler(manager.mesh, manager.engine.CommitteeMembers(), manager.LinkView)
 	scheduler.SetCooldown(0)
+	scheduler.SetAdmissions(manager.Admissions)
 	return scheduler.Reconcile(manager.engine.CurrentState())
 }
 

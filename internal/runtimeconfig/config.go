@@ -19,19 +19,20 @@ const Version = 1
 type Config struct {
 	Version int `yaml:"version" json:"version"`
 
-	Role              string `yaml:"role" json:"role"`
-	DataDir           string `yaml:"dataDir" json:"dataDir"`
-	Listen            string `yaml:"listen" json:"listen"`
-	WebListen         string `yaml:"webListen" json:"webListen"`
-	ConfigPath        string `yaml:"config" json:"config"`
-	ManifestPath      string `yaml:"manifest" json:"manifest"`
-	ManagerBundlePath string `yaml:"managerBundle" json:"managerBundle"`
-	SeedPath          string `yaml:"seed" json:"seed"`
-	TrustPath         string `yaml:"trust" json:"trust"`
-	Manager           string `yaml:"manager" json:"manager"`
-	SetupKey          string `yaml:"setupKey" json:"setupKey"`
-	SetupKeyFile      string `yaml:"setupKeyFile" json:"setupKeyFile"`
-	PacketListen      string `yaml:"packetListen" json:"packetListen"`
+	Role              string   `yaml:"role" json:"role"`
+	DataDir           string   `yaml:"dataDir" json:"dataDir"`
+	Listen            string   `yaml:"listen" json:"listen"`
+	WebListen         string   `yaml:"webListen" json:"webListen"`
+	ConfigPath        string   `yaml:"config" json:"config"`
+	ManifestPath      string   `yaml:"manifest" json:"manifest"`
+	ManagerBundlePath string   `yaml:"managerBundle" json:"managerBundle"`
+	SeedPath          string   `yaml:"seed" json:"seed"`
+	TrustPath         string   `yaml:"trust" json:"trust"`
+	Manager           string   `yaml:"manager" json:"manager"`
+	ManagerEndpoints  []string `yaml:"managerEndpoints" json:"managerEndpoints"`
+	SetupKey          string   `yaml:"setupKey" json:"setupKey"`
+	SetupKeyFile      string   `yaml:"setupKeyFile" json:"setupKeyFile"`
+	PacketListen      string   `yaml:"packetListen" json:"packetListen"`
 
 	TunName string `yaml:"tun" json:"tun"`
 	TunMTU  int    `yaml:"tunMtu" json:"tunMtu"`
@@ -46,13 +47,16 @@ type Config struct {
 	DKG                bool `yaml:"dkg" json:"dkg"`
 	RotateCommitteeKey bool `yaml:"rotateCommitteeKeys" json:"rotateCommitteeKeys"`
 
-	SSO         bool     `yaml:"sso" json:"sso"`
-	SSOIssuer   string   `yaml:"ssoIssuer" json:"ssoIssuer"`
-	SSOClientID string   `yaml:"ssoClientId" json:"ssoClientId"`
-	StatusFile  string   `yaml:"statusFile" json:"statusFile"`
-	Hostname    string   `yaml:"hostname" json:"hostname"`
-	Posture     []string `yaml:"posture" json:"posture"`
-	NetworkID   string   `yaml:"network" json:"network"`
+	SSO         bool   `yaml:"sso" json:"sso"`
+	SSOIssuer   string `yaml:"ssoIssuer" json:"ssoIssuer"`
+	SSOClientID string `yaml:"ssoClientId" json:"ssoClientId"`
+	// ResumeFromState is set after daemon startup validates state.json. A
+	// resumable peer does not need a setup key; registration already happened.
+	ResumeFromState bool     `yaml:"-" json:"-"`
+	StatusFile      string   `yaml:"statusFile" json:"statusFile"`
+	Hostname        string   `yaml:"hostname" json:"hostname"`
+	Posture         []string `yaml:"posture" json:"posture"`
+	NetworkID       string   `yaml:"network" json:"network"`
 
 	AdminToken  string `yaml:"adminToken" json:"adminToken"`
 	AdminAction string `yaml:"action" json:"action"`
@@ -184,14 +188,14 @@ func Validate(cfg Config) error {
 		}
 	}
 	if cfg.Role == "client" || cfg.Role == "daemon" {
-		if cfg.Manager == "" && cfg.TrustPath == "" {
-			return fmt.Errorf("manager or trust is required for %s role", cfg.Role)
+		if cfg.Manager == "" && cfg.TrustPath == "" && len(cfg.ManagerEndpoints) == 0 {
+			return fmt.Errorf("manager, trust or managerEndpoints is required for %s role", cfg.Role)
 		}
 		if cfg.TrustPath != "" && cfg.SeedPath != "" {
 			return fmt.Errorf("trust cannot be combined with seed for %s role", cfg.Role)
 		}
 	}
-	if (cfg.Role == "client" || cfg.Role == "daemon") && cfg.SetupKey == "" && cfg.SetupKeyFile == "" && !cfg.SSO {
+	if (cfg.Role == "client" || cfg.Role == "daemon") && !cfg.ResumeFromState && cfg.SetupKey == "" && cfg.SetupKeyFile == "" && !cfg.SSO {
 		return fmt.Errorf("setupKey, setupKeyFile or sso is required for %s role", cfg.Role)
 	}
 	if cfg.Role == "client" || cfg.Role == "daemon" {
@@ -222,7 +226,7 @@ func IsUnprovisionedClientError(err error) bool {
 		return false
 	}
 	message := err.Error()
-	return strings.Contains(message, "manager or trust is required for client role") ||
+	return strings.Contains(message, "manager, trust or managerEndpoints is required for client role") ||
 		strings.Contains(message, "setupKey, setupKeyFile or sso is required for client role")
 }
 

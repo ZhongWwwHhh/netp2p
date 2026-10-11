@@ -14,6 +14,43 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func TestLoadRecoveryBootstrapRejectsMissingState(t *testing.T) {
+	if _, err := LoadRecoveryBootstrap(t.TempDir()); err == nil {
+		t.Fatal("LoadRecoveryBootstrap accepted missing state")
+	}
+}
+
+func TestLoadRecoveryBootstrapReturnsValidatedManagerEndpoints(t *testing.T) {
+	const networkID = "net-bootstrap"
+	local := newTestP2PNode(t)
+	primary := newTestP2PNode(t)
+	secondary := newTestP2PNode(t)
+	primaryAddress := primary.Addresses()[0]
+	secondaryAddress := secondary.Addresses()[0]
+	stateDir := t.TempDir()
+	self := model.PeerRecord{PeerID: local.Host.ID().String(), OverlayIP: "10.80.0.9"}
+
+	existing, err := New(local, primaryAddress, nil,
+		WithStateDir(stateDir), WithManagerFailover(secondaryAddress))
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing.applySnapshot(certifiedClientSnapshot(t, networkID, self), self)
+	existing.Close()
+
+	bootstrap, err := LoadRecoveryBootstrap(stateDir)
+	if err != nil {
+		t.Fatalf("LoadRecoveryBootstrap: %v", err)
+	}
+	if bootstrap.LocalPeerID != local.Host.ID().String() || bootstrap.NetworkID != networkID {
+		t.Fatalf("unexpected bootstrap identity/network: %+v", bootstrap)
+	}
+	if len(bootstrap.ManagerEndpoints) != 2 ||
+		bootstrap.ManagerEndpoints[0] != primaryAddress || bootstrap.ManagerEndpoints[1] != secondaryAddress {
+		t.Fatalf("unexpected bootstrap manager endpoints: %+v", bootstrap.ManagerEndpoints)
+	}
+}
+
 func TestLoginRecoversPersistedStateWithoutRegistering(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
