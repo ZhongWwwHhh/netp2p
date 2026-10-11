@@ -21,9 +21,9 @@ Implemented public authentication routes:
 - `GET /api/v1/auth/session`
 - `GET /api/v1/auth/status`
 
-The working tree implements `POST /api/v1/users/{id}/credentials`; it is not yet in the latest public release/HEAD. It submits a certified `update_user_credentials` transition, records `credentialsChangedAt`, and rejects sessions issued before that timestamp.
+The current release implements `POST /api/v1/users/{id}/credentials`. It submits a certified `update_user_credentials` transition, records `credentialsChangedAt`, and rejects sessions issued before that timestamp.
 
-The endpoint accepts an email and/or password, and each can be changed independently. A password must contain at least 12 characters and is stored only as an Argon2id verifier. Password changes reject previously issued local sessions. Self-service password reset remains a controlled operational procedure.
+The endpoint accepts an email and/or password, and each can be changed independently. Email-only changes preserve the existing password. A password must contain at least 12 characters and is stored only as an Argon2id verifier. Password changes reject previously issued local sessions. Self-service password reset remains a controlled operational procedure.
 
 ## Implemented API model
 
@@ -61,6 +61,18 @@ Implemented reads and actions:
 | `GET /api/v1/schema` | WebAPI protocol identifier |
 | `POST /api/v1/setup-keys` | create a setup key; token is returned once |
 | `POST /api/v1/transitions` | authenticated generic BFT transition |
+
+The working tree also exposes the same certified credential change through the manager admin CLI:
+
+```bash
+# admin.yaml contains role: admin, manager, action:
+# update-user-credentials, and adminToken.
+netp2pd --config-file admin.yaml \
+  --email owner@console.netp2p.example \
+  --password-file <new-password-file>
+```
+
+For an email replacement, use `--new-email`; lookup by the current address uses `--email`. The CLI requires `--target` or `--email`. Email-only updates preserve the existing password. Protect `admin.yaml` and the password file with restrictive file permissions.
 
 Operationally implemented outside the authenticated API:
 

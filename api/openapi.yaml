@@ -185,7 +185,7 @@ paths:
         server derives the actor, protects owner records, stores an Argon2id
         verifier, records credentialsChangedAt, and rejects older sessions.
         At least one of email and password is required; each may be changed
-        independently.
+        independently. Email-only changes preserve the existing password.
       parameters:
         - $ref: "#/components/parameters/UserID"
       requestBody:

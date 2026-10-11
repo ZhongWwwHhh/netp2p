@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,5 +35,18 @@ func TestBuildAdminCredentialsTransitionHashesPasswordFile(t *testing.T) {
 func TestBuildAdminCredentialsTransitionRequiresChange(t *testing.T) {
 	if _, err := buildAdminCredentialsTransition(nil, nil, "", "", "user-1", adminCredentialOptions{}); err == nil {
 		t.Fatal("empty credential update was accepted")
+	}
+}
+
+func TestFindDirectoryUser(t *testing.T) {
+	snapshot := model.SignedSnapshot{State: model.NetworkState{Users: []model.User{
+		{ID: "user-1", PasswordVerifier: []byte("verifier")},
+	}}}
+	user := findDirectoryUser(snapshot, "user-1")
+	if user == nil || !bytes.Equal(user.PasswordVerifier, []byte("verifier")) {
+		t.Fatalf("user = %+v", user)
+	}
+	if findDirectoryUser(snapshot, "missing") != nil {
+		t.Fatal("unknown directory user was returned")
 	}
 }

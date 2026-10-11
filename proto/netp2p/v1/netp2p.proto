@@ -268,6 +268,7 @@ message StateTransition {
   repeated CommitteeMember committee = 18;
   BudgetUsage budget_usage = 19;
   Actor actor = 20;
+  bytes user_password_verifier = 21;
 }
 
 message BudgetUsage {

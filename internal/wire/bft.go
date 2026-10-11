@@ -44,6 +44,11 @@ func StateTransitionToProto(transition model.StateTransition) *pb.StateTransitio
 	}
 	if transition.User != nil {
 		message.User = UserToProto(*transition.User)
+		// Keep the verifier out of historical transition encodings; the type
+		// lives in internal/bft to avoid a wire-to-BFT dependency cycle.
+		if transition.Type == "update_user_credentials" {
+			message.UserPasswordVerifier = transition.User.PasswordVerifier
+		}
 	}
 	if transition.Settings != nil {
 		message.Settings = NetworkSettingsToProto(*transition.Settings)
@@ -124,6 +129,7 @@ func StateTransitionFromProto(message *pb.StateTransition) model.StateTransition
 	}
 	if message.GetUser() != nil {
 		user := UserFromProto(message.GetUser())
+		user.PasswordVerifier = message.GetUserPasswordVerifier()
 		transition.User = &user
 	}
 	if message.GetSettings() != nil {

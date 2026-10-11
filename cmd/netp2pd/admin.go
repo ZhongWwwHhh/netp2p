@@ -72,6 +72,7 @@ func buildAdminCredentialsTransition(
 	options adminCredentialOptions,
 ) (model.StateTransition, error) {
 	transition := model.StateTransition{Type: bft.TransitionUpdateUserCredentials}
+	var directory model.SignedSnapshot
 	if targetID == "" {
 		email := strings.ToLower(strings.TrimSpace(options.email))
 		if email == "" {
@@ -83,11 +84,10 @@ func buildAdminCredentialsTransition(
 		if err != nil {
 			return transition, fmt.Errorf("query user directory: %w", err)
 		}
-		var snapshot model.SignedSnapshot
-		if err := json.Unmarshal(payload, &snapshot); err != nil {
+		if err := json.Unmarshal(payload, &directory); err != nil {
 			return transition, fmt.Errorf("decode snapshot: %w", err)
 		}
-		for _, user := range snapshot.State.Users {
+		for _, user := range directory.State.Users {
 			if strings.EqualFold(user.Email, email) {
 				targetID = user.ID
 				break
@@ -115,10 +115,40 @@ func buildAdminCredentialsTransition(
 	if update.Email == "" && update.PasswordVerifier == nil {
 		return transition, fmt.Errorf("--new-email or --password-file is required")
 	}
+	if update.PasswordVerifier == nil {
+		// Email-only changes are a certified credential update, but they keep
+		// the existing password. Fetch the verifier from the manager-only
+		// snapshot so clients never need to submit or store a password.
+		if len(directory.State.Users) == 0 {
+			queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			payload, err := manager.QueryAdmin(queryCtx, node, managerID, token, "snapshot")
+			cancel()
+			if err != nil {
+				return transition, fmt.Errorf("query user directory: %w", err)
+			}
+			if err := json.Unmarshal(payload, &directory); err != nil {
+				return transition, fmt.Errorf("decode snapshot: %w", err)
+			}
+		}
+		current := findDirectoryUser(directory, targetID)
+		if current == nil || len(current.PasswordVerifier) == 0 {
+			return transition, fmt.Errorf("existing password verifier not found for user %q", targetID)
+		}
+		update.PasswordVerifier = current.PasswordVerifier
+	}
 	update.CredentialsChangedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	transition.TargetID = targetID
 	transition.User = &update
 	return transition, nil
+}
+
+func findDirectoryUser(snapshot model.SignedSnapshot, userID string) *model.User {
+	for index := range snapshot.State.Users {
+		if snapshot.State.Users[index].ID == userID {
+			return &snapshot.State.Users[index]
+		}
+	}
+	return nil
 }
 
 // adminQueries maps read-only CLI actions to admin protocol queries.

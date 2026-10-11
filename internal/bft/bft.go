@@ -434,7 +434,13 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 }
 
 func StateHash(state model.NetworkState) []byte {
-	message := wire.NetworkStateToProto(NormalizeState(state))
+	normalized := NormalizeState(state)
+	// Password verifiers are protected by transition hashes but were never
+	// part of historical state hashes; preserve that ledger-compatible rule.
+	for index := range normalized.Users {
+		normalized.Users[index].PasswordVerifier = nil
+	}
+	message := wire.NetworkStateToProto(normalized)
 	hash := sha256.Sum256(mustDeterministicMarshal(message))
 	return hash[:]
 }
@@ -444,6 +450,12 @@ func StateHash(state model.NetworkState) []byte {
 // transition cannot be altered by a single manager without breaking the QC.
 func TransitionHash(transition model.StateTransition) []byte {
 	message := wire.StateTransitionToProto(transition)
+	// Historical ledgers never covered a user verifier through the nested
+	// User record. Credential updates use the dedicated field instead, so
+	// clearing the nested value keeps all 0.2.x transition hashes stable.
+	if message.GetUser() != nil {
+		message.User.PasswordVerifier = nil
+	}
 	hash := sha256.Sum256(mustDeterministicMarshal(message))
 	return hash[:]
 }
