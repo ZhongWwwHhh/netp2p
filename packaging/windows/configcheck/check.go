@@ -6,7 +6,6 @@ package configcheck
 import (
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -70,10 +69,24 @@ func validateWindowsPath(name, value string) error {
 		strings.HasPrefix(value, "/run/") || strings.HasPrefix(value, "~/.netp2p/") {
 		return fmt.Errorf("%s must use a Windows path, got %q", name, value)
 	}
-	if !filepath.IsAbs(value) || filepath.VolumeName(value) == "" {
+	if !isAbsoluteWindowsPath(value) {
 		return fmt.Errorf("%s must be an absolute Windows path, got %q", name, value)
 	}
 	return nil
+}
+
+func isAbsoluteWindowsPath(value string) bool {
+	if strings.HasPrefix(value, `\\`) && len(value) > 2 {
+		return true
+	}
+	if len(value) < 3 {
+		return false
+	}
+	drive := value[0]
+	if !((drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z')) || value[1] != ':' {
+		return false
+	}
+	return value[2] == '\\' || value[2] == '/'
 }
 
 // Secure removes inherited ProgramData access and leaves the profile to
