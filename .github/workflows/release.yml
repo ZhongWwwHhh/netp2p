@@ -257,6 +257,7 @@ jobs:
       - name: Sign manager and Caddy images
         env:
           COSIGN_EXPERIMENTAL: "1"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cosign sign --yes \
             "ghcr.io/zhongwwwhhh/netp2p-manager@${{ steps.image_digests.outputs.manager_digest }}"
