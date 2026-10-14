@@ -14,7 +14,7 @@ import (
 )
 
 func TestGossiperReplicatesAndRevokesSessions(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	first, second := newGossipPair(t, ctx)

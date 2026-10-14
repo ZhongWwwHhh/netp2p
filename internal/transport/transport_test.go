@@ -322,9 +322,14 @@ func TestSendScaleDoesNotReuseStalePersistentStream(t *testing.T) {
 
 	leftTransport.mu.Lock()
 	conn, ok := leftTransport.conns[right.Host.ID()]
-	stream := conn.stream
 	leftTransport.mu.Unlock()
-	if !ok || stream == nil {
+	if !ok {
+		t.Fatal("persistent outbound connection was not created")
+	}
+	conn.mu.Lock()
+	stream := conn.stream
+	conn.mu.Unlock()
+	if stream == nil {
 		t.Fatal("persistent outbound stream was not created")
 	}
 	_ = stream.Reset()
@@ -437,8 +442,13 @@ func TestScaleForwardCounterRequiresDestinationAcknowledgement(t *testing.T) {
 	}
 	managerTransport.mu.Lock()
 	conn := managerTransport.conns[destinationNode.Host.ID()]
-	staleStream := conn.stream
 	managerTransport.mu.Unlock()
+	if conn == nil {
+		t.Fatal("persistent connection is missing")
+	}
+	conn.mu.Lock()
+	staleStream := conn.stream
+	conn.mu.Unlock()
 	if staleStream == nil {
 		t.Fatal("persistent stream is missing")
 	}

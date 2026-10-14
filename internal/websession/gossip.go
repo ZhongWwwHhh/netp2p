@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	pageSize = 500
-	interval = 10 * time.Second
+	pageSize    = 500
+	interval    = 10 * time.Second
+	syncTimeout = 5 * time.Second
 )
 
 type gossipMessage struct {
@@ -106,7 +107,7 @@ func (gossiper *Gossiper) Sync(ctx context.Context) error {
 	if len(peers) == 0 {
 		return nil
 	}
-	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	syncCtx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
 
 	var (

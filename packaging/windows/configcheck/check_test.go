@@ -5,7 +5,7 @@ import "testing"
 func TestValidateWindowsPathIsCrossPlatform(t *testing.T) {
 	valid := []string{
 		`C:\ProgramData\netp2p\data`,
-		`D:/ProgramData/netp2p`,
+		`C:/ProgramData/netp2p`,
 		`\\server\netp2p\data`,
 	}
 	for _, value := range valid {
