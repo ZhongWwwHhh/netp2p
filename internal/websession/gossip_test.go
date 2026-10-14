@@ -27,14 +27,18 @@ func TestGossiperReplicatesAndRevokesSessions(t *testing.T) {
 	if err := first.state.RecordWebSession(session); err != nil {
 		t.Fatal(err)
 	}
+	// Seed pagination volume in one transaction. The gossip test measures
+	// replication and revocation, not SQLite per-row fsync latency on Windows.
+	bulk := make([]store.WebSession, 0, 600)
 	for index := 0; index < 600; index++ {
-		if err := first.state.RecordWebSession(store.WebSession{
+		bulk = append(bulk, store.WebSession{
 			ID: fmt.Sprintf("session-page-%04d", index), UserID: "user-1",
 			IssuedAt:  now.Format(time.RFC3339Nano),
 			ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
-		}); err != nil {
-			t.Fatal(err)
-		}
+		})
+	}
+	if err := first.state.MergeWebSessions(bulk, now); err != nil {
+		t.Fatal(err)
 	}
 	if err := second.gossiper.Sync(ctx); err != nil {
 		t.Fatalf("sync session: %v", err)
