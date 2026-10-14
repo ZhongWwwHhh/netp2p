@@ -21,6 +21,10 @@ type adminCredentialOptions struct {
 	passwordFile string
 }
 
+type managerJoinTokenUpdate struct {
+	Token string `json:"token"`
+}
+
 func runAdmin(ctx context.Context, managerAddr, token, action, file, target string, credentials adminCredentialOptions) error {
 	info, err := peer.AddrInfoFromString(managerAddr)
 	if err != nil {
@@ -44,9 +48,16 @@ func runAdmin(ctx context.Context, managerAddr, token, action, file, target stri
 	}
 	var transition model.StateTransition
 	var buildErr error
-	if action == "update-user-credentials" {
+	switch action {
+	case "update-user-credentials":
 		transition, buildErr = buildAdminCredentialsTransition(ctx, node, info.ID, token, target, credentials)
-	} else {
+	case "approve-manager-join", "reject-manager-join":
+		status := model.ManagerJoinApproved
+		if action == "reject-manager-join" {
+			status = model.ManagerJoinRejected
+		}
+		transition, buildErr = buildManagerJoinReviewTransition(ctx, node, info.ID, token, target, status)
+	default:
 		transition, buildErr = buildTransition(action, file, target)
 	}
 	if buildErr != nil {
@@ -149,6 +160,58 @@ func findDirectoryUser(snapshot model.SignedSnapshot, userID string) *model.User
 		}
 	}
 	return nil
+}
+
+func buildManagerJoinReviewTransition(
+	ctx context.Context, node *p2p.Node, managerID peer.ID, token, targetID string,
+	status model.ManagerJoinStatus,
+) (model.StateTransition, error) {
+	transition := model.StateTransition{Type: bft.TransitionReviewManagerJoin}
+	if targetID == "" {
+		return transition, fmt.Errorf("--target is required for manager join review")
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	payload, err := manager.QueryAdmin(queryCtx, node, managerID, token, "snapshot")
+	if err != nil {
+		return transition, fmt.Errorf("query manager join queue: %w", err)
+	}
+	var snapshot model.SignedSnapshot
+	if err := json.Unmarshal(payload, &snapshot); err != nil {
+		return transition, fmt.Errorf("decode manager join queue: %w", err)
+	}
+	return managerJoinReviewTransition(snapshot, targetID, status, "static admin token", time.Now().UTC())
+}
+
+func managerJoinReviewTransition(
+	snapshot model.SignedSnapshot, targetID string, status model.ManagerJoinStatus,
+	reviewedBy string, reviewedAt time.Time,
+) (model.StateTransition, error) {
+	transition := model.StateTransition{Type: bft.TransitionReviewManagerJoin}
+	if status != model.ManagerJoinApproved && status != model.ManagerJoinRejected {
+		return transition, fmt.Errorf("invalid manager join review status %q", status)
+	}
+	if reviewedBy == "" || reviewedAt.IsZero() {
+		return transition, fmt.Errorf("manager join reviewer and review time are required")
+	}
+	for index := range snapshot.State.ManagerJoins {
+		request := snapshot.State.ManagerJoins[index]
+		if request.ManagerID != targetID && request.ID != targetID {
+			continue
+		}
+		if request.Status != model.ManagerJoinPending {
+			return transition, fmt.Errorf("manager join request %q is %s, not pending", request.ID, request.Status)
+		}
+		request.Status = status
+		request.ReviewedBy = reviewedBy
+		request.ReviewedAt = reviewedAt.UTC().Format(time.RFC3339Nano)
+		if status == model.ManagerJoinRejected && request.Reason == "" {
+			request.Reason = "Rejected by administrator"
+		}
+		transition.ManagerJoin = &request
+		return transition, nil
+	}
+	return transition, fmt.Errorf("pending manager join request %q not found", targetID)
 }
 
 // adminQueries maps read-only CLI actions to admin protocol queries.
@@ -274,8 +337,26 @@ func buildTransition(action, file, target string) (model.StateTransition, error)
 			return transition, err
 		}
 		transition.Committee = committee
+	case "request-committee-shrink":
+		transition.Type = bft.TransitionRequestCommitteeShrink
+		var committee []model.CommitteeMember
+		if err := loadRecord(file, &committee); err != nil {
+			return transition, err
+		}
+		transition.Committee = committee
 	case "rotate-committee-keys":
 		transition.Type = bft.TransitionRotateCommittee
+	case "rotate-manager-join-token":
+		transition.Type = bft.TransitionRotateManagerJoinToken
+		var update managerJoinTokenUpdate
+		if err := loadRecord(file, &update); err != nil {
+			return transition, err
+		}
+		token := strings.TrimSpace(update.Token)
+		if len(token) < 32 {
+			return transition, fmt.Errorf("manager join token must be at least 32 bytes")
+		}
+		transition.ManagerJoinTokenHash = model.ManagerJoinTokenHash(token)
 	default:
 		return transition, fmt.Errorf("unknown action %q", action)
 	}

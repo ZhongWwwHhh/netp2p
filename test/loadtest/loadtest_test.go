@@ -54,6 +54,13 @@ func TestProtocolIncludesAllClassesAndEpochRoundTrips(t *testing.T) {
 	}
 }
 
+func TestSummarizeDurationsHandlesNoSamples(t *testing.T) {
+	metric := summarizeDurations(nil)
+	if metric.Duration != 0 || metric.P50 != 0 || metric.P99 != 0 || metric.Max != 0 {
+		t.Fatalf("empty metric = %+v, want all zero", metric)
+	}
+}
+
 func TestOptimizerDistributesLoadAndRespectsCapacity(t *testing.T) {
 	input := OptimizerInput{
 		NetworkID: "loadtest", SnapshotHeight: 1, Version: 1, ManagerID: "manager-a",

@@ -58,22 +58,23 @@ func TestSendToPeerUsesWeightedFlowSelectionOverRealTransports(t *testing.T) {
 	})
 	destinationFrames := transport.NewWithEnvelope(ctx, destinationNode.Host, p2p.FrameProtocol,
 		func(peer.ID, []byte) {},
-		func(remote peer.ID, payload []byte) {
+		func(remote peer.ID, payload []byte) error {
 			envelope, err := forward.DecodeEnvelope(payload)
 			if err != nil {
 				t.Errorf("decode destination envelope: %v", err)
-				return
+				return nil
 			}
 			delivered, err := destinationForwarding.Accept(remote, envelope)
 			if err != nil {
 				t.Errorf("accept destination envelope: %v", err)
-				return
+				return nil
 			}
 			if delivered {
 				mu.Lock()
 				counts[envelope.Header.PathID]++
 				mu.Unlock()
 			}
+			return nil
 		},
 	)
 	defer destinationFrames.Close()
@@ -89,15 +90,16 @@ func TestSendToPeerUsesWeightedFlowSelectionOverRealTransports(t *testing.T) {
 		})
 		frames = transport.NewWithEnvelope(ctx, node.Host, p2p.FrameProtocol,
 			func(peer.ID, []byte) {},
-			func(remote peer.ID, payload []byte) {
+			func(remote peer.ID, payload []byte) error {
 				envelope, err := forward.DecodeEnvelope(payload)
 				if err != nil {
 					t.Errorf("decode manager envelope: %v", err)
-					return
+					return nil
 				}
 				if _, err := forwarding.Accept(remote, envelope); err != nil {
 					t.Errorf("accept manager envelope: %v", err)
 				}
+				return nil
 			},
 		)
 		return frames
@@ -117,7 +119,10 @@ func TestSendToPeerUsesWeightedFlowSelectionOverRealTransports(t *testing.T) {
 	})
 	sourceFrames = transport.NewWithEnvelope(ctx, sourceNode.Host, p2p.FrameProtocol,
 		func(peer.ID, []byte) {},
-		func(peer.ID, []byte) { t.Error("source unexpectedly received a forwarded envelope") },
+		func(peer.ID, []byte) error {
+			t.Error("source unexpectedly received a forwarded envelope")
+			return nil
+		},
 	)
 	defer sourceFrames.Close()
 
@@ -125,7 +130,6 @@ func TestSendToPeerUsesWeightedFlowSelectionOverRealTransports(t *testing.T) {
 	if err := paths.syncSnapshot(model.SignedSnapshot{State: state}); err != nil {
 		t.Fatal(err)
 	}
-	applyFlowEpoch(t, paths, state.NetworkID, 1, map[string]float64{"via-a": .5, "via-b": .5})
 	netClient := &Client{
 		node: sourceNode, sink: &transportSink{}, flows: conntrack.NewTable(),
 		forwarding: sourceForwarding, paths: paths, frames: sourceFrames,

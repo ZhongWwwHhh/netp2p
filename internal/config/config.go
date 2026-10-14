@@ -54,7 +54,7 @@ func Load(path string) (Seed, error) {
 	return seed, nil
 }
 
-func (seed Seed) Validate() error {
+func (seed *Seed) Validate() error {
 	if seed.NetworkID == "" || seed.OverlayCIDR == "" {
 		return fmt.Errorf("networkId and overlayCidr are required")
 	}
@@ -68,7 +68,9 @@ func (seed Seed) Validate() error {
 		return fmt.Errorf("development fixture committee parameters must be 3/0/3, got %d/%d/%d", seed.CommitteeParams.Size, seed.CommitteeParams.FaultLimit, seed.CommitteeParams.QuorumSize)
 	}
 	for index := range seed.Managers {
-		seed.Managers[index].ForwardingEnabled = seed.Managers[index].ForwardingEnabled || true
+		// The legacy development seed predates per-manager forwarding flags.
+		// Its committee managers are intentionally all forwarding-capable.
+		seed.Managers[index].ForwardingEnabled = true
 	}
 	known := make(map[string]struct{}, len(seed.Managers))
 	for _, manager := range seed.Managers {

@@ -75,19 +75,22 @@ type ClientPathDiagnostics struct {
 	LastState              string `json:"lastState,omitempty"`
 	LastError              string `json:"lastError,omitempty"`
 	LastOutboundDropReason string `json:"lastOutboundDropReason,omitempty"`
+	LastPathID             string `json:"lastPathId,omitempty"`
+	LastKind               string `json:"lastKind,omitempty"`
+	LastManagerPeerID      string `json:"lastManagerPeerId,omitempty"`
+	LastRoutingDomainID    string `json:"lastRoutingDomainId,omitempty"`
 }
 
 type ClientFlowDiagnostics struct {
-	ActiveFlows          int    `json:"activeFlows"`
-	Capacity             int    `json:"capacity"`
-	Evictions            uint64 `json:"evictions"`
-	Migrations           uint64 `json:"migrations"`
-	Bytes                uint64 `json:"bytes"`
-	Packets              uint64 `json:"packets"`
-	LastFlowClass        string `json:"lastFlowClass,omitempty"`
-	LastPathID           string `json:"lastPathId,omitempty"`
-	LastMigrationReason  string `json:"lastMigrationReason,omitempty"`
-	RoutingEpochSequence uint64 `json:"routingEpochSequence,omitempty"`
+	ActiveFlows         int    `json:"activeFlows"`
+	Capacity            int    `json:"capacity"`
+	Evictions           uint64 `json:"evictions"`
+	Migrations          uint64 `json:"migrations"`
+	Bytes               uint64 `json:"bytes"`
+	Packets             uint64 `json:"packets"`
+	LastFlowClass       string `json:"lastFlowClass,omitempty"`
+	LastPathID          string `json:"lastPathId,omitempty"`
+	LastMigrationReason string `json:"lastMigrationReason,omitempty"`
 }
 
 // persistedClientState is the local recovery record. The snapshot was fully
@@ -455,8 +458,7 @@ func (client *Client) setManagers() error {
 		return fmt.Errorf("no distinct manager endpoints configured")
 	}
 	client.managers = managers
-	client.manager = managers[0]
-	client.activeManager = 0
+	client.manager, client.activeManager, _ = selectManagerByRendezvous(managers, client.node.Host.ID().String())
 	return nil
 }
 
@@ -552,6 +554,8 @@ func (client *Client) PathDiagnostics() ClientPathDiagnostics {
 	return ClientPathDiagnostics{
 		LastState: string(client.pathState), LastError: client.pathError,
 		LastOutboundDropReason: client.outboundDrop,
+		LastPathID:             client.pathID, LastKind: string(client.pathKind),
+		LastManagerPeerID: client.pathManager, LastRoutingDomainID: client.routingDomainID,
 	}
 }
 
@@ -566,7 +570,7 @@ func (client *Client) FlowDiagnostics() ClientFlowDiagnostics {
 		ActiveFlows: view.ActiveFlows, Capacity: view.Capacity, Evictions: view.Evictions,
 		Migrations: view.Migrations, Bytes: view.Bytes, Packets: view.Packets,
 		LastFlowClass: view.LastFlowClass, LastPathID: view.LastPathID,
-		LastMigrationReason: view.LastMigration, RoutingEpochSequence: view.RoutingEpochSeq,
+		LastMigrationReason: view.LastMigration,
 	}
 }
 
@@ -574,6 +578,10 @@ func (client *Client) recordPathSelection(destination peer.ID, status PathSelect
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	client.pathState = status.State
+	client.pathID = status.PathID
+	client.pathKind = status.Kind
+	client.pathManager = status.ManagerPeerID
+	client.routingDomainID = status.RoutingDomainID
 	if status.OK {
 		client.pathError = ""
 		return

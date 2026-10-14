@@ -97,7 +97,7 @@ func summarizeDurations(values []time.Duration) DurationMetric {
 		Duration: total,
 		P50:      percentile(values, .50),
 		P99:      percentile(values, .99),
-		Max:      values[len(values)-1],
+		Max:      percentile(values, 1),
 	}
 }
 

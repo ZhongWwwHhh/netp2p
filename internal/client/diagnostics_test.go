@@ -66,3 +66,26 @@ func TestPathDiagnosticsAreConcurrencySafe(t *testing.T) {
 		t.Fatalf("diagnostics after successful selection = %+v", diagnostics)
 	}
 }
+
+func TestPathDiagnosticsExposeGlobalScaleSelection(t *testing.T) {
+	client := &Client{}
+	destination, err := peer.Decode(transportSourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client.recordPathSelection(destination, PathSelectionStatus{
+		State: PathSelectionCertified, PathID: "global-scale", Kind: model.PathKindViaManager,
+		ManagerPeerID: transportManagerID, RoutingDomainID: "domain-a",
+		Certified: true, OK: true, FlowClass: FlowClassLatency,
+	})
+
+	diagnostics := client.PathDiagnostics()
+	if diagnostics.LastState != string(PathSelectionCertified) ||
+		diagnostics.LastPathID != "global-scale" ||
+		diagnostics.LastKind != string(model.PathKindViaManager) ||
+		diagnostics.LastManagerPeerID != transportManagerID ||
+		diagnostics.LastRoutingDomainID != "domain-a" {
+		t.Fatalf("global-scale diagnostics = %+v", diagnostics)
+	}
+}

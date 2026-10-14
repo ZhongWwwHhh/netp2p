@@ -8,6 +8,14 @@ https://manager-1.netp2p.example:9443/api/v1
 
 The machine-readable contract is [api/openapi.yaml](../../api/openapi.yaml). Paths marked `x-status: planned` are not available in the current code.
 
+Validate the contract before changing it:
+
+```bash
+npx --yes @redocly/cli@1.34.2 lint api/openapi.yaml
+```
+
+The repository's `redocly.yaml` keeps structural and style validation enabled. It disables only the requirement that every endpoint declare a 4xx response, because liveness, readiness, and reserved planned operations do not all have a meaningful 4xx contract.
+
 ## Authentication
 
 Browser/API clients use local email/password login. A successful login sets an HTTP-only secure `netp2p_session` cookie and also returns a bearer-capable local session token. The shared break-glass admin token is accepted for operator recovery. Every authenticated request is authorized through the role/module permission matrix.

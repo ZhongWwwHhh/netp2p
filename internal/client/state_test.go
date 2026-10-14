@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,14 +240,23 @@ func TestClientManagerFailoverBetweenThreeEndpoints(t *testing.T) {
 	if netClient.State() != ClientStateNeedsLogin {
 		t.Fatalf("initial state = %q, want needs-login", netClient.State())
 	}
-
-	managers[0].Close()
-	if err := netClient.connect(ctx); err != nil {
-		t.Fatalf("failover to second manager: %v", err)
+	expectedManager, expectedIndex, ok := selectManagerByRendezvous(netClient.managers, local.Host.ID().String())
+	if !ok {
+		t.Fatal("client did not select an initial manager")
 	}
-	if netClient.ManagerStatus().ActiveManager != managers[1].Host.ID() {
+	if netClient.ManagerStatus().ActiveManager != expectedManager.ID {
+		t.Fatalf("initial active manager = %q, want rendezvous selection %q",
+			netClient.ManagerStatus().ActiveManager, expectedManager.ID)
+	}
+
+	managers[expectedIndex].Close()
+	if err := netClient.connect(ctx); err != nil {
+		t.Fatalf("failover to next manager: %v", err)
+	}
+	nextIndex := (expectedIndex + 1) % len(managers)
+	if netClient.ManagerStatus().ActiveManager != managers[nextIndex].Host.ID() {
 		t.Fatalf("active manager after first failover = %q, want %q",
-			netClient.ManagerStatus().ActiveManager, managers[1].Host.ID())
+			netClient.ManagerStatus().ActiveManager, managers[nextIndex].Host.ID())
 	}
 	if netClient.State() != ClientStateNeedsLogin {
 		t.Fatalf("state after first failover = %q, want needs-login", netClient.State())
@@ -258,15 +268,16 @@ func TestClientManagerFailoverBetweenThreeEndpoints(t *testing.T) {
 		t.Fatalf("state after snapshot = %q, want ready", netClient.State())
 	}
 
-	_ = local.Host.Network().ClosePeer(managers[1].Host.ID())
-	managers[1].Close()
+	_ = local.Host.Network().ClosePeer(managers[nextIndex].Host.ID())
+	managers[nextIndex].Close()
 	if err := netClient.connect(ctx); err != nil {
-		t.Fatalf("failover to third manager: %v", err)
+		t.Fatalf("failover to remaining manager: %v", err)
 	}
+	remainingIndex := (expectedIndex + 2) % len(managers)
 	status := netClient.ManagerStatus()
-	if status.ActiveManager != managers[2].Host.ID() {
+	if status.ActiveManager != managers[remainingIndex].Host.ID() {
 		t.Fatalf("active manager after second failover = %q, want %q",
-			status.ActiveManager, managers[2].Host.ID())
+			status.ActiveManager, managers[remainingIndex].Host.ID())
 	}
 	if status.State != ClientStateReady {
 		t.Fatalf("state after second failover = %q, want ready", status.State)
@@ -274,12 +285,12 @@ func TestClientManagerFailoverBetweenThreeEndpoints(t *testing.T) {
 	if len(status.Managers) != 3 {
 		t.Fatalf("failover endpoint count = %d, want 3", len(status.Managers))
 	}
-	if status.ActiveIndex != 2 {
-		t.Fatalf("active failover index = %d, want 2", status.ActiveIndex)
+	if status.ActiveIndex != remainingIndex {
+		t.Fatalf("active failover index = %d, want %d", status.ActiveIndex, remainingIndex)
 	}
 
-	_ = local.Host.Network().ClosePeer(managers[2].Host.ID())
-	managers[2].Close()
+	_ = local.Host.Network().ClosePeer(managers[remainingIndex].Host.ID())
+	managers[remainingIndex].Close()
 	if err := netClient.connect(ctx); err == nil {
 		t.Fatal("connect unexpectedly succeeded after all managers stopped")
 	}
@@ -302,6 +313,52 @@ func TestClientManagerFailoverBetweenThreeEndpoints(t *testing.T) {
 	}
 	if bareClient.State() != ClientStateFailed {
 		t.Fatalf("bare client state = %q, want failed", bareClient.State())
+	}
+}
+
+func TestClientLearnsAndConnectsAllCommitteeManagers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	managers := make([]*p2p.Node, 3)
+	for index := range managers {
+		managers[index] = newTestP2PNode(t)
+	}
+	local := newTestP2PNode(t)
+	bootstrap := managers[0].Addresses()[0]
+	netClient, err := New(local, bootstrap, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer netClient.Close()
+
+	snapshot := certifiedClientSnapshot(t, "netp2p-committee-manifest-test")
+	for index, manager := range managers {
+		peerID := manager.Host.ID().String()
+		snapshot.Committee[index].ID = fmt.Sprintf("manager-%d", index+1)
+		snapshot.Committee[index].PeerID = peerID
+		snapshot.Committee[index].Address = strings.TrimSuffix(
+			manager.Addresses()[0], "/p2p/"+peerID,
+		)
+		snapshot.Committee[index].ForwardingEnabled = true
+	}
+	netClient.applySnapshot(snapshot, model.PeerRecord{PeerID: local.Host.ID().String()})
+
+	status := netClient.ManagerStatus()
+	if len(status.Managers) != len(managers) {
+		t.Fatalf("learned manager endpoint count = %d, want %d", len(status.Managers), len(managers))
+	}
+	if status.ActiveManager != managers[0].Host.ID() {
+		t.Fatalf("active manager changed during manifest merge: got %q, want %q",
+			status.ActiveManager, managers[0].Host.ID())
+	}
+	if err := netClient.connect(ctx); err != nil {
+		t.Fatalf("connect certified managers: %v", err)
+	}
+	for index, manager := range managers {
+		if connections := local.Host.Network().ConnsToPeer(manager.Host.ID()); len(connections) == 0 {
+			t.Fatalf("client is not connected to learned manager %d", index+1)
+		}
 	}
 }
 

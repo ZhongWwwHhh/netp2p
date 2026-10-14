@@ -30,6 +30,8 @@ func plannerCandidate(id, manager string, capacity, pressure float64, projected 
 	}
 }
 
+var plannerSnapshotHash = []byte("certified-snapshot-hash")
+
 func allocationWeight(t *testing.T, epoch RoutingEpoch, domain RoutingDomainKey, pathID string) float64 {
 	t.Helper()
 	for _, allocation := range epoch.Allocations {
@@ -41,11 +43,77 @@ func allocationWeight(t *testing.T, epoch RoutingEpoch, domain RoutingDomainKey,
 	return 0
 }
 
+func TestAllocationHysteresisHoldsSmallWeightChanges(t *testing.T) {
+	domain := &planningDomain{
+		key:        RoutingDomainKey{DestinationScope: "*", FlowClass: path.FlowThroughput},
+		candidates: []int{0, 1},
+		weights:    []float64{0.52, 0.48},
+	}
+	candidates := []PathCandidate{
+		plannerCandidate("manager-a", "manager-a", 1000, 0, false),
+		plannerCandidate("manager-b", "manager-b", 1000, 0, false),
+	}
+	current := map[string]map[string]float64{
+		domain.key.ID(): {"manager-a": 0.5, "manager-b": 0.5},
+	}
+
+	applyAllocationHysteresis([]*planningDomain{domain}, candidates, current, 0.03)
+	if domain.weights[0] != 0.5 || domain.weights[1] != 0.5 {
+		t.Fatalf("hysteresis did not hold small weight change: %+v", domain.weights)
+	}
+}
+
+func TestRealtimeDomainsStayPinnedToCurrentPath(t *testing.T) {
+	domain := &planningDomain{
+		key:         RoutingDomainKey{DestinationScope: "*", FlowClass: path.FlowRealtime},
+		currentPath: "manager-b",
+		candidates:  []int{0, 1},
+		weights:     []float64{0.4, 0.6},
+	}
+	candidates := []PathCandidate{
+		plannerCandidate("manager-a", "manager-a", 1000, 0, false),
+		plannerCandidate("manager-b", "manager-b", 1000, 0, false),
+	}
+
+	stabilizeRealtimeDomains([]*planningDomain{domain}, candidates)
+	if domain.weights[0] != 0 || domain.weights[1] != 1 {
+		t.Fatalf("realtime domain was not pinned to its current path: %+v", domain.weights)
+	}
+}
+
+func TestMigrationRequiresEnoughUtilizationBenefit(t *testing.T) {
+	domain := &planningDomain{
+		key:         RoutingDomainKey{DestinationScope: "*", FlowClass: path.FlowThroughput},
+		currentPath: "manager-a",
+		candidates:  []int{0, 1},
+		weights:     []float64{0.5, 0.5},
+	}
+	candidates := []PathCandidate{
+		plannerCandidate("manager-a", "manager-a", 1000, 0, false),
+		plannerCandidate("manager-b", "manager-b", 1000, 0, false),
+	}
+	loads := []EdgeLoad{
+		{EdgeID: "face:manager-a", Utilization: 0.50},
+		{EdgeID: "face:manager-b", Utilization: 0.48},
+	}
+	config := PlannerConfig{MaxMigrations: 1, MigrationBenefit: 0.10}
+	if result := migrationCandidates([]*planningDomain{domain}, candidates, loads, config); len(result) != 0 {
+		t.Fatalf("small utilization benefit produced a migration: %+v", result)
+	}
+
+	loads[1].Utilization = 0.10
+	result := migrationCandidates([]*planningDomain{domain}, candidates, loads, config)
+	if len(result) != 1 || result[0].FromPathID != "manager-a" || result[0].ToPathID != "manager-b" {
+		t.Fatalf("large utilization benefit did not produce the expected migration: %+v", result)
+	}
+}
+
 func TestGlobalPlannerDistributesComparablePaths(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	domain := RoutingDomainKey{DestinationScope: "group:servers", FlowClass: path.FlowThroughput}
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID: "net", SnapshotHeight: 10,
+		NetworkID: "net", SnapshotHeight: 10, SnapshotHash: plannerSnapshotHash,
+		CommitteeEpoch: 1, Round: 2,
 		Candidates: []PathCandidate{
 			plannerCandidate("manager-a", "manager-a", 1000, 0, false),
 			plannerCandidate("manager-b", "manager-b", 1000, 0, false),
@@ -105,11 +173,32 @@ func TestBuildPlannerCandidatesUsesCertifiedIdentityAndPathTypes(t *testing.T) {
 	}
 }
 
+func TestFamilyAllowsWildcardScopes(t *testing.T) {
+	family := PathFamily{
+		SourceManagerIDs:  []string{"*"},
+		SourceGroups:      []string{"*"},
+		DestinationScopes: []string{"*"},
+		FlowClasses:       []path.FlowClass{path.FlowLatency},
+	}
+	domain := RoutingDomainKey{
+		SourceManagerID: "manager-a", SourceGroupID: "clients",
+		DestinationScope: "group:servers", FlowClass: path.FlowLatency,
+	}
+	if !familyAllows(domain, family) {
+		t.Fatal("wildcard family scope did not match an explicit routing domain")
+	}
+
+	family.SourceGroups = []string{"servers"}
+	if familyAllows(domain, family) {
+		t.Fatal("explicit family source group matched another source group")
+	}
+}
+
 func TestGlobalPlannerShiftsMonthlyCapacityPressure(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	domain := RoutingDomainKey{DestinationScope: "group:servers", FlowClass: path.FlowCost}
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID: "net",
+		NetworkID: "net", SnapshotHash: plannerSnapshotHash, CommitteeEpoch: 1,
 		Candidates: []PathCandidate{
 			plannerCandidate("manager-a", "manager-a", 1000, 0.9, false),
 			plannerCandidate("manager-b", "manager-b", 1000, 0, false),
@@ -131,7 +220,7 @@ func TestGlobalPlannerExcludesProjectedExhaustionWhenAlternativeExists(t *testin
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	domain := RoutingDomainKey{DestinationScope: "*", FlowClass: path.FlowLatency}
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID: "net",
+		NetworkID: "net", SnapshotHash: plannerSnapshotHash, CommitteeEpoch: 1,
 		Candidates: []PathCandidate{
 			plannerCandidate("manager-a", "manager-a", 1000, 0, true),
 			plannerCandidate("manager-b", "manager-b", 1000, 0, false),
@@ -153,7 +242,7 @@ func TestRealtimeFlowStaysPinnedDuringOrdinaryRebalance(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	domain := RoutingDomainKey{DestinationScope: "group:calls", FlowClass: path.FlowRealtime}
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID: "net",
+		NetworkID: "net", SnapshotHash: plannerSnapshotHash, CommitteeEpoch: 1,
 		Candidates: []PathCandidate{
 			plannerCandidate("manager-a", "manager-a", 1000, 0, false),
 			plannerCandidate("manager-b", "manager-b", 1000, 0, false),
@@ -178,7 +267,8 @@ func TestRoutingEpochAndTelemetrySignaturesRejectTampering(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	domain := RoutingDomainKey{DestinationScope: "*", FlowClass: path.FlowLatency}
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID: "net", SnapshotHeight: 3,
+		NetworkID: "net", SnapshotHeight: 3, SnapshotHash: plannerSnapshotHash,
+		CommitteeEpoch: 1, Round: 4,
 		Candidates: []PathCandidate{plannerCandidate("manager-a", "manager-a", 1000, 0, false)},
 		Demand:     []DomainDemand{{Domain: domain, BytesPerSecond: 100}},
 		Now:        now,
@@ -190,8 +280,9 @@ func TestRoutingEpochAndTelemetrySignaturesRejectTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyRoutingEpoch(signed, Ed25519Verifier{Key: public}, now.Add(time.Second)); err != nil {
-		t.Fatal(err)
+	err = VerifyRoutingEpoch(signed, Ed25519Verifier{Key: public}, now.Add(time.Second))
+	if err == nil {
+		t.Fatal("single-manager routing epoch verified without a committee threshold")
 	}
 	signed.Epoch.Allocations[0].Weight += 0.1
 	if err := VerifyRoutingEpoch(signed, Ed25519Verifier{Key: public}, now.Add(time.Second)); err == nil {
@@ -225,7 +316,7 @@ func TestRoutingEpochThresholdSignature(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	domain := RoutingDomainKey{DestinationScope: "*", FlowClass: path.FlowRealtime}
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID:  "net",
+		NetworkID: "net", SnapshotHash: plannerSnapshotHash, CommitteeEpoch: 1, Round: 5,
 		Candidates: []PathCandidate{plannerCandidate("manager-a", "manager-a", 1000, 0, false)},
 		Demand:     []DomainDemand{{Domain: domain, BytesPerSecond: 100}},
 		Now:        now,
@@ -233,6 +324,7 @@ func TestRoutingEpochThresholdSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	result.Epoch.ManagerID = identities[0]
 	shares := make(map[int][]byte, len(identities))
 	signers := make(map[int]string, len(identities))
 	for index, identity := range identities {
@@ -299,7 +391,7 @@ func TestAllFiveFlowClassesArePlannable(t *testing.T) {
 	for _, class := range classes {
 		domain := RoutingDomainKey{DestinationScope: "*", FlowClass: class}
 		result, err := PlanRoutingEpoch(PlannerInput{
-			NetworkID: "net",
+			NetworkID: "net", SnapshotHash: plannerSnapshotHash, CommitteeEpoch: 1,
 			Candidates: []PathCandidate{
 				plannerCandidate("manager-a", "manager-a", 1000, 0, false),
 				plannerCandidate("manager-b", "manager-b", 1000, 0, false),
@@ -341,7 +433,7 @@ func TestHotDomainExpansionIsBounded(t *testing.T) {
 		{Domain: smallTwo, BytesPerSecond: 2, CurrentPathID: "manager-a"},
 	}
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID: "net",
+		NetworkID: "net", SnapshotHash: plannerSnapshotHash, CommitteeEpoch: 1,
 		Candidates: []PathCandidate{
 			plannerCandidate("manager-a", "manager-a", 1000, 0, false),
 			plannerCandidate("manager-b", "manager-b", 1000, 0, false),
@@ -394,7 +486,8 @@ func TestPlannerScalesToOneHundredThousandPeers(t *testing.T) {
 	}
 	start := time.Now()
 	result, err := PlanRoutingEpoch(PlannerInput{
-		NetworkID: "net", SnapshotHeight: 20, Candidates: candidates,
+		NetworkID: "net", SnapshotHeight: 20, SnapshotHash: plannerSnapshotHash,
+		CommitteeEpoch: 1, Candidates: candidates,
 		Demand: demand, Now: start.UTC(),
 	})
 	if err != nil {
@@ -432,7 +525,8 @@ func BenchmarkPlanRoutingEpoch100KPeers(b *testing.B) {
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
 		if _, err := PlanRoutingEpoch(PlannerInput{
-			NetworkID: "net", SnapshotHeight: 20, Candidates: candidates,
+			NetworkID: "net", SnapshotHeight: 20, SnapshotHash: plannerSnapshotHash,
+			CommitteeEpoch: 1, Candidates: candidates,
 			Demand: demand, Now: time.Now().UTC(),
 		}); err != nil {
 			b.Fatal(err)

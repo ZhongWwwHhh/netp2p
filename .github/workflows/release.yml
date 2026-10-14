@@ -8,25 +8,27 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
+  attestations: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Unit tests
-        run: go test ./cmd/... ./internal/...
+        run: go test ./...
       - name: Race tests
-        run: go test -race ./cmd/... ./internal/...
+        run: go test -race ./...
       - name: UI tests
         working-directory: ui
         run: |
@@ -36,18 +38,18 @@ jobs:
       - name: Build test image
         run: docker build -t netp2p-test:latest .
       - name: Userspace end-to-end
-        run: sudo -E scripts/e2e.sh
+        run: sudo -E scripts/e2e.sh --with-tun --with-exit --with-multihop --with-quota --with-chaos
 
   windows:
     needs: test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -76,7 +78,7 @@ jobs:
           Copy-Item packaging/runtime.example.yaml dist/windows/runtime.yaml -Force
           Copy-Item packaging/windows/tray.ps1 dist/windows/tray.ps1 -Force
           packaging/windows/build.ps1 -Version $env:VERSION -BinDir dist/windows -OutDir dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: netp2p-windows-msi
           path: dist/*.msi
@@ -86,12 +88,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [windows, test]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -103,28 +105,32 @@ jobs:
       - name: Build Linux artifacts
         run: make package-linux package-tarball VERSION="$VERSION" SKIP_UI=1
       - name: Download Windows MSI
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: netp2p-windows-msi
           path: dist
       - name: Install Syft
-        run: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        env:
+          SYFT_VERSION: v1.36.0
+          SYFT_SHA256: 0d196c884396f17f9627611f96d02d2b30f184e7ba6db244fcf02fc9446b4424
+        run: |
+          archive="$RUNNER_TEMP/syft.tar.gz"
+          asset="syft_${SYFT_VERSION#v}_linux_amd64.tar.gz"
+          curl --fail --location --output "$archive" \
+            "https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/${asset}"
+          printf '%s  %s\n' "$SYFT_SHA256" "$archive" | sha256sum --check --
+          tar -xzf "$archive" -C /usr/local/bin syft
+          syft version
       - name: Generate SBOM
         run: make sbom VERSION="$VERSION"
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push manager image
-        id: manager_image
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build manager image archive
         run: |
           IMAGE="ghcr.io/zhongwwwhhh/netp2p-manager"
+          ARCHIVE="dist/netp2p-$VERSION-image.tar"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="$VERSION" \
@@ -134,15 +140,13 @@ jobs:
             --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.licenses=Apache-2.0 \
             -t "$IMAGE:$VERSION" \
-            -t "$IMAGE:latest" \
-            --push .
-          DIGEST="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
-          printf '%s\n' "$DIGEST" > "dist/netp2p-$VERSION-image-digest.txt"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-      - name: Build and push Caddy image
-        id: caddy_image
+            --provenance=mode=max \
+            --output "type=oci,name=$IMAGE:$VERSION,dest=$ARCHIVE" \
+            .
+      - name: Build Caddy image archive
         run: |
           IMAGE="ghcr.io/zhongwwwhhh/netp2p-caddy"
+          ARCHIVE="dist/netp2p-caddy-$VERSION-image.tar"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --build-arg VERSION="$VERSION" \
@@ -152,45 +156,171 @@ jobs:
             --label org.opencontainers.image.licenses=Apache-2.0 \
             -f Dockerfile.caddy \
             -t "$IMAGE:$VERSION" \
-            -t "$IMAGE:latest" \
-            --push .
-          DIGEST="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
-          printf '%s\n' "$DIGEST" > "dist/netp2p-caddy-$VERSION-image-digest.txt"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+            --provenance=mode=max \
+            --output "type=oci,name=$IMAGE:$VERSION,dest=$ARCHIVE" \
+            .
+      - name: Install release scan tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y msitools cpio rpm2cpio skopeo
+      - name: Record image digests
+        id: image_digests
+        run: |
+          DIGEST="$(skopeo inspect --format '{{.Digest}}' \
+            "oci-archive:dist/netp2p-$VERSION-image.tar")"
+          printf '%s\n' "$DIGEST" > "dist/netp2p-$VERSION-image-digest.txt"
+          echo "manager_digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+          CADDY_DIGEST="$(skopeo inspect --format '{{.Digest}}' \
+            "oci-archive:dist/netp2p-caddy-$VERSION-image.tar")"
+          printf '%s\n' "$CADDY_DIGEST" > "dist/netp2p-caddy-$VERSION-image-digest.txt"
+          echo "caddy_digest=$CADDY_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Generate release notes
+        run: |
+          NOTES="dist/netp2p-$VERSION-release-notes.md"
+          {
+            echo "# NetP2P v$VERSION"
+            echo
+            echo "Manager image: ghcr.io/zhongwwwhhh/netp2p-manager:$VERSION"
+            echo "Manager digest: ${{ steps.image_digests.outputs.manager_digest }}"
+            echo "Caddy image: ghcr.io/zhongwwwhhh/netp2p-caddy:$VERSION"
+            echo "Caddy digest: ${{ steps.image_digests.outputs.caddy_digest }}"
+            echo
+            echo "## Commits"
+            git log --format='- %s' "$GITHUB_REF_NAME^!"
+          } > "$NOTES"
       - name: Generate checksums
         run: |
           sh packaging/checksums.sh \
             "dist/netp2p-$VERSION-SHA256SUMS" \
             "dist/netp2p-$VERSION-linux-amd64.tar.gz" \
-            dist/*.deb dist/*.rpm dist/*.msi \
+            "dist/netp2p_${VERSION}_amd64.deb" \
+            "dist/netp2p-${VERSION}-1.x86_64.rpm" \
+            "dist/netp2p-${VERSION}-windows-amd64.msi" \
             "dist/netp2p-$VERSION-sbom.cdx.json" \
             "dist/netp2p-$VERSION-image-digest.txt" \
-            "dist/netp2p-caddy-$VERSION-image-digest.txt"
-      - name: Scan release artifacts
+            "dist/netp2p-caddy-$VERSION-image-digest.txt" \
+            "dist/netp2p-$VERSION-release-notes.md"
+
+      - name: Scan source and release artifacts
         env:
           RELEASE_DENYLIST: ${{ secrets.RELEASE_DENYLIST }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y msitools cpio rpm2cpio
-          python -m unittest discover -s scripts -p "check_docs_test.py"
-          if [ -z "$RELEASE_DENYLIST" ]; then
+          python scripts/check_release_workflow.py
+          python -m unittest discover -s scripts -p "check_*_test.py"
+          npx --yes @redocly/cli@1.34.2 lint api/openapi.yaml
+          if [ -z "$(printf '%s\n' "$RELEASE_DENYLIST" | tr -d '[:space:]')" ]; then
             echo "RELEASE_DENYLIST must contain one private deployment value per line" >&2
             exit 1
           fi
           printf '%s\n' "$RELEASE_DENYLIST" > "$RUNNER_TEMP/netp2p-release-denylist"
           python scripts/check_docs.py --release-dir dist --denylist "$RUNNER_TEMP/netp2p-release-denylist"
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          body: |
-            Manager image: ghcr.io/zhongwwwhhh/netp2p-manager:${{ env.VERSION }}
-            Manager digest: ${{ steps.manager_image.outputs.digest }}
-            Caddy image: ghcr.io/zhongwwwhhh/netp2p-caddy:${{ env.VERSION }}
-            Caddy digest: ${{ steps.caddy_image.outputs.digest }}
+      - name: Push manager image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="ghcr.io/zhongwwwhhh/netp2p-manager"
+          ARCHIVE="dist/netp2p-$VERSION-image.tar"
+          skopeo copy --all \
+            --dest-creds "$GITHUB_ACTOR:$GITHUB_TOKEN" \
+            "oci-archive:$ARCHIVE" "docker://$IMAGE:$VERSION"
+          REMOTE_DIGEST="$(skopeo inspect --creds "$GITHUB_ACTOR:$GITHUB_TOKEN" \
+            --format '{{.Digest}}' "docker://$IMAGE:$VERSION")"
+          test "$REMOTE_DIGEST" = "${{ steps.image_digests.outputs.manager_digest }}"
 
-            Use the manager and Caddy digest files when pinning Ansible deployments.
+      - name: Push Caddy image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="ghcr.io/zhongwwwhhh/netp2p-caddy"
+          ARCHIVE="dist/netp2p-caddy-$VERSION-image.tar"
+          skopeo copy --all \
+            --dest-creds "$GITHUB_ACTOR:$GITHUB_TOKEN" \
+            "oci-archive:$ARCHIVE" "docker://$IMAGE:$VERSION"
+          REMOTE_DIGEST="$(skopeo inspect --creds "$GITHUB_ACTOR:$GITHUB_TOKEN" \
+            --format '{{.Digest}}' "docker://$IMAGE:$VERSION")"
+          test "$REMOTE_DIGEST" = "${{ steps.image_digests.outputs.caddy_digest }}"
+
+      - name: Install Cosign
+        env:
+          COSIGN_VERSION: v2.5.3
+          COSIGN_SHA256: 783b5d6c74105401c63946c68d9b2a4e1aab3c8abce043e06b8510b02b623ec9
+        run: |
+          binary="$RUNNER_TEMP/cosign"
+          curl --fail --location --output "$binary" \
+            "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64"
+          printf '%s  %s\n' "$COSIGN_SHA256" "$binary" | sha256sum --check --
+          install -m 0755 "$binary" /usr/local/bin/cosign
+          cosign version
+
+      - name: Sign manager and Caddy images
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            "ghcr.io/zhongwwwhhh/netp2p-manager@${{ steps.image_digests.outputs.manager_digest }}"
+          cosign sign --yes \
+            "ghcr.io/zhongwwwhhh/netp2p-caddy@${{ steps.image_digests.outputs.caddy_digest }}"
+
+      - name: Sign release checksums and SBOM
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          for file in \
+            "dist/netp2p-$VERSION-SHA256SUMS" \
+            "dist/netp2p-$VERSION-sbom.cdx.json"; do
+            cosign sign-blob --yes \
+              --output-signature "$file.sig" \
+              --output-certificate "$file.crt" \
+              "$file"
+          done
+
+      - name: Verify release signatures
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${GITHUB_REF_NAME}"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "ghcr.io/zhongwwwhhh/netp2p-manager@${{ steps.image_digests.outputs.manager_digest }}"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "ghcr.io/zhongwwwhhh/netp2p-caddy@${{ steps.image_digests.outputs.caddy_digest }}"
+          for file in \
+            "dist/netp2p-$VERSION-SHA256SUMS" \
+            "dist/netp2p-$VERSION-sbom.cdx.json"; do
+            cosign verify-blob \
+              --certificate "$file.crt" \
+              --signature "$file.sig" \
+              --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$file"
+          done
+
+      - name: Attest release artifact provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/*
+
+      - name: Attest manager image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ghcr.io/zhongwwwhhh/netp2p-manager
+          subject-digest: ${{ steps.image_digests.outputs.manager_digest }}
+
+      - name: Attest Caddy image provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ghcr.io/zhongwwwhhh/netp2p-caddy
+          subject-digest: ${{ steps.image_digests.outputs.caddy_digest }}
+      - name: Publish release
+        uses: softprops/action-gh-release@6cbd405e2c4e67a21c47fa9e383d020e4e28b836 # v2.3.3
+        with:
+          generate_release_notes: false
+          body_path: dist/netp2p-${{ env.VERSION }}-release-notes.md
           files: |
             dist/*.deb
             dist/*.rpm
@@ -199,3 +329,6 @@ jobs:
             dist/*SHA256SUMS*
             dist/*sbom*
             dist/*image-digest.txt
+            dist/*release-notes.md
+            dist/*.sig
+            dist/*.crt

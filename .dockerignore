@@ -1,8 +1,10 @@
 .git
 .netp2p
 bin
+build
 dist
-deploy/run
+*.exe
+deploy
 tools
 tmp
 .npm-cache

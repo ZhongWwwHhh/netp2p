@@ -1,39 +1,20 @@
 package client
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"errors"
 	"testing"
-	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/forward"
 	"github.com/netp2p/netp2p/internal/model"
 )
 
-var (
-	flowEpochPublicKey  ed25519.PublicKey
-	flowEpochPrivateKey ed25519.PrivateKey
-)
-
-func init() {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		panic(err)
-	}
-	flowEpochPublicKey, flowEpochPrivateKey = publicKey, privateKey
-}
-
-func TestWeightedRendezvousDistributesFlowsAcrossCertifiedPaths(t *testing.T) {
+func TestFlowBalancingDistributesFlowsAcrossCertifiedPaths(t *testing.T) {
 	selector, source, destination := flowBalancingSelector(t)
 	assignmentRecord := twoPathAssignment()
 	snapshot := pathSnapshot(false, assignmentRecord)
 	if err := selector.syncSnapshot(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	applyFlowEpoch(t, selector, snapshot.State.NetworkID, 1, map[string]float64{"via-a": .5, "via-b": .5})
-
 	counts := map[string]int{}
 	for index := 0; index < 10000; index++ {
 		_, path, status := selector.selectFlowWithStatus(
@@ -45,27 +26,29 @@ func TestWeightedRendezvousDistributesFlowsAcrossCertifiedPaths(t *testing.T) {
 		counts[path.ID]++
 	}
 	if counts["via-a"] < 4300 || counts["via-a"] > 5700 || counts["via-b"] < 4300 || counts["via-b"] > 5700 {
-		t.Fatalf("weighted distribution = %v", counts)
+		t.Fatalf("certified path distribution = %v", counts)
 	}
 	if stats := selector.flows.stats(); stats.Active != 10000 {
 		t.Fatalf("active flows = %d, want 10000", stats.Active)
 	}
 }
 
-func TestOrdinaryFlowPinningSurvivesWeightChanges(t *testing.T) {
+func TestFlowBalancingPinsOrdinaryFlowsAcrossSnapshotChanges(t *testing.T) {
 	selector, source, destination := flowBalancingSelector(t)
 	snapshot := pathSnapshot(false, twoPathAssignment())
 	if err := selector.syncSnapshot(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	applyFlowEpoch(t, selector, snapshot.State.NetworkID, 1, map[string]float64{"via-a": .5, "via-b": .5})
 	flow := testFlowKey(60000)
 	_, first, status := selector.selectFlowWithStatus(source, destination, flow, true, FlowClassThroughput, 1400)
 	if !status.OK {
 		t.Fatalf("first selection = %+v", status)
 	}
 
-	applyFlowEpoch(t, selector, snapshot.State.NetworkID, 2, map[string]float64{"via-a": .99, "via-b": .01})
+	snapshot.Height = 2
+	if err := selector.syncSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
 	_, second, status := selector.selectFlowWithStatus(source, destination, flow, true, FlowClassThroughput, 1400)
 	if !status.OK || second.ID != first.ID || status.MigrationReason != "" {
 		t.Fatalf("pinned selection = first %s second %s status %+v", first.ID, second.ID, status)
@@ -95,25 +78,26 @@ func TestFlowClassCacheInvalidatesOnSnapshotChange(t *testing.T) {
 	}
 }
 
-func TestRealtimeFlowMigratesOnlyForSLAOrHardFailure(t *testing.T) {
+func TestFlowBalancingMigratesRealtimeOnlyForSLAOrHardFailure(t *testing.T) {
 	selector, source, destination := flowBalancingSelector(t)
 	assignmentRecord := twoPathAssignment()
 	snapshot := pathSnapshot(false, assignmentRecord)
 	if err := selector.syncSnapshot(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	applyFlowEpoch(t, selector, snapshot.State.NetworkID, 1, map[string]float64{"via-a": .5, "via-b": .5})
 	flow := testFlowKey(60001)
 	_, first, status := selector.selectFlowWithStatus(source, destination, flow, true, FlowClassRealtime, 200)
 	if !status.OK {
 		t.Fatalf("first realtime selection = %+v", status)
 	}
 
-	// Weight churn alone must not reorder a realtime flow.
-	applyFlowEpoch(t, selector, snapshot.State.NetworkID, 2, map[string]float64{"via-a": .99, "via-b": .01})
+	snapshot.Height = 2
+	if err := selector.syncSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
 	_, unchanged, status := selector.selectFlowWithStatus(source, destination, flow, true, FlowClassRealtime, 200)
 	if !status.OK || unchanged.ID != first.ID || status.MigrationReason != "" {
-		t.Fatalf("realtime weight churn migrated flow: first %s second %s status %+v", first.ID, unchanged.ID, status)
+		t.Fatalf("realtime snapshot churn migrated flow: first %s second %s status %+v", first.ID, unchanged.ID, status)
 	}
 
 	if assignmentRecord.Primary.ID == first.ID {
@@ -140,44 +124,6 @@ func TestRealtimeFlowMigratesOnlyForSLAOrHardFailure(t *testing.T) {
 	_, failedOver, status := selector.selectFlowWithStatus(source, destination, flow, true, FlowClassRealtime, 200)
 	if !status.OK || failedOver.ID == migrated.ID {
 		t.Fatalf("realtime hard failure fallback = old %s new %s status %+v", migrated.ID, failedOver.ID, status)
-	}
-}
-
-func TestSignedRoutingEpochRejectsTamperingStaleAndUnknownPaths(t *testing.T) {
-	selector, _, _ := flowBalancingSelector(t)
-	snapshot := pathSnapshot(false, twoPathAssignment())
-	if err := selector.syncSnapshot(snapshot); err != nil {
-		t.Fatal(err)
-	}
-	signed, err := SignRoutingEpoch(RoutingEpoch{
-		NetworkID: snapshot.State.NetworkID, Sequence: 2, GeneratedAt: time.Now(),
-		Weights: map[string]map[string]float64{"assignment": {"not-certified": 1}},
-	}, flowEpochPrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := selector.applySignedRoutingEpoch(signed, flowEpochPublicKey); !errors.Is(err, ErrInvalidRoutingEpoch) {
-		t.Fatalf("unknown path error = %v", err)
-	}
-
-	signed.Payload = append([]byte(nil), signed.Payload...)
-	signed.Payload[len(signed.Payload)-1] ^= 1
-	if err := selector.applySignedRoutingEpoch(signed, flowEpochPublicKey); !errors.Is(err, ErrInvalidRoutingEpoch) {
-		t.Fatalf("tampered payload error = %v", err)
-	}
-
-	valid, err := SignRoutingEpoch(RoutingEpoch{
-		NetworkID: snapshot.State.NetworkID, Sequence: 2, GeneratedAt: time.Now(),
-		Weights: map[string]map[string]float64{"assignment": {"via-a": 1}},
-	}, flowEpochPrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := selector.applySignedRoutingEpoch(valid, flowEpochPublicKey); err != nil {
-		t.Fatal(err)
-	}
-	if err := selector.applySignedRoutingEpoch(valid, flowEpochPublicKey); !errors.Is(err, ErrStaleRoutingEpoch) {
-		t.Fatalf("stale epoch error = %v", err)
 	}
 }
 
@@ -208,18 +154,4 @@ func twoPathAssignment() model.RouteAssignment {
 		RTTMilliseconds: 22, BandwidthMbps: 100, Confidence: .9,
 	}}
 	return assignmentRecord
-}
-
-func applyFlowEpoch(t *testing.T, selector *pathSelector, networkID string, sequence uint64, weights map[string]float64) {
-	t.Helper()
-	signed, err := SignRoutingEpoch(RoutingEpoch{
-		NetworkID: networkID, Sequence: sequence, GeneratedAt: time.Now(),
-		Weights: map[string]map[string]float64{"assignment": weights},
-	}, flowEpochPrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := selector.applySignedRoutingEpoch(signed, flowEpochPublicKey); err != nil {
-		t.Fatal(err)
-	}
 }

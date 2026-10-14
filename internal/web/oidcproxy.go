@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,6 +15,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	maxPendingOIDCAuth = 1024
+	oidcPendingTTL     = 10 * time.Minute
 )
 
 // oidcProxy runs the browser PKCE authorization code flow through the manager's
@@ -34,6 +40,9 @@ type oidcProxy struct {
 
 	mu       sync.Mutex
 	requests map[string]pendingAuth
+	// recordSession persists a server-side identifier for the exchanged OIDC
+	// token before the browser receives the session cookie.
+	recordSession func(ctx context.Context, token string, expires time.Time) error
 }
 
 type pendingAuth struct {
@@ -43,19 +52,26 @@ type pendingAuth struct {
 	created   time.Time
 }
 
-func newOIDCProxy(config *BootstrapOIDC) *oidcProxy {
+func newOIDCProxy(config *BootstrapOIDC) (*oidcProxy, error) {
 	if config == nil || config.Issuer == "" || config.AuthorizationEndpoint == "" || config.TokenEndpoint == "" {
-		return nil
+		return nil, nil
+	}
+	redirect, err := url.Parse(config.RedirectURI)
+	if err != nil || !redirect.IsAbs() || redirect.Host == "" ||
+		redirect.Path != "/auth/callback" || redirect.RawQuery != "" || redirect.Fragment != "" ||
+		(redirect.Scheme != "http" && redirect.Scheme != "https") {
+		return nil, fmt.Errorf("oidc redirect URI must be an explicit absolute https/http URL ending in /auth/callback")
 	}
 	return &oidcProxy{
-		issuer:   config.Issuer,
-		clientID: config.ClientID,
-		audience: strings.TrimSpace(config.Audience),
-		scopes:   config.Scopes,
-		authURL:  config.AuthorizationEndpoint,
-		tokenURL: config.TokenEndpoint,
-		requests: make(map[string]pendingAuth),
-	}
+		issuer:       config.Issuer,
+		clientID:     config.ClientID,
+		audience:     strings.TrimSpace(config.Audience),
+		scopes:       config.Scopes,
+		authURL:      config.AuthorizationEndpoint,
+		tokenURL:     config.TokenEndpoint,
+		requests:     make(map[string]pendingAuth),
+		externalBase: redirect.Scheme + "://" + redirect.Host,
+	}, nil
 }
 
 // handle routes the three bootstrap auth endpoints. It returns false when the
@@ -88,17 +104,22 @@ func (proxy *oidcProxy) login(writer http.ResponseWriter, request *http.Request)
 	}
 	redirect := request.URL.Query().Get("redirect")
 	redirect = safeRedirect(redirect)
-	http.SetCookie(writer, &http.Cookie{
-		Name: "netp2p_oidc_state", Value: state, Path: "/auth/callback",
-		MaxAge: 600, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
-	})
 	stateDigest := sha256.Sum256([]byte(state))
 	proxy.mu.Lock()
+	proxy.pruneLocked()
+	if len(proxy.requests) >= maxPendingOIDCAuth {
+		proxy.mu.Unlock()
+		http.Error(writer, "too many pending logins", http.StatusServiceUnavailable)
+		return
+	}
 	proxy.requests[state] = pendingAuth{
 		verifier: verifier, redirect: redirect, stateHash: stateDigest[:], created: time.Now(),
 	}
-	proxy.pruneLocked()
 	proxy.mu.Unlock()
+	http.SetCookie(writer, &http.Cookie{
+		Name: "netp2p_oidc_state", Value: state, Path: "/auth/callback",
+		MaxAge: int(oidcPendingTTL.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
 
 	authorize, err := url.Parse(proxy.authURL)
 	if err != nil {
@@ -152,11 +173,18 @@ func (proxy *oidcProxy) callback(writer http.ResponseWriter, request *http.Reque
 		http.Error(writer, fmt.Sprintf("token exchange failed: %v", err), http.StatusBadGateway)
 		return
 	}
+	expires := time.Now().Add(time.Hour)
+	if proxy.recordSession != nil {
+		if err := proxy.recordSession(request.Context(), idToken, expires); err != nil {
+			http.Error(writer, "cannot persist login session", http.StatusInternalServerError)
+			return
+		}
+	}
 	// Keep the browser session in an HttpOnly cookie. The ID token never
 	// appears in a URL, referrer, browser history, or manager access log.
 	http.SetCookie(writer, &http.Cookie{
 		Name: "netp2p_session", Value: idToken, Path: "/",
-		MaxAge: 3600, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+		MaxAge: int(time.Until(expires).Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
 	http.SetCookie(writer, &http.Cookie{
 		Name: "netp2p_oidc_state", Value: "", Path: "/auth/callback",
@@ -266,7 +294,7 @@ func safeRedirect(raw string) string {
 }
 
 func (proxy *oidcProxy) pruneLocked() {
-	cutoff := time.Now().Add(-10 * time.Minute)
+	cutoff := time.Now().Add(-oidcPendingTTL)
 	for state, pending := range proxy.requests {
 		if pending.created.Before(cutoff) {
 			delete(proxy.requests, state)

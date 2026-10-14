@@ -1,12 +1,14 @@
 package dns
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // DefaultResolvConf is the file the stub resolver consults.
@@ -159,8 +161,10 @@ func splitListen(listen string) (string, string, error) {
 	return host, port, nil
 }
 
-// writeFileAtomic makes both takeover and recovery crash-safe: a partial write
-// lands in a temporary file and the visible path changes only by rename.
+// writeFileAtomic prefers a same-directory rename. Some container runtimes
+// bind-mount /etc/resolv.conf and reject replacing that mount with EBUSY; for
+// those files an fsync'd in-place write is the only available update, and the
+// backup written beside it remains the recovery source.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".netp2p-*")
@@ -184,5 +188,20 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempName, path)
+	renameErr := os.Rename(tempName, path)
+	if renameErr == nil {
+		return nil
+	}
+	if !errors.Is(renameErr, syscall.EBUSY) && !errors.Is(renameErr, syscall.EXDEV) {
+		return renameErr
+	}
+	target, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	defer target.Close()
+	if _, err := target.Write(data); err != nil {
+		return err
+	}
+	return target.Sync()
 }

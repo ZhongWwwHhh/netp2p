@@ -27,47 +27,49 @@ import (
 )
 
 const (
-	CommitteeSize                   = model.DefaultCommitteeSize
-	FaultLimit                      = model.DefaultFaultLimit
-	QuorumSize                      = model.DefaultQuorumSize
-	TransitionRegisterPeer          = "register_peer"
-	TransitionGenesis               = "genesis"
-	TransitionUpsertGroup           = "upsert_group"
-	TransitionRemoveGroup           = "remove_group"
-	TransitionUpsertPolicy          = "upsert_policy"
-	TransitionRemovePolicy          = "remove_policy"
-	TransitionUpsertRoute           = "upsert_route"
-	TransitionRemoveRoute           = "remove_route"
-	TransitionUpsertBudget          = "upsert_budget"
-	TransitionRemoveBudget          = "remove_budget"
-	TransitionUpsertSetupKey        = "upsert_setup_key"
-	TransitionRemoveSetupKey        = "remove_setup_key"
-	TransitionRevokeSetupKey        = "revoke_setup_key"
-	TransitionUpdatePeer            = "update_peer"
-	TransitionUpsertNS              = "upsert_nameserver"
-	TransitionRemoveNS              = "remove_nameserver"
-	TransitionUpsertZone            = "upsert_zone"
-	TransitionRemoveZone            = "remove_zone"
-	TransitionUpdateDNS             = "update_dns_settings"
-	TransitionRegisterUser          = "register_user"
-	TransitionUpdateUserGroups      = "update_user_groups"
-	TransitionUpdateUserRole        = "update_user_role"
-	TransitionUpdateUserCredentials = "update_user_credentials"
-	TransitionRemoveUser            = "remove_user"
-	TransitionSetUserBlocked        = "set_user_blocked"
-	TransitionUpdateSettings        = "update_network_settings"
-	TransitionUpdateAssignment      = "update_route_assignment"
-	TransitionRemoveAssignment      = "remove_route_assignment"
-	TransitionUpsertPathFamily      = "upsert_path_family"
-	TransitionRemovePathFamily      = "remove_path_family"
-	TransitionUpsertRoutingDomain   = "upsert_routing_domain"
-	TransitionRemoveRoutingDomain   = "remove_routing_domain"
-	TransitionUpdateCommittee       = "update_committee"
-	TransitionRotateCommittee       = "rotate_committee_keys"
-	TransitionSubmitManagerJoin     = "submit_manager_join"
-	TransitionReviewManagerJoin     = "review_manager_join"
-	TransitionActivateCommittee     = "activate_committee"
-	TransitionUpdateBudgetUse       = "update_budget_usage"
+	CommitteeSize                    = model.DefaultCommitteeSize
+	FaultLimit                       = model.DefaultFaultLimit
+	QuorumSize                       = model.DefaultQuorumSize
+	TransitionRegisterPeer           = "register_peer"
+	TransitionGenesis                = "genesis"
+	TransitionUpsertGroup            = "upsert_group"
+	TransitionRemoveGroup            = "remove_group"
+	TransitionUpsertPolicy           = "upsert_policy"
+	TransitionRemovePolicy           = "remove_policy"
+	TransitionUpsertRoute            = "upsert_route"
+	TransitionRemoveRoute            = "remove_route"
+	TransitionUpsertBudget           = "upsert_budget"
+	TransitionRemoveBudget           = "remove_budget"
+	TransitionUpsertSetupKey         = "upsert_setup_key"
+	TransitionRemoveSetupKey         = "remove_setup_key"
+	TransitionRevokeSetupKey         = "revoke_setup_key"
+	TransitionUpdatePeer             = "update_peer"
+	TransitionUpsertNS               = "upsert_nameserver"
+	TransitionRemoveNS               = "remove_nameserver"
+	TransitionUpsertZone             = "upsert_zone"
+	TransitionRemoveZone             = "remove_zone"
+	TransitionUpdateDNS              = "update_dns_settings"
+	TransitionRegisterUser           = "register_user"
+	TransitionUpdateUserGroups       = "update_user_groups"
+	TransitionUpdateUserRole         = "update_user_role"
+	TransitionUpdateUserCredentials  = "update_user_credentials"
+	TransitionRemoveUser             = "remove_user"
+	TransitionSetUserBlocked         = "set_user_blocked"
+	TransitionUpdateSettings         = "update_network_settings"
+	TransitionUpdateAssignment       = "update_route_assignment"
+	TransitionRemoveAssignment       = "remove_route_assignment"
+	TransitionUpsertPathFamily       = "upsert_path_family"
+	TransitionRemovePathFamily       = "remove_path_family"
+	TransitionUpsertRoutingDomain    = "upsert_routing_domain"
+	TransitionRemoveRoutingDomain    = "remove_routing_domain"
+	TransitionUpdateCommittee        = "update_committee"
+	TransitionRotateCommittee        = "rotate_committee_keys"
+	TransitionRequestCommitteeShrink = "request_committee_shrink"
+	TransitionSubmitManagerJoin      = "submit_manager_join"
+	TransitionReviewManagerJoin      = "review_manager_join"
+	TransitionActivateCommittee      = "activate_committee"
+	TransitionRotateManagerJoinToken = "rotate_manager_join_token"
+	TransitionUpdateBudgetUse        = "update_budget_usage"
 )
 
 const (
@@ -438,6 +440,7 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	normalized.PathFamilies = append([]model.PathFamily{}, state.PathFamilies...)
 	normalized.RoutingDomains = append([]model.RoutingDomainAuthorization{}, state.RoutingDomains...)
 	normalized.ManagerJoins = append([]model.ManagerJoinRequest{}, state.ManagerJoins...)
+	normalized.PendingCommitteeShrink = append([]model.CommitteeMember{}, state.PendingCommitteeShrink...)
 	sort.Slice(normalized.Peers, func(i, j int) bool { return normalized.Peers[i].PeerID < normalized.Peers[j].PeerID })
 	for index := range normalized.Peers {
 		normalized.Peers[index].Posture = dedupeSorted(normalized.Peers[index].Posture)
@@ -454,6 +457,9 @@ func NormalizeState(state model.NetworkState) model.NetworkState {
 	sort.Slice(normalized.PathFamilies, func(i, j int) bool { return normalized.PathFamilies[i].ID < normalized.PathFamilies[j].ID })
 	sort.Slice(normalized.RoutingDomains, func(i, j int) bool { return normalized.RoutingDomains[i].ID < normalized.RoutingDomains[j].ID })
 	sort.Slice(normalized.ManagerJoins, func(i, j int) bool { return normalized.ManagerJoins[i].ID < normalized.ManagerJoins[j].ID })
+	sort.Slice(normalized.PendingCommitteeShrink, func(i, j int) bool {
+		return normalized.PendingCommitteeShrink[i].ID < normalized.PendingCommitteeShrink[j].ID
+	})
 	for index := range normalized.Groups {
 		sort.Strings(normalized.Groups[index].UserIDs)
 		sort.Strings(normalized.Groups[index].PeerIDs)
@@ -657,6 +663,32 @@ func (engine *Engine) CommitteeEpoch() uint64 {
 	return engine.committeeConfig.CommitteeEpoch
 }
 
+// RoutingKeySet exposes the committee key set used for runtime threshold
+// signatures. Runtime callers only receive the already-loaded local key set;
+// committee transitions replace the pointer atomically.
+func (engine *Engine) RoutingKeySet() *bls.KeySet {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return engine.blsKeys
+}
+
+// RoutingKeyIndex maps a committee manager ID to its canonical threshold-share
+// index. An absent ID is a trust boundary, not a recoverable lookup error.
+func (engine *Engine) RoutingKeyIndex(managerID string) (int, bool) {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	index, ok := engine.blsIndex[managerID]
+	return index, ok
+}
+
+// CommitteeGroupPublicKey returns the certified group key for the active
+// committee epoch.
+func (engine *Engine) CommitteeGroupPublicKey() []byte {
+	engine.mu.RLock()
+	defer engine.mu.RUnlock()
+	return append([]byte(nil), engine.committeeConfig.GroupPublicKey...)
+}
+
 func (engine *Engine) CurrentState() model.NetworkState {
 	engine.mu.RLock()
 	defer engine.mu.RUnlock()
@@ -721,7 +753,7 @@ func (engine *Engine) Activity(limit int, before uint64) []model.SignedSnapshot 
 	result := make([]model.SignedSnapshot, 0, len(heights))
 	for _, height := range heights {
 		snapshot := engine.committed[height]
-		snapshot.Committee = append([]model.CommitteeMember(nil), engine.committee...)
+		snapshot.Committee = append([]model.CommitteeMember(nil), snapshot.Committee...)
 		result = append(result, snapshot)
 	}
 	return result
@@ -735,7 +767,7 @@ func (engine *Engine) LatestSnapshot() (model.SignedSnapshot, bool) {
 		return model.SignedSnapshot{}, false
 	}
 	snapshot := engine.committed[engine.height]
-	snapshot.Committee = append([]model.CommitteeMember(nil), engine.committee...)
+	snapshot.Committee = append([]model.CommitteeMember(nil), snapshot.Committee...)
 	return snapshot, true
 }
 
@@ -2090,6 +2122,10 @@ func ApplyTransition(state *model.NetworkState, transition model.StateTransition
 		return applyReviewManagerJoin(state, transition)
 	case TransitionActivateCommittee:
 		return applyActivateCommittee(state, transition)
+	case TransitionRequestCommitteeShrink:
+		return applyRequestCommitteeShrink(state, transition)
+	case TransitionRotateManagerJoinToken:
+		return applyRotateManagerJoinToken(state, transition)
 	case TransitionUpdateCommittee:
 		return applyUpdateCommittee(state, transition)
 	case TransitionRotateCommittee:
@@ -2133,6 +2169,9 @@ func applySubmitManagerJoin(state *model.NetworkState, transition model.StateTra
 	request := transition.ManagerJoin
 	if request == nil || request.ID == "" {
 		return fmt.Errorf("manager join request is required")
+	}
+	if managerJoinTokenConsumed(*state) {
+		return fmt.Errorf("manager join token has already been consumed")
 	}
 	if request.ManagerID == "" || request.PeerID == "" || request.Address == "" || len(request.PublicKey) == 0 {
 		return fmt.Errorf("manager join request is incomplete")
@@ -2178,11 +2217,16 @@ func applyReviewManagerJoin(state *model.NetworkState, transition model.StateTra
 	if _, err := time.Parse(time.RFC3339Nano, request.ReviewedAt); err != nil {
 		return fmt.Errorf("manager join reviewedAt must be RFC3339: %w", err)
 	}
+	if request.Status == model.ManagerJoinApproved && managerJoinTokenConsumed(*state) {
+		return fmt.Errorf("manager join token has already been consumed")
+	}
 	for index := range state.ManagerJoins {
 		if state.ManagerJoins[index].ID != request.ID {
 			continue
 		}
-		if state.ManagerJoins[index].Status != model.ManagerJoinPending {
+		current := state.ManagerJoins[index].Status
+		allowApprovedRejection := current == model.ManagerJoinApproved && request.Status == model.ManagerJoinRejected
+		if current != model.ManagerJoinPending && !allowApprovedRejection {
 			return fmt.Errorf("manager join request %q is not pending", request.ID)
 		}
 		state.ManagerJoins[index].Status = request.Status
@@ -2265,11 +2309,20 @@ func applyActivateCommittee(state *model.NetworkState, transition model.StateTra
 	if len(added) > 0 && removed > 0 {
 		return fmt.Errorf("activate_committee may add or remove members, not both")
 	}
+	if len(added) > 0 && len(state.PendingCommitteeShrink) > 0 {
+		return fmt.Errorf("a pending committee shrink must be activated before expanding the committee")
+	}
 	if len(added) == 0 && removed == 0 {
 		return fmt.Errorf("activate_committee must change committee membership")
 	}
 	if removed > currentParams.FaultLimit {
 		return fmt.Errorf("cannot remove %d committee members at once; fault limit is %d", removed, currentParams.FaultLimit)
+	}
+	if removed > 0 && !sameCommitteeIdentity(state.PendingCommitteeShrink, transition.Committee) {
+		return fmt.Errorf("activate_committee does not match the certified pending shrink")
+	}
+	if len(added) > 0 && managerJoinTokenConsumed(*state) {
+		return fmt.Errorf("manager join token has already been consumed")
 	}
 
 	approved := make(map[string]model.ManagerJoinRequest, len(state.ManagerJoins))
@@ -2299,6 +2352,123 @@ func applyActivateCommittee(state *model.NetworkState, transition model.StateTra
 	}
 	state.EngineCommittee = append([]model.CommitteeMember(nil), transition.Committee...)
 	state.CommitteeConfig = nextConfig
+	state.PendingCommitteeShrink = nil
+	if len(added) > 0 {
+		state.ManagerJoinTokenConsumed = true
+	}
+	return nil
+}
+
+func applyRequestCommitteeShrink(state *model.NetworkState, transition model.StateTransition) error {
+	if err := requireCommitteeAdminActor(transition); err != nil {
+		return err
+	}
+	if len(state.PendingCommitteeShrink) > 0 {
+		return fmt.Errorf("a committee shrink is already pending")
+	}
+	currentParams, err := committeeParamsForState(*state)
+	if err != nil {
+		return fmt.Errorf("invalid current committee params: %w", err)
+	}
+	nextParams, err := model.CommitteeParamsForSize(len(transition.Committee))
+	if err != nil {
+		return fmt.Errorf("invalid shrink target: %w", err)
+	}
+	if len(transition.Committee) != nextParams.Size {
+		return fmt.Errorf("shrink target has %d members, want %d", len(transition.Committee), nextParams.Size)
+	}
+	if err := validateCommitteeMembers(transition.Committee); err != nil {
+		return err
+	}
+	current := make(map[string]model.CommitteeMember, len(state.EngineCommittee))
+	for _, member := range state.EngineCommittee {
+		current[member.ID] = member
+	}
+	next := make(map[string]struct{}, len(transition.Committee))
+	forwarding := 0
+	for _, member := range transition.Committee {
+		next[member.ID] = struct{}{}
+		existing, known := current[member.ID]
+		if !known {
+			return fmt.Errorf("committee shrink may not add manager %q", member.ID)
+		}
+		if existing.PeerID != member.PeerID || existing.Address != member.Address ||
+			!bytes.Equal(existing.PublicKey, member.PublicKey) {
+			return fmt.Errorf("committee shrink may not replace manager %q", member.ID)
+		}
+		if member.ForwardingEnabled {
+			forwarding++
+		}
+	}
+	if forwarding == 0 {
+		return fmt.Errorf("shrink target must keep at least one forwarding member")
+	}
+	removed := 0
+	for _, member := range state.EngineCommittee {
+		if _, kept := next[member.ID]; !kept {
+			removed++
+		}
+	}
+	if removed == 0 {
+		return fmt.Errorf("committee shrink must remove at least one manager")
+	}
+	if removed > currentParams.FaultLimit {
+		return fmt.Errorf("cannot remove %d committee members at once; fault limit is %d", removed, currentParams.FaultLimit)
+	}
+	state.PendingCommitteeShrink = append([]model.CommitteeMember(nil), transition.Committee...)
+	return nil
+}
+
+func sameCommitteeIdentity(left, right []model.CommitteeMember) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	byID := make(map[string]model.CommitteeMember, len(left))
+	for _, member := range left {
+		byID[member.ID] = member
+	}
+	for _, member := range right {
+		existing, ok := byID[member.ID]
+		if !ok || existing.PeerID != member.PeerID || existing.Address != member.Address ||
+			!bytes.Equal(existing.PublicKey, member.PublicKey) {
+			return false
+		}
+	}
+	return true
+}
+
+func managerJoinTokenConsumed(state model.NetworkState) bool {
+	if state.ManagerJoinTokenConsumed {
+		return true
+	}
+	if len(state.ManagerJoinTokenHash) > 0 {
+		return false
+	}
+	for _, request := range state.ManagerJoins {
+		if request.Status == model.ManagerJoinActivated {
+			return true
+		}
+	}
+	return false
+}
+
+func applyRotateManagerJoinToken(state *model.NetworkState, transition model.StateTransition) error {
+	if err := requireCommitteeAdminActor(transition); err != nil {
+		return err
+	}
+	if len(transition.ManagerJoinTokenHash) != 32 {
+		return fmt.Errorf("manager join token verifier must be 32 bytes")
+	}
+	if len(state.ManagerJoinTokenHash) > 0 && bytes.Equal(state.ManagerJoinTokenHash, transition.ManagerJoinTokenHash) {
+		return fmt.Errorf("manager join token verifier must change")
+	}
+	for _, request := range state.ManagerJoins {
+		if request.Status == model.ManagerJoinPending || request.Status == model.ManagerJoinApproved {
+			return fmt.Errorf("manager join request %q must be rejected before token rotation", request.ID)
+		}
+	}
+	state.ManagerJoinTokenHash = append([]byte(nil), transition.ManagerJoinTokenHash...)
+	state.ManagerJoinTokenConsumed = false
 	return nil
 }
 
@@ -2322,6 +2492,9 @@ func requireCommitteeAdminActor(transition model.StateTransition) error {
 // effective committee is carried on the runtime-only EngineCommittee field and
 // adopted by the engine at commit time.
 func applyUpdateCommittee(state *model.NetworkState, transition model.StateTransition) error {
+	if len(state.PendingCommitteeShrink) > 0 {
+		return fmt.Errorf("a pending committee shrink must be activated before updating the committee")
+	}
 	next := transition.Committee
 	params, err := committeeParamsForState(*state)
 	if err != nil {
@@ -2380,6 +2553,9 @@ func applyUpdateCommittee(state *model.NetworkState, transition model.StateTrans
 // group public key when the transition carries one, otherwise it deterministically
 // regenerates every share and the group public key from the committee seed.
 func applyRotateCommitteeKeys(state *model.NetworkState, transition model.StateTransition) error {
+	if len(state.PendingCommitteeShrink) > 0 {
+		return fmt.Errorf("a pending committee shrink must be activated before rotating committee keys")
+	}
 	params, err := committeeParamsForState(*state)
 	if err != nil {
 		return fmt.Errorf("invalid committee params: %w", err)
@@ -3116,42 +3292,42 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 	config := snapshot.CommitteeConfig
 	params, err := model.CommitteeParamsFromConfig(config)
 	if err != nil {
-		return ErrInvalidQC
+		return fmt.Errorf("invalid committee params: %w", err)
 	}
 	if len(snapshot.Committee) != params.Size {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: committee size %d, want %d", ErrInvalidQC, len(snapshot.Committee), params.Size)
 	}
 	if err := validateSnapshotCommitteeTransition(snapshot, config); err != nil {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: committee transition: %v", ErrInvalidQC, err)
 	}
 	if len(config.GroupPublicKey) == 0 || !bls.ValidG2Point(config.GroupPublicKey) {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: invalid committee group public key", ErrInvalidQC)
 	}
 	if config.Threshold != uint32(params.QuorumSize) {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: committee threshold %d, want %d", ErrInvalidQC, config.Threshold, params.QuorumSize)
 	}
 	if !bytes.Equal(snapshot.StateHash, StateHash(snapshot.State)) {
 		return fmt.Errorf("snapshot state hash mismatch")
 	}
 	qc := snapshot.QC
 	if len(qc.ClientViewHash) == 0 || !bytes.Equal(qc.ClientViewHash, ClientViewHash(snapshot.State, snapshot.Transition)) {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: client view hash mismatch", ErrInvalidQC)
 	}
 	if qc.Height != snapshot.Height {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: height %d, want %d", ErrInvalidQC, qc.Height, snapshot.Height)
 	}
 	if !bytes.Equal(qc.StateHash, snapshot.StateHash) {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: state hash mismatch", ErrInvalidQC)
 	}
 	if qc.CommitteeEpoch != config.CommitteeEpoch {
 		return fmt.Errorf("snapshot committee epoch mismatch")
 	}
 	signers, err := countSigners(qc.SignerBitmap, params.Size)
 	if err != nil {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: signer bitmap: %v", ErrInvalidQC, err)
 	}
 	if signers < params.QuorumSize {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: %d signers, want at least %d", ErrInvalidQC, signers, params.QuorumSize)
 	}
 	// The transition committed in the snapshot must match the one the
 	// committee signed, otherwise the decision log could be rewritten.
@@ -3168,7 +3344,7 @@ func ValidateSnapshot(snapshot model.SignedSnapshot) error {
 		CommitteeEpoch: qc.CommitteeEpoch,
 	}
 	if !bls.Verify(config.GroupPublicKey, voteMessage(vote), qc.AggregateSignature) {
-		return ErrInvalidQC
+		return fmt.Errorf("%w: aggregate signature verification failed", ErrInvalidQC)
 	}
 	return nil
 }

@@ -299,7 +299,9 @@ func TransitionPermission(transitionType string) (Module, Operation, bool) {
 		return ModulePaths, OpDelete, true
 	case bft.TransitionUpdateCommittee, bft.TransitionRotateCommittee:
 		return ModuleSettings, OpUpdate, true
-	case bft.TransitionSubmitManagerJoin, bft.TransitionReviewManagerJoin, bft.TransitionActivateCommittee:
+	case bft.TransitionSubmitManagerJoin, bft.TransitionReviewManagerJoin,
+		bft.TransitionActivateCommittee, bft.TransitionRotateManagerJoinToken,
+		bft.TransitionRequestCommitteeShrink:
 		return ModuleSettings, OpUpdate, true
 	case bft.TransitionUpdateBudgetUse:
 		return ModuleBudgets, OpUpdate, true

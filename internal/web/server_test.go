@@ -32,6 +32,9 @@ type fakeAccountDirectory struct {
 	users     []model.User
 	groups    []model.Group
 	setupKeys []model.SetupKey
+	peers     []model.PeerRecord
+	policies  []model.Policy
+	routes    []model.Route
 }
 
 func (fake *fakeAccountDirectory) Users() []model.User { return fake.users }
@@ -39,6 +42,7 @@ func (fake *fakeAccountDirectory) Users() []model.User { return fake.users }
 func (fake *fakeAccountDirectory) Snapshot() model.SignedSnapshot {
 	return model.SignedSnapshot{State: model.NetworkState{
 		Users: fake.users, Groups: fake.groups, SetupKeys: fake.setupKeys,
+		Peers: fake.peers, Policies: fake.policies, Routes: fake.routes,
 	}}
 }
 
@@ -174,7 +178,7 @@ func TestBootstrapHandlerAPIAuthentication(t *testing.T) {
 func TestCommitteeStatusRequiresDiagnosticsPermission(t *testing.T) {
 	server, accounts, _ := newLocalAuthTestServer(t)
 	accounts.users = []model.User{{ID: "user-1", Email: "user@example.com", Role: model.RoleUser}}
-	token, _, err := server.sessions.Issue(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now())
+	token, _, err := server.issueLocalSession(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +242,29 @@ func TestBootstrapHandlerReadyzReady(t *testing.T) {
 	}
 	if cache := recorder.Header().Get("Cache-Control"); cache != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", cache)
+	}
+}
+
+func TestBootstrapHandlerReadyzRejectsKnownHeightLag(t *testing.T) {
+	server := newTestServer()
+	server.readinessFunc = func() ReadinessStatus {
+		return ReadinessStatus{
+			Status: "degraded", Height: 57, KnownHeight: 58, HeightLag: 1,
+			CommitteeOnline: 3, CommitteeSize: 3, QuorumSize: 3, LedgerReady: true,
+			Degraded: true, Reasons: []string{"certified height is behind the committee"},
+		}
+	}
+	recorder := httptest.NewRecorder()
+	server.BootstrapHandler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz status = %d body %q, want 503", recorder.Code, recorder.Body.String())
+	}
+	var status ReadinessStatus
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.HeightLag != 1 || readinessIsReady(status) {
+		t.Fatalf("height lag was accepted as ready: %+v", status)
 	}
 }
 
@@ -410,14 +437,16 @@ func TestOwnerBootstrapCreatesLocalOwnerSession(t *testing.T) {
 		}
 	}
 	var response struct {
-		SessionToken string `json:"sessionToken"`
-		Identity     auth.Identity
+		Identity auth.Identity
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(response.SessionToken, auth.LocalSessionPrefix) || response.Identity.Role != model.RoleOwner {
+	if response.Identity.Role != model.RoleOwner {
 		t.Fatalf("response = %+v", response)
+	}
+	if strings.Contains(responseBody, "sessionToken") {
+		t.Fatalf("bootstrap response returned a session token: %s", responseBody)
 	}
 	if len(accounts.users) != 1 || !model.VerifyPassword("correct horse battery", accounts.users[0].PasswordVerifier) {
 		t.Fatalf("owner verifier missing or invalid: %+v", accounts.users)
@@ -433,7 +462,7 @@ func TestOwnerBootstrapCreatesLocalOwnerSession(t *testing.T) {
 		t.Fatalf("session cookie = %+v", sessionCookie)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
-	request.Header.Set("Authorization", "Bearer "+response.SessionToken)
+	request.AddCookie(sessionCookie)
 	identity, ok := server.authenticate(request)
 	if !ok || identity.Role != model.RoleOwner || identity.UserID != accounts.users[0].ID {
 		t.Fatalf("local identity = %+v ok=%v", identity, ok)
@@ -521,16 +550,24 @@ func TestUserCredentialsLifecycle(t *testing.T) {
 	if loginRecorder.Code != http.StatusOK {
 		t.Fatalf("login status = %d body %q", loginRecorder.Code, loginRecorder.Body.String())
 	}
-	var login struct {
-		SessionToken string `json:"sessionToken"`
+	var loginCookie *http.Cookie
+	for _, cookie := range loginRecorder.Result().Cookies() {
+		if cookie.Name == "netp2p_session" {
+			loginCookie = cookie
+		}
 	}
-	if err := json.Unmarshal(loginRecorder.Body.Bytes(), &login); err != nil {
-		t.Fatal(err)
+	if loginCookie == nil {
+		t.Fatal("login did not set a session cookie")
+	}
+	if strings.Contains(loginRecorder.Body.String(), "sessionToken") {
+		t.Fatalf("login response returned a session token: %s", loginRecorder.Body.String())
 	}
 
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/users/owner-1/credentials",
 		bytes.NewBufferString(`{"password":"correct horse battery"}`))
-	request.Header.Set("Authorization", "Bearer "+login.SessionToken)
+	request.Host = "console.test"
+	request.Header.Set("Origin", "https://console.test")
+	request.AddCookie(loginCookie)
 	recorder := httptest.NewRecorder()
 	server.handleAPI(recorder, request)
 	if recorder.Code != http.StatusOK {
@@ -545,7 +582,7 @@ func TestUserCredentialsLifecycle(t *testing.T) {
 	}
 
 	oldRequest := httptest.NewRequest(http.MethodGet, "/api/v1/session", nil)
-	oldRequest.Header.Set("Authorization", "Bearer "+login.SessionToken)
+	oldRequest.AddCookie(loginCookie)
 	if _, ok := server.authenticate(oldRequest); ok {
 		t.Fatal("session issued before credential change remained valid")
 	}
@@ -571,7 +608,7 @@ func TestUserCredentialsAuthorization(t *testing.T) {
 		{ID: "admin-1", Email: "admin@example.com", Role: model.RoleAdmin, PasswordVerifier: model.HashPassword("admin password")},
 		{ID: "user-1", Email: "user@example.com", Role: model.RoleUser, PasswordVerifier: model.HashPassword("user password 1")},
 	}
-	adminToken, _, err := server.sessions.Issue(auth.Identity{UserID: "admin-1", Role: model.RoleAdmin}, time.Now())
+	adminToken, _, err := server.issueLocalSession(auth.Identity{UserID: "admin-1", Role: model.RoleAdmin}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +621,7 @@ func TestUserCredentialsAuthorization(t *testing.T) {
 		t.Fatalf("admin changing owner status = %d body %q", recorder.Code, recorder.Body.String())
 	}
 
-	userToken, _, err := server.sessions.Issue(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now())
+	userToken, _, err := server.issueLocalSession(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

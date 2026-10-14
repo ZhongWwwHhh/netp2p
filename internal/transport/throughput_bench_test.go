@@ -99,38 +99,40 @@ func BenchmarkTransportViaManagerThroughput(b *testing.B) {
 
 	sourceTransport := transport.NewWithEnvelope(ctx, source.Host, p2p.FrameProtocol, func(peer.ID, []byte) {}, nil)
 	var managerForward *forward.Table
-	managerTransport := transport.NewWithEnvelope(ctx, manager.Host, p2p.FrameProtocol, func(peer.ID, []byte) {}, func(remote peer.ID, wire []byte) {
+	managerTransport := transport.NewWithEnvelope(ctx, manager.Host, p2p.FrameProtocol, func(peer.ID, []byte) {}, func(remote peer.ID, wire []byte) error {
 		envelope, err := forward.DecodeEnvelope(wire)
 		if err != nil {
 			b.Error(err)
-			return
+			return nil
 		}
 		if _, err := managerForward.Accept(remote, envelope); err != nil {
 			b.Error(err)
 		}
+		return nil
 	})
 	destinationForward := forward.NewTable(state, destinationID.String(), func(peer.ID, forward.Envelope) error {
 		return nil
 	})
-	destinationTransport := transport.NewWithEnvelope(ctx, destination.Host, p2p.FrameProtocol, nil, func(remote peer.ID, wire []byte) {
+	destinationTransport := transport.NewWithEnvelope(ctx, destination.Host, p2p.FrameProtocol, nil, func(remote peer.ID, wire []byte) error {
 		envelope, err := forward.DecodeEnvelope(wire)
 		if err != nil {
 			b.Error(err)
-			return
+			return nil
 		}
 		delivered, err := destinationForward.Accept(remote, envelope)
 		if err != nil {
 			b.Error(err)
-			return
+			return nil
 		}
 		if !delivered {
 			b.Error("destination did not accept forwarded envelope")
-			return
+			return nil
 		}
 		select {
 		case received <- struct{}{}:
 		default:
 		}
+		return nil
 	})
 	b.Cleanup(func() {
 		_ = sourceTransport.Close()

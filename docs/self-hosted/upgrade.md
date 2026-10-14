@@ -55,6 +55,11 @@ can strand a manager on the old version. Always use an atomic all-stop/all-start
 
 Never roll one manager at a time for a committee upgrade.
 
+For releases that change RoutingEpoch signing, upgrade managers and clients in
+the same maintenance window. NetP2P v0.3.6 replaces the legacy single-manager
+Ed25519 routing epoch with committee threshold signatures; older clients must
+not remain on the removed signing path after the managers are activated.
+
 ## Add a manager
 
 NetP2P separates discovery from trust:
@@ -89,6 +94,28 @@ netp2pd manager join \
 Open **Committee → Manager join requests** in the console and approve the
 candidate. After activation, verify the new manager's `/readyz` endpoint and the
 committee's certified size and epoch.
+
+For headless operation, approve or reject the pending request with the admin CLI:
+
+```bash
+netp2pd --role admin \
+  --manager /dns4/manager-1.netp2p.example/udp/4001/quic-v1/p2p/<manager-1-peer-id> \
+  --admin-token "$NETP2P_ADMIN_TOKEN" \
+  --action approve-manager-join \
+  --target manager-4
+```
+
+After an activation consumes the join token, rotate it before enrolling another
+candidate. The JSON input contains the new plaintext token only long enough for
+the CLI to derive its verifier:
+
+```bash
+netp2pd --role admin \
+  --manager /dns4/manager-1.netp2p.example/udp/4001/quic-v1/p2p/<manager-1-peer-id> \
+  --admin-token "$NETP2P_ADMIN_TOKEN" \
+  --action rotate-manager-join-token \
+  --file ./manager-join-token.json
+```
 
 The join token is an enrollment convenience, not a trust decision. A leaked token
 can only create a pending request; it cannot add the candidate to the committee

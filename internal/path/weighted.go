@@ -70,8 +70,9 @@ func pathFlowDigest(flowKey []byte, pathID string) [sha256.Size]byte {
 	_, _ = digest.Write(flowKey)
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(pathID))
+	sum := digest.Sum(nil)
 	var result [sha256.Size]byte
-	digest.Sum(result[:0])
+	copy(result[:], sum)
 	return result
 }
 

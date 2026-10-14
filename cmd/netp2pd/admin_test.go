@@ -4,7 +4,9 @@ import (
 	"crypto/hmac"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
@@ -64,5 +66,76 @@ func TestBuildTransitionUpsertSetupKeyRequiresTokenOrHash(t *testing.T) {
 	}
 	if _, err := buildTransition("upsert-setup-key", path, ""); err == nil {
 		t.Fatal("buildTransition succeeded without token or tokenHash")
+	}
+}
+
+func TestManagerJoinReviewTransitionApprovesPendingRequest(t *testing.T) {
+	snapshot := model.SignedSnapshot{State: model.NetworkState{ManagerJoins: []model.ManagerJoinRequest{{
+		ID: "join-manager-4", ManagerID: "manager-4", Status: model.ManagerJoinPending,
+	}}}}
+	reviewedAt := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	transition, err := managerJoinReviewTransition(
+		snapshot, "manager-4", model.ManagerJoinApproved, "owner@example.com", reviewedAt,
+	)
+	if err != nil {
+		t.Fatalf("managerJoinReviewTransition: %v", err)
+	}
+	if transition.Type != bft.TransitionReviewManagerJoin {
+		t.Fatalf("type = %q, want %q", transition.Type, bft.TransitionReviewManagerJoin)
+	}
+	request := transition.ManagerJoin
+	if request == nil || request.Status != model.ManagerJoinApproved {
+		t.Fatalf("managerJoin = %+v, want approved request", request)
+	}
+	if request.ReviewedBy != "owner@example.com" || request.ReviewedAt != reviewedAt.Format(time.RFC3339Nano) {
+		t.Fatalf("review audit fields were not set: %+v", request)
+	}
+}
+
+func TestManagerJoinReviewTransitionRejectsMissingRequest(t *testing.T) {
+	_, err := managerJoinReviewTransition(
+		model.SignedSnapshot{}, "manager-4", model.ManagerJoinApproved,
+		"owner@example.com", time.Now().UTC(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing request error = %v", err)
+	}
+}
+
+func TestBuildTransitionRotateManagerJoinTokenHashesToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manager-join-token.json")
+	payload := []byte("{\n  \"token\": \"  committee-e2e-token-0123456789abcdef  \"\n}")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transition, err := buildTransition("rotate-manager-join-token", path, "")
+	if err != nil {
+		t.Fatalf("buildTransition: %v", err)
+	}
+	if transition.Type != bft.TransitionRotateManagerJoinToken {
+		t.Fatalf("type = %q, want %q", transition.Type, bft.TransitionRotateManagerJoinToken)
+	}
+	if !hmac.Equal(transition.ManagerJoinTokenHash, model.ManagerJoinTokenHash("committee-e2e-token-0123456789abcdef")) {
+		t.Fatal("managerJoinTokenHash does not match verifier for trimmed token")
+	}
+}
+
+func TestBuildTransitionRequestCommitteeShrink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shrink.json")
+	payload := []byte(`[{"id":"manager-1","peerId":"peer-1","address":"/dns4/manager-1.netp2p.example/udp/4001/quic-v1","publicKey":"AQI=","forwardingEnabled":true}]`)
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transition, err := buildTransition("request-committee-shrink", path, "")
+	if err != nil {
+		t.Fatalf("buildTransition: %v", err)
+	}
+	if transition.Type != bft.TransitionRequestCommitteeShrink {
+		t.Fatalf("type = %q, want %q", transition.Type, bft.TransitionRequestCommitteeShrink)
+	}
+	if len(transition.Committee) != 1 || transition.Committee[0].ID != "manager-1" {
+		t.Fatalf("committee = %+v", transition.Committee)
 	}
 }

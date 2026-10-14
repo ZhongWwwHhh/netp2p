@@ -47,6 +47,7 @@ type Reconciler struct {
 	forwardingPath string
 
 	mu       sync.Mutex
+	opMu     sync.Mutex
 	closed   bool
 	chains   bool
 	enabled  bool
@@ -78,6 +79,9 @@ func (reconciler *Reconciler) Commands() []string {
 // Reconcile installs rules for routes and removes rules for routes no longer
 // advertised.
 func (reconciler *Reconciler) Reconcile(routes []Route) error {
+	reconciler.opMu.Lock()
+	defer reconciler.opMu.Unlock()
+
 	reconciler.mu.Lock()
 	if reconciler.closed {
 		reconciler.mu.Unlock()
@@ -160,6 +164,9 @@ func (reconciler *Reconciler) Reconcile(routes []Route) error {
 
 // Close removes every managed rule and restores the original forwarding sysctl.
 func (reconciler *Reconciler) Close() error {
+	reconciler.opMu.Lock()
+	defer reconciler.opMu.Unlock()
+
 	reconciler.mu.Lock()
 	if reconciler.closed || !reconciler.enabled {
 		reconciler.closed = true
@@ -232,9 +239,10 @@ func (reconciler *Reconciler) remove(route Route) error {
 }
 
 func (reconciler *Reconciler) ensureChains() error {
+	// Reconcile and Close hold opMu; this ordering keeps chain creation,
+	// forwarding-state changes, and rule installation from interleaving.
 	reconciler.mu.Lock()
 	initialized := reconciler.chains
-	reconciler.chains = true
 	reconciler.mu.Unlock()
 	if initialized {
 		return nil
@@ -245,7 +253,7 @@ func (reconciler *Reconciler) ensureChains() error {
 	if err := reconciler.exec("iptables", "-N", forwardChain); err != nil {
 		return err
 	}
-	if err := reconciler.exec("iptables", "-N", snatChain); err != nil {
+	if err := reconciler.exec("iptables", "-t", "nat", "-N", snatChain); err != nil {
 		return err
 	}
 	if err := reconciler.exec("iptables", "-C", "FORWARD", "-s", reconciler.overlayCIDR,

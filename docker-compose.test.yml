@@ -13,10 +13,19 @@ services:
     command: ["--listen", "0.0.0.0:9999", "--issuer", "http://mock-idp:9999",
       "--subject", "sso-user-1", "--email", "sso-user@example.com", "--name", "SSO Admin",
       "--groups", "netp2p-admins,eng"]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "9999"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
     ports:
       - "9999:9999"
   manager-1:
     image: netp2p-test:latest
+    depends_on:
+      mock-idp:
+        condition: service_healthy
     environment:
       NETP2P_MANAGER_ID: manager-1
     volumes: ["./deploy:/config:ro"]
@@ -29,6 +38,9 @@ services:
       - "9100:9100"
   manager-2:
     image: netp2p-test:latest
+    depends_on:
+      mock-idp:
+        condition: service_healthy
     command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--web-listen", "0.0.0.0:8080"]
     environment:
       NETP2P_MANAGER_ID: manager-2
@@ -38,6 +50,9 @@ services:
       - "4102:4102/udp"
   manager-3:
     image: netp2p-test:latest
+    depends_on:
+      mock-idp:
+        condition: service_healthy
     command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json", "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--web-listen", "0.0.0.0:8080"]
     environment:
       NETP2P_MANAGER_ID: manager-3
@@ -88,13 +103,17 @@ services:
     image: netp2p-test:latest
     profiles: ["tun"]
     depends_on: [manager-1]
-    cap_add: [NET_ADMIN]
-    devices: ["/dev/net/tun:/dev/net/tun"]
-    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
-      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
-      "--setup-key", "setup-key-a", "--tun", "netp2p0",
-      "--hostname", "client-a-tun",
-      "--status-file", "/status/client-a-tun.json"]
+    cap_add: [NET_ADMIN, MKNOD]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        mkdir -p /dev/net
+        [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200
+        exec /usr/local/bin/netp2pd --role client --data-dir /data \
+          --listen /ip4/0.0.0.0/udp/5001/quic-v1 \
+          --manager /dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID} \
+          --setup-key setup-key-a --tun netp2p0 --hostname client-a-tun \
+          --status-file /status/client-a-tun.json
     volumes: ["./deploy/run:/status", "client-a-tun-data:/data"]
     environment:
       NETP2P_DEBUG_DATA: "1"
@@ -108,13 +127,17 @@ services:
     image: netp2p-test:latest
     profiles: ["tun"]
     depends_on: [manager-1]
-    cap_add: [NET_ADMIN]
-    devices: ["/dev/net/tun:/dev/net/tun"]
-    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
-      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
-      "--setup-key", "setup-key-b", "--tun", "netp2p0",
-      "--hostname", "client-b-tun",
-      "--status-file", "/status/client-b-tun.json"]
+    cap_add: [NET_ADMIN, MKNOD]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        mkdir -p /dev/net
+        [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200
+        exec /usr/local/bin/netp2pd --role client --data-dir /data \
+          --listen /ip4/0.0.0.0/udp/5001/quic-v1 \
+          --manager /dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID} \
+          --setup-key setup-key-b --tun netp2p0 --hostname client-b-tun \
+          --status-file /status/client-b-tun.json
     volumes: ["./deploy/run:/status", "client-b-tun-data:/data"]
     environment:
       NETP2P_DEBUG_DATA: "1"
@@ -133,14 +156,18 @@ services:
     image: netp2p-test:latest
     profiles: ["exit"]
     depends_on: [manager-1]
-    cap_add: [NET_ADMIN]
-    devices: ["/dev/net/tun:/dev/net/tun"]
+    cap_add: [NET_ADMIN, MKNOD]
     sysctls: ["net.ipv4.ip_forward=1", "net.ipv4.conf.all.forwarding=1"]
-    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
-      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
-      "--setup-key", "setup-key-exit", "--tun", "netp2p0",
-      "--hostname", "client-exit-tun",
-      "--status-file", "/status/client-exit-tun.json"]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        mkdir -p /dev/net
+        [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200
+        exec /usr/local/bin/netp2pd --role client --data-dir /data \
+          --listen /ip4/0.0.0.0/udp/5001/quic-v1 \
+          --manager /dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID} \
+          --setup-key setup-key-exit --tun netp2p0 --hostname client-exit-tun \
+          --status-file /status/client-exit-tun.json
     volumes: ["./deploy/run:/status", "client-exit-tun-data:/data"]
     environment:
       NETP2P_DEBUG_DATA: "1"

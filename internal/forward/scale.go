@@ -53,8 +53,7 @@ func EncodeScaleEnvelope(envelope ScaleEnvelope) ([]byte, error) {
 		len(pathFamily) > 0xffff || len(pathInstance) > 0xffff || len(flowClass) > 0xffff {
 		return nil, ErrMalformedScaleEnvelope
 	}
-	if len(source) == 0 || len(destination) == 0 || len(routingDomain) == 0 ||
-		len(pathFamily) == 0 || len(pathInstance) == 0 || len(flowClass) == 0 {
+	if len(source) == 0 || len(destination) == 0 || len(routingDomain) == 0 || len(flowClass) == 0 {
 		return nil, ErrMalformedScaleEnvelope
 	}
 	if scaleHeaderSize+len(source)+len(destination)+len(routingDomain)+len(pathFamily)+len(pathInstance)+len(flowClass)+len(envelope.Payload) > MaxFrameSize {
@@ -98,8 +97,7 @@ func DecodeScaleEnvelope(wire []byte) (ScaleEnvelope, error) {
 	flowHash := binary.LittleEndian.Uint64(wire[14:22])
 	sequence := binary.LittleEndian.Uint64(wire[22:30])
 	required := scaleHeaderSize + sourceLength + destinationLength + domainLength + familyLength + instanceLength + classLength
-	if sourceLength == 0 || destinationLength == 0 || domainLength == 0 || familyLength == 0 ||
-		instanceLength == 0 || classLength == 0 || required > len(wire) {
+	if sourceLength == 0 || destinationLength == 0 || domainLength == 0 || classLength == 0 || required > len(wire) {
 		return ScaleEnvelope{}, ErrMalformedScaleEnvelope
 	}
 	offset := scaleHeaderSize

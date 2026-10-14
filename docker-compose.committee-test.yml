@@ -1,0 +1,186 @@
+name: netp2p-committee-test
+
+x-committee-hosts: &committee-hosts
+  - "manager-1.netp2p.example:10.72.0.11"
+  - "manager-2.netp2p.example:10.72.0.12"
+  - "manager-3.netp2p.example:10.72.0.13"
+  - "manager-4.netp2p.example:10.72.0.14"
+  - "manager-5.netp2p.example:10.72.0.15"
+  - "manager-6.netp2p.example:10.72.0.16"
+  - "manager-7.netp2p.example:10.72.0.17"
+
+services:
+  manager-1:
+    image: netp2p-committee-test:latest
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -f /data/network.json ]; then
+          exec netp2pd --role manager --data-dir /data \
+            --manifest /data/network.json --manager-bundle /config/manager.json \
+            --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+            --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+        fi
+        exec netp2pd --role manager --data-dir /data \
+          --manifest /config/network.json --manager-bundle /config/manager.json \
+          --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+          --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+    volumes:
+      - ./tmp/committee-test/manager-1:/config:ro
+      - ./tmp/committee-test/manager-1-data:/data
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.11
+
+  manager-2:
+    image: netp2p-committee-test:latest
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -f /data/network.json ]; then
+          exec netp2pd --role manager --data-dir /data \
+            --manifest /data/network.json --manager-bundle /config/manager.json \
+            --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+            --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+        fi
+        exec netp2pd --role manager --data-dir /data \
+          --manifest /config/network.json --manager-bundle /config/manager.json \
+          --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+          --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+    volumes:
+      - ./tmp/committee-test/manager-2:/config:ro
+      - ./tmp/committee-test/manager-2-data:/data
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.12
+
+  manager-3:
+    image: netp2p-committee-test:latest
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -f /data/network.json ]; then
+          exec netp2pd --role manager --data-dir /data \
+            --manifest /data/network.json --manager-bundle /config/manager.json \
+            --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+            --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+        fi
+        exec netp2pd --role manager --data-dir /data \
+          --manifest /config/network.json --manager-bundle /config/manager.json \
+          --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+          --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+    volumes:
+      - ./tmp/committee-test/manager-3:/config:ro
+      - ./tmp/committee-test/manager-3-data:/data
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.13
+
+  manager-4:
+    image: netp2p-committee-test:latest
+    depends_on: [manager-1]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -f /data/manager.json ]; then
+          exec netp2pd --role manager --data-dir /data \
+            --manifest /data/network.json --manager-bundle /data/manager.json \
+            --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+            --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+        fi
+        exec netp2pd manager join --bundle /config/manager-join.json --data-dir /data \
+          --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101
+    volumes:
+      - ./tmp/committee-test/manager-4:/config:ro
+      - ./tmp/committee-test/manager-4-data:/data
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.14
+
+  manager-5:
+    image: netp2p-committee-test:latest
+    depends_on: [manager-1]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -f /data/manager.json ]; then
+          exec netp2pd --role manager --data-dir /data \
+            --manifest /data/network.json --manager-bundle /data/manager.json \
+            --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+            --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+        fi
+        exec netp2pd manager join --bundle /config/manager-join.json --data-dir /data \
+          --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101
+    volumes:
+      - ./tmp/committee-test/manager-5:/config:ro
+      - ./tmp/committee-test/manager-5-data:/data
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.15
+
+  manager-6:
+    image: netp2p-committee-test:latest
+    depends_on: [manager-1]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -f /data/manager.json ]; then
+          exec netp2pd --role manager --data-dir /data \
+            --manifest /data/network.json --manager-bundle /data/manager.json \
+            --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+            --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+        fi
+        exec netp2pd manager join --bundle /config/manager-join.json --data-dir /data \
+          --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101
+    volumes:
+      - ./tmp/committee-test/manager-6:/config:ro
+      - ./tmp/committee-test/manager-6-data:/data
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.16
+
+  manager-7:
+    image: netp2p-committee-test:latest
+    depends_on: [manager-1]
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if [ -f /data/manager.json ]; then
+          exec netp2pd --role manager --data-dir /data \
+            --manifest /data/network.json --manager-bundle /data/manager.json \
+            --listen /ip4/0.0.0.0/udp/4001/quic-v1 \
+            --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101 --dkg
+        fi
+        exec netp2pd manager join --bundle /config/manager-join.json --data-dir /data \
+          --web-listen 127.0.0.1:18080 --metrics-listen 127.0.0.1:9101
+    volumes:
+      - ./tmp/committee-test/manager-7:/config:ro
+      - ./tmp/committee-test/manager-7-data:/data
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.17
+
+  admin-cli:
+    image: netp2p-committee-test:latest
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ./tmp/committee-test/admin:/work
+    extra_hosts: *committee-hosts
+    networks:
+      committee:
+        ipv4_address: 10.72.0.30
+
+networks:
+  committee:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.72.0.0/24

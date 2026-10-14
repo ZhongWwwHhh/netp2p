@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
@@ -30,6 +31,7 @@ import (
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/store"
 	"github.com/netp2p/netp2p/internal/web"
+	"github.com/netp2p/netp2p/internal/websession"
 )
 
 // alertOptions carries the alerting configuration resolved from flags and the
@@ -240,14 +242,14 @@ func runManager(ctx context.Context, options managerOptions) error {
 			if !options.runDKG {
 				return fmt.Errorf("DKG is required before genesis")
 			}
-			if err := connectCommittee(ctx, node, members, local.ID); err != nil {
-				return fmt.Errorf("connect committee for DKG: %w", err)
-			}
 			ceremony, err = newDKGCeremonyForCommittee(node, members, manifest.NetworkID, 1, params.QuorumSize, local.ID)
 			if err != nil {
 				return err
 			}
 			node.Handle(p2p.DKGProtocol, ceremony.Handle)
+			if err := connectCommittee(ctx, node, members, local.ID); err != nil {
+				return fmt.Errorf("connect committee for DKG: %w", err)
+			}
 			result, err := ceremony.Run(ctx)
 			if err != nil {
 				return fmt.Errorf("initial dkg ceremony: %w", err)
@@ -291,7 +293,46 @@ func runManager(ctx context.Context, options managerOptions) error {
 	if err := stateStore.RestoreEngine(engine); err != nil {
 		return fmt.Errorf("restore certified ledger: %w", err)
 	}
+
+	// Ledger retention is maintenance, not part of the durable commit path. A
+	// prune failure must never turn an already committed snapshot into a
+	// reported persistence failure.
+	if _, err := stateStore.PruneLedger(time.Now().UTC()); err != nil {
+		log.Printf("apply initial ledger retention: %v", err)
+	}
+	retentionContext, retentionCancel := context.WithCancel(ctx)
+	defer retentionCancel()
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-retentionContext.Done():
+				return
+			case <-ticker.C:
+				if _, err := stateStore.PruneLedger(time.Now().UTC()); err != nil {
+					log.Printf("apply periodic ledger retention: %v", err)
+				}
+			}
+		}
+	}()
+
 	stateStore.InstallCommitListener(engine)
+	if production {
+		engine.OnCommit(func(snapshot model.SignedSnapshot) {
+			if snapshot.Transition.Type != bft.TransitionActivateCommittee {
+				return
+			}
+			next, err := activatedNetworkManifest(manifest, snapshot)
+			if err != nil {
+				log.Printf("activated manifest validation failed at height %d: %v", snapshot.Height, err)
+				return
+			}
+			if err := writeNetworkManifestAtomic(filepath.Join(options.dataDir, "network.json"), next); err != nil {
+				log.Printf("persist activated manifest at height %d: %v", snapshot.Height, err)
+			}
+		})
+	}
 	mesh, err := manager.NewCommitteeMesh(node, engine, members)
 	if err != nil {
 		return err
@@ -366,27 +407,39 @@ func runManager(ctx context.Context, options managerOptions) error {
 	var sso *oidc.Verifier
 	var bootstrapOIDC *web.BootstrapOIDC
 	if oidcConfig.Enabled() {
-		verifier, err := oidc.NewVerifier(ctx, oidcConfig)
-		if err != nil {
-			return fmt.Errorf("configure sso: %w", err)
-		}
-		sso = verifier
-		authURL, tokenURL, _ := verifier.Endpoint()
 		webClientID := oidcConfig.WebClientID
 		if webClientID == "" {
 			webClientID = oidcConfig.ClientID
 		}
-		bootstrapOIDC = &web.BootstrapOIDC{
-			Issuer: oidcConfig.Issuer, ClientID: webClientID,
-			Scopes:                oidcConfig.ScopesOrDefault(),
-			AuthorizationEndpoint: authURL, TokenEndpoint: tokenURL,
+		webRedirectURI := strings.TrimSpace(oidcConfig.WebRedirectURI)
+		if webRedirectURI == "" {
+			return fmt.Errorf("configure sso: webRedirectUri is required")
 		}
-		log.Printf("sso enabled with issuer %s", oidcConfig.Issuer)
+		verifier, err := oidc.NewVerifierWithRetry(ctx, oidcConfig, 30, 500*time.Millisecond)
+		if err != nil {
+			// SSO is an authentication feature, not a committee dependency. A
+			// temporarily unavailable IdP must not prevent the manager from
+			// serving local accounts and participating in consensus.
+			log.Printf("sso unavailable; continuing without sso: %v", err)
+		} else {
+			sso = verifier
+			authURL, tokenURL, _ := verifier.Endpoint()
+			bootstrapOIDC = &web.BootstrapOIDC{
+				Issuer: oidcConfig.Issuer, ClientID: webClientID,
+				Scopes:                oidcConfig.ScopesOrDefault(),
+				AuthorizationEndpoint: authURL, TokenEndpoint: tokenURL,
+				RedirectURI: webRedirectURI,
+			}
+			log.Printf("sso enabled with issuer %s", oidcConfig.Issuer)
+		}
 	}
 	linkGossiper := link.NewGossiper(node, mesh.PeerIDs(), engine.LocalID(), 10*time.Second, 90*time.Second, 1000)
 	var collector *metrics.Metrics
 	if options.metricsListen != "" {
 		collector = metrics.New()
+		stateStore.SetCommitErrorCallback(func(error) {
+			collector.RecordStoreWriteFailure()
+		})
 		if err := startMetricsServer(ctx, options.metricsListen, collector.Handler()); err != nil {
 			return err
 		}
@@ -429,9 +482,23 @@ func runManager(ctx context.Context, options managerOptions) error {
 	}
 	go netManager.RunAlerting(ctx)
 
+	sessionGossiper := websession.NewGossiper(node, stateStore, mesh.PeerIDs())
+	engine.OnCommit(func(snapshot model.SignedSnapshot) {
+		if snapshot.Transition.Type != bft.TransitionActivateCommittee {
+			return
+		}
+		sessionGossiper.SetPeers(mesh.PeerIDs())
+		go func() {
+			syncContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = sessionGossiper.Sync(syncContext)
+		}()
+	})
+	go sessionGossiper.Run(ctx)
 	webServer, err := web.NewServer(node, netManager, web.Config{
 		AdminToken: adminToken, SessionSecret: sessionSecret, AuthStore: stateStore,
 		Authenticator: netManager, OIDC: bootstrapOIDC,
+		SessionSyncer: sessionGossiper,
 	})
 	if err != nil {
 		return fmt.Errorf("create web server: %w", err)
@@ -501,8 +568,10 @@ func sameRoutingCommittee(manifest, certified []model.CommitteeMember) bool {
 }
 
 func connectCommittee(ctx context.Context, node *p2p.Node, members []model.CommitteeMember, localID string) error {
-	connectContext, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
+	peers := make([]struct {
+		id   string
+		info peer.AddrInfo
+	}, 0, len(members))
 	for _, member := range members {
 		if member.ID == localID {
 			continue
@@ -511,11 +580,55 @@ func connectCommittee(ctx context.Context, node *p2p.Node, members []model.Commi
 		if err != nil {
 			return fmt.Errorf("invalid address for manager %s: %w", member.ID, err)
 		}
-		if err := node.Host.Connect(connectContext, *info); err != nil {
-			return fmt.Errorf("connect manager %s: %w", member.ID, err)
+		peers = append(peers, struct {
+			id   string
+			info peer.AddrInfo
+		}{id: member.ID, info: *info})
+	}
+	if len(peers) == 0 {
+		return nil
+	}
+
+	connected := make(map[string]struct{}, len(peers))
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for {
+		remaining := 0
+		for _, target := range peers {
+			if _, ok := connected[target.id]; ok {
+				continue
+			}
+			remaining++
+			attemptContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+			err := node.Host.Connect(attemptContext, target.info)
+			cancel()
+			if err != nil {
+				lastErr = fmt.Errorf("connect manager %s: %w", target.id, err)
+				continue
+			}
+			connected[target.id] = struct{}{}
+			remaining--
+		}
+		if remaining == 0 {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			if lastErr == nil {
+				lastErr = fmt.Errorf("%d managers remained unreachable", remaining)
+			}
+			return lastErr
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
-	return nil
 }
 
 func keySetFromDKG(

@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"log"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 	"github.com/netp2p/netp2p/internal/auth"
 	"github.com/netp2p/netp2p/internal/bft"
 	"github.com/netp2p/netp2p/internal/model"
@@ -27,6 +29,7 @@ type AdminResponse struct {
 // manager-join verifier admits only submit_manager_join and read-only snapshot
 // queries from a candidate manager.
 func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string, managerJoinTokenHash []byte) {
+	tokenLimiter := newTokenRateLimiter()
 	node.Handle(p2p.AdminProtocol, func(stream network.Stream) {
 		defer stream.Close()
 		envelope, err := p2p.DecodeEnvelope(stream)
@@ -40,21 +43,28 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 			return
 		}
 		token, transition, query := wire.AdminRequestFromProto(&message)
-		adminAuthenticated := adminToken != "" &&
-			subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1
-		joinAuthenticated := len(managerJoinTokenHash) > 0 &&
-			subtle.ConstantTimeCompare(model.ManagerJoinTokenHash(token), managerJoinTokenHash) == 1
-		if !adminAuthenticated && !joinAuthenticated {
-			respondAdmin(stream, AdminResponse{Error: "forbidden"})
+		remote := stream.Conn().RemotePeer()
+		var remoteAddress ma.Multiaddr
+		if stream.Conn() != nil {
+			remoteAddress = stream.Conn().RemoteMultiaddr()
+		}
+		if !tokenLimiter.Allow(tokenRateKey(remote, remoteAddress), adminTokenAttempts) {
+			respondAdmin(stream, AdminResponse{Error: "token verification rate limit exceeded"})
 			return
 		}
-		if joinAuthenticated && !adminAuthenticated {
-			if query != "" && query != "snapshot" && query != "manager-snapshot" {
-				respondAdmin(stream, AdminResponse{Error: "forbidden join query"})
+		state := mesh.engine.CurrentState()
+		joinVerifier := activeManagerJoinTokenHash(state, managerJoinTokenHash)
+		adminAuthenticated := adminToken != "" &&
+			subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1
+		joinAuthenticated := false
+		if !adminAuthenticated {
+			if err := authorizeManagerJoin(state, query, transition.Type, remote); err != nil {
+				respondAdmin(stream, AdminResponse{Error: err.Error()})
 				return
 			}
-			if query == "" && transition.Type != bft.TransitionSubmitManagerJoin {
-				respondAdmin(stream, AdminResponse{Error: "forbidden join transition"})
+			joinAuthenticated = managerJoinTokenMatches(token, joinVerifier)
+			if !joinAuthenticated {
+				respondAdmin(stream, AdminResponse{Error: "forbidden"})
 				return
 			}
 		}
@@ -91,6 +101,67 @@ func RegisterAdminHandler(node *p2p.Node, mesh *CommitteeMesh, adminToken string
 	})
 }
 
+// activeManagerJoinTokenHash prefers the certified verifier. The manifest
+// verifier is only a bootstrap and legacy fallback for networks whose genesis
+// state predates certified manager-join token rotation.
+func activeManagerJoinTokenHash(state model.NetworkState, legacy []byte) []byte {
+	if len(state.ManagerJoinTokenHash) > 0 {
+		if len(state.ManagerJoinTokenHash) != 32 {
+			return nil
+		}
+		return state.ManagerJoinTokenHash
+	}
+	if len(legacy) == 32 {
+		return legacy
+	}
+	return nil
+}
+
+func managerJoinTokenMatches(token string, verifier []byte) bool {
+	return len(verifier) == 32 &&
+		subtle.ConstantTimeCompare(model.ManagerJoinTokenHash(token), verifier) == 1
+}
+
+func authorizeManagerJoin(state model.NetworkState, query, transitionType string, remote peer.ID) error {
+	if query != "" && query != "snapshot" && query != "manager-snapshot" {
+		return &AdminError{Message: "forbidden join query"}
+	}
+	if query == "" && transitionType != bft.TransitionSubmitManagerJoin {
+		return &AdminError{Message: "forbidden join transition"}
+	}
+	if managerJoinTokenConsumed(state) {
+		if query == "" || !managerJoinApprovedForPeer(state, remote) {
+			return &AdminError{Message: "manager join token has already been consumed"}
+		}
+	}
+	return nil
+}
+
+func managerJoinApprovedForPeer(state model.NetworkState, remote peer.ID) bool {
+	for _, request := range state.ManagerJoins {
+		if request.PeerID == remote.String() &&
+			(request.Status == model.ManagerJoinApproved || request.Status == model.ManagerJoinActivated) {
+			return true
+		}
+	}
+	return false
+}
+
+func managerJoinTokenConsumed(state model.NetworkState) bool {
+	if state.ManagerJoinTokenConsumed {
+		return true
+	}
+	if len(state.ManagerJoinTokenHash) > 0 {
+		return false
+	}
+	for _, request := range state.ManagerJoins {
+		if request.Status == model.ManagerJoinActivated {
+			return true
+		}
+	}
+	return false
+}
+
 // adminQuery answers read-only admin inspections from certified local state.
 // Queries never touch BFT and never mutate anything, so a manager can serve
 // them even while the committee is degraded.
@@ -102,6 +173,7 @@ func adminQuery(mesh *CommitteeMesh, query string, remote peer.ID) ([]byte, erro
 			return nil, &AdminError{Message: "no certified snapshot"}
 		}
 		if err := bft.ValidateSnapshot(snapshot); err != nil {
+			log.Printf("client snapshot query rejected at height %d: %v", snapshot.Height, err)
 			return nil, err
 		}
 		return json.Marshal(model.ClientSnapshot(snapshot))
@@ -122,6 +194,7 @@ func adminQuery(mesh *CommitteeMesh, query string, remote peer.ID) ([]byte, erro
 			return nil, &AdminError{Message: "candidate manager is not approved"}
 		}
 		if err := bft.ValidateSnapshot(snapshot); err != nil {
+			log.Printf("manager snapshot query rejected at height %d: %v", snapshot.Height, err)
 			return nil, err
 		}
 		return json.Marshal(snapshot)

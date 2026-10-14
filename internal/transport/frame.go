@@ -21,6 +21,8 @@ const (
 	ProtocolPacket = "packet"
 	// ProtocolEnvelope identifies a manager-forwarded envelope.
 	ProtocolEnvelope = "envelope"
+	// ProtocolScale identifies a domain-scoped global-routing envelope.
+	ProtocolScale = "scale"
 )
 
 // Frame is one explicitly typed transport frame.
@@ -41,6 +43,11 @@ func WriteFrame(writer io.Writer, payload []byte) error {
 // WriteEnvelopeFrame writes a manager-forwarded envelope frame.
 func WriteEnvelopeFrame(writer io.Writer, payload []byte) error {
 	return WriteProtocolFrame(writer, ProtocolEnvelope, payload)
+}
+
+// WriteScaleFrame writes a global-routing scale envelope.
+func WriteScaleFrame(writer io.Writer, payload []byte) error {
+	return WriteProtocolFrame(writer, ProtocolScale, payload)
 }
 
 // WriteProtocolFrame writes a length-prefixed protocol ID and payload.
@@ -96,6 +103,18 @@ func ReadEnvelopeFrame(reader io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	if frame.Protocol != ProtocolEnvelope {
+		return nil, fmt.Errorf("unexpected frame protocol %q", frame.Protocol)
+	}
+	return frame.Payload, nil
+}
+
+// ReadScaleFrame reads a global-routing scale envelope.
+func ReadScaleFrame(reader io.Reader) ([]byte, error) {
+	frame, err := ReadProtocolFrame(reader)
+	if err != nil {
+		return nil, err
+	}
+	if frame.Protocol != ProtocolScale {
 		return nil, fmt.Errorf("unexpected frame protocol %q", frame.Protocol)
 	}
 	return frame.Payload, nil

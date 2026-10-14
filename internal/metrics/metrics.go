@@ -34,14 +34,21 @@ type Metrics struct {
 	Forwarded              prometheus.Counter
 	ForwardDrops           prometheus.Counter
 	ForwardQueueDepth      prometheus.Gauge
+	ScalePathSelections    *prometheus.CounterVec
 	SyncRequests           prometheus.Counter
 	SyncErrors             prometheus.Counter
 	SyncTimeouts           prometheus.Counter
+	StoreWriteFailures     prometheus.Counter
 	QuotaBlocked           prometheus.Counter
 	DNSFailures            prometheus.Counter
 	CertifiedPeers         prometheus.Gauge
 	LinkSegments           prometheus.Gauge
 	LinkConfidence         prometheus.Gauge
+	RoutingEpochPresent    prometheus.Gauge
+	RoutingEpochSequence   prometheus.Gauge
+	RoutingEpochAge        prometheus.Gauge
+	RoutingEpochSize       prometheus.Gauge
+	RoutingEpochInvalid    prometheus.Counter
 }
 
 // New builds an isolated registry so tests and multiple managers do not share
@@ -104,6 +111,10 @@ func New() *Metrics {
 		ForwardQueueDepth: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "netp2p_forward_queue_depth", Help: "Frames currently being handed to the forwarding transport.",
 		}),
+		ScalePathSelections: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "netp2p_forward_scale_path_selections_total",
+			Help: "Scale envelopes accepted for a certified path family, labeled by family shape.",
+		}, []string{"path_family", "kind", "manager_hops"}),
 		SyncRequests: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_sync_requests_total", Help: "Client sync requests served.",
 		}),
@@ -112,6 +123,10 @@ func New() *Metrics {
 		}),
 		SyncTimeouts: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_sync_timeouts_total", Help: "Client sync long polls closed at the session lifetime limit.",
+		}),
+		StoreWriteFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "netp2p_store_write_failures_total",
+			Help: "Durable ledger writes that failed after consensus accepted a snapshot.",
 		}),
 		QuotaBlocked: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "netp2p_quota_blocked_packets_total", Help: "Packets dropped because a budget was exhausted.",
@@ -128,6 +143,21 @@ func New() *Metrics {
 		LinkConfidence: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "netp2p_link_min_confidence", Help: "Lowest segment confidence in the current link view.",
 		}),
+		RoutingEpochPresent: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "netp2p_routing_epoch_id", Help: "1 when a signed routing epoch is active.",
+		}),
+		RoutingEpochSequence: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "netp2p_routing_epoch_sequence", Help: "Sequence number of the active signed routing epoch.",
+		}),
+		RoutingEpochAge: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "netp2p_routing_epoch_age_seconds", Help: "Age of the active signed routing epoch.",
+		}),
+		RoutingEpochSize: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "netp2p_routing_epoch_size_bytes", Help: "Encoded size of the active signed routing epoch.",
+		}),
+		RoutingEpochInvalid: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "netp2p_routing_epoch_invalid_total", Help: "Routing epochs rejected by validation.",
+		}),
 	}
 	registry.MustRegister(
 		metrics.BFTHeight, metrics.BFTCommits, metrics.BFTRejected, metrics.BFTLastCommitTime,
@@ -135,9 +165,13 @@ func New() *Metrics {
 		metrics.BFTSubmitTotal, metrics.BFTSubmitFailuresTotal,
 		metrics.BFTCatchUps, metrics.BFTCatchupFailures,
 		metrics.BFTSubmitAttempts, metrics.BFTSubmitFailures,
-		metrics.Forwarded, metrics.ForwardDrops, metrics.SyncRequests, metrics.SyncErrors, metrics.SyncTimeouts,
+		metrics.Forwarded, metrics.ForwardDrops, metrics.ScalePathSelections,
+		metrics.SyncRequests, metrics.SyncErrors, metrics.SyncTimeouts,
+		metrics.StoreWriteFailures,
 		metrics.QuotaBlocked, metrics.CertifiedPeers, metrics.LinkSegments,
 		metrics.LinkConfidence, metrics.ForwardQueueDepth, metrics.DNSFailures,
+		metrics.RoutingEpochPresent, metrics.RoutingEpochSequence,
+		metrics.RoutingEpochAge, metrics.RoutingEpochSize, metrics.RoutingEpochInvalid,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
@@ -228,6 +262,52 @@ func (metrics *Metrics) RecordSyncTimeout() {
 		return
 	}
 	metrics.SyncTimeouts.Inc()
+}
+
+func (metrics *Metrics) RecordStoreWriteFailure() {
+	if metrics == nil {
+		return
+	}
+	metrics.StoreWriteFailures.Inc()
+}
+
+// SetRoutingEpoch publishes the active signed routing epoch's observability
+// gauges. Size is the canonical JSON encoding length, not an in-memory object size.
+func (metrics *Metrics) SetRoutingEpoch(sequence uint64, age time.Duration, sizeBytes int) {
+	if metrics == nil {
+		return
+	}
+	metrics.RoutingEpochPresent.Set(1)
+	metrics.RoutingEpochSequence.Set(float64(sequence))
+	metrics.RoutingEpochAge.Set(age.Seconds())
+	metrics.RoutingEpochSize.Set(float64(sizeBytes))
+}
+
+// ClearRoutingEpoch marks the routing epoch as unavailable without losing the
+// last observed sequence and size, which remain useful for diagnosis.
+func (metrics *Metrics) ClearRoutingEpoch() {
+	if metrics == nil {
+		return
+	}
+	metrics.RoutingEpochPresent.Set(0)
+	metrics.RoutingEpochAge.Set(0)
+}
+
+func (metrics *Metrics) RecordRoutingEpochInvalid() {
+	if metrics == nil {
+		return
+	}
+	metrics.RoutingEpochInvalid.Inc()
+}
+
+// RecordScalePathSelection reports the certified family selected by a manager
+// for one scale envelope. It is incremented per manager hop, so a two-hop path
+// is visible on both managers that carry it.
+func (metrics *Metrics) RecordScalePathSelection(family, kind string, managerHops int) {
+	if metrics == nil || family == "" {
+		return
+	}
+	metrics.ScalePathSelections.WithLabelValues(family, kind, strconv.Itoa(managerHops)).Inc()
 }
 
 func unixSeconds(timestamp time.Time) float64 {

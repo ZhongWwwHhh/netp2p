@@ -1,0 +1,6 @@
+extends:
+  - recommended
+rules:
+  # Liveness, readiness, and reserved planned endpoints do not all have a
+  # meaningful 4xx contract. Structural validation and other style rules stay on.
+  operation-4xx-response: off

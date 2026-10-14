@@ -7,12 +7,13 @@ import (
 
 func StateTransitionToProto(transition model.StateTransition) *pb.StateTransition {
 	message := &pb.StateTransition{
-		Type:        transition.Type,
-		SetupKey:    transition.SetupKey,
-		RequestId:   transition.RequestID,
-		TargetId:    transition.TargetID,
-		Committee:   mapSlice(transition.Committee, CommitteeMemberToProto),
-		BudgetUsage: BudgetUsageToProto(transition.BudgetUsage),
+		Type:                 transition.Type,
+		SetupKey:             transition.SetupKey,
+		RequestId:            transition.RequestID,
+		TargetId:             transition.TargetID,
+		ManagerJoinTokenHash: cloneBytes(transition.ManagerJoinTokenHash),
+		Committee:            mapSlice(transition.Committee, CommitteeMemberToProto),
+		BudgetUsage:          BudgetUsageToProto(transition.BudgetUsage),
 	}
 	// The peer record uses a value type in Go, so an unset peer stays nil.
 	if transition.Peer.PeerID != "" {
@@ -44,10 +45,11 @@ func StateTransitionToProto(transition model.StateTransition) *pb.StateTransitio
 	}
 	if transition.User != nil {
 		message.User = UserToProto(*transition.User)
-		// Keep the verifier out of historical transition encodings; the type
-		// lives in internal/bft to avoid a wire-to-BFT dependency cycle.
+		// Credential updates use the dedicated field. Register-user keeps the
+		// historical nested encoding so old transition hashes stay unchanged.
 		if transition.Type == "update_user_credentials" {
-			message.UserPasswordVerifier = transition.User.PasswordVerifier
+			message.UserPasswordVerifier = cloneBytes(transition.User.PasswordVerifier)
+			message.User.PasswordVerifier = nil
 		}
 	}
 	if transition.Settings != nil {
@@ -95,11 +97,12 @@ func StateTransitionFromProto(message *pb.StateTransition) model.StateTransition
 		return model.StateTransition{}
 	}
 	transition := model.StateTransition{
-		Type:      message.GetType(),
-		SetupKey:  message.GetSetupKey(),
-		RequestID: message.GetRequestId(),
-		TargetID:  message.GetTargetId(),
-		Committee: mapSlice(message.GetCommittee(), CommitteeMemberFromProto),
+		Type:                 message.GetType(),
+		SetupKey:             message.GetSetupKey(),
+		RequestID:            message.GetRequestId(),
+		TargetID:             message.GetTargetId(),
+		ManagerJoinTokenHash: cloneBytes(message.GetManagerJoinTokenHash()),
+		Committee:            mapSlice(message.GetCommittee(), CommitteeMemberFromProto),
 	}
 	if message.GetPeer() != nil {
 		transition.Peer = PeerRecordFromProto(message.GetPeer())
@@ -138,7 +141,9 @@ func StateTransitionFromProto(message *pb.StateTransition) model.StateTransition
 	}
 	if message.GetUser() != nil {
 		user := UserFromProto(message.GetUser())
-		user.PasswordVerifier = message.GetUserPasswordVerifier()
+		if verifier := message.GetUserPasswordVerifier(); len(verifier) > 0 {
+			user.PasswordVerifier = cloneBytes(verifier)
+		}
 		transition.User = &user
 	}
 	if message.GetSettings() != nil {

@@ -1,4 +1,4 @@
-.PHONY: ui build build-linux test race e2e package-linux package-tarball package-windows checksums sbom release clean
+.PHONY: ui build build-linux test race e2e package-linux package-tarball package-windows checksums sbom release-security-lint release clean
 
 GOBIN := $(shell go env GOPATH)/bin
 PROTOC_GEN_GO_VERSION := v1.36.11
@@ -56,10 +56,18 @@ package-windows: $(if $(SKIP_UI),,ui)
 	powershell -NoProfile -ExecutionPolicy Bypass -File packaging/windows/build.ps1 -Version $(VERSION) -BinDir dist/windows -OutDir dist
 
 checksums:
-	sh packaging/checksums.sh dist/netp2p-$(VERSION)-SHA256SUMS dist/netp2p-$(VERSION)-linux-amd64.tar.gz dist/*.deb dist/*.rpm dist/*.msi
+	sh packaging/checksums.sh dist/netp2p-$(VERSION)-SHA256SUMS \
+		dist/netp2p-$(VERSION)-linux-amd64.tar.gz \
+		dist/netp2p_$(VERSION)_amd64.deb \
+		dist/netp2p-$(VERSION)-1.x86_64.rpm \
+		dist/netp2p-$(VERSION)-windows-amd64.msi \
+		dist/netp2p-$(VERSION)-sbom.cdx.json
 
 sbom:
-	sh packaging/sbom.sh dist/netp2p-$(VERSION)-sbom.cdx.json dir:.
+	VERSION=$(VERSION) sh packaging/sbom.sh dist/netp2p-$(VERSION)-sbom.cdx.json dir:.
+
+release-security-lint:
+	python scripts/check_release_workflow.py
 
 release: package-linux package-tarball package-windows sbom checksums
 

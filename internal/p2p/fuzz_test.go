@@ -17,6 +17,8 @@ type fuzzEnvelopeStream struct {
 	reader io.Reader
 }
 
+func (stream fuzzEnvelopeStream) SetReadDeadline(time.Time) error { return nil }
+
 func (stream fuzzEnvelopeStream) Read(buffer []byte) (int, error) {
 	return stream.reader.Read(buffer)
 }

@@ -156,8 +156,10 @@ func (set *FaceBudgetSet) ObserveQueue(faceID string, depth, capacity uint64, no
 	return face.feedback(), nil
 }
 
-// Admit consumes tokens for one frame. Realtime receives a protected share and
-// a less aggressive backoff so ordinary bulk traffic cannot starve it.
+// Admit consumes tokens only when a frame can be sent immediately. A delayed
+// decision leaves tokens untouched because the manager forwarding path drops
+// rather than queues the frame. Realtime receives a protected share and a less
+// aggressive backoff so ordinary bulk traffic cannot starve it.
 func (set *FaceBudgetSet) Admit(faceID string, class path.FlowClass, bytes uint64, now time.Time) Decision {
 	set.mu.Lock()
 	defer set.mu.Unlock()
@@ -183,7 +185,7 @@ func (set *FaceBudgetSet) Admit(faceID string, class path.FlowClass, bytes uint6
 			bucket.tokenBucket.burst = rate
 		}
 	}
-	allowed, wait := bucket.tokenBucket.Allow(bytes, now, defaultMaxThrottleDelay)
+	allowed, wait := bucket.tokenBucket.Allow(bytes, now, 0)
 	if allowed {
 		return Decision{Allowed: true, Action: ActionAllow, BudgetID: faceID + ":" + string(class)}
 	}

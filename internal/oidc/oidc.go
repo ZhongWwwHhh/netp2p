@@ -17,6 +17,10 @@ type Config struct {
 	Issuer      string `json:"issuer"`
 	ClientID    string `json:"clientId"`
 	WebClientID string `json:"webClientId,omitempty"`
+	// WebRedirectURI is the externally reachable console callback. It is
+	// deliberately explicit so a reverse proxy cannot influence it with a
+	// forged Host header.
+	WebRedirectURI string `json:"webRedirectUri,omitempty"`
 	// Audience overrides the token audience that must be present. It defaults
 	// to ClientID.
 	Audience string `json:"audience,omitempty"`
@@ -99,6 +103,34 @@ func NewVerifier(ctx context.Context, config Config) (*Verifier, error) {
 		verifier.webVerifier = provider.Verifier(&oidc.Config{ClientID: web})
 	}
 	return verifier, nil
+}
+
+// NewVerifierWithRetry tolerates transient startup races, such as a container
+// DNS record or IdP listener becoming available shortly after the manager.
+func NewVerifierWithRetry(ctx context.Context, config Config, attempts int, interval time.Duration) (*Verifier, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		verifier, err := NewVerifier(ctx, config)
+		if err == nil {
+			return verifier, nil
+		}
+		lastErr = err
+		if attempt == attempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+		}
+	}
+	return nil, fmt.Errorf("oidc discovery failed after %d attempts: %w", attempts, lastErr)
 }
 
 // Verify checks the token signature, issuer, audience and expiry, then extracts

@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/netp2p/netp2p/internal/forward"
+	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/p2p"
+	"github.com/netp2p/netp2p/internal/packet"
+	"github.com/netp2p/netp2p/internal/path"
 )
 
 func newTestNode(t *testing.T) (*p2p.Node, context.CancelFunc) {
@@ -50,11 +55,12 @@ func TestTransportDispatchesBothHandlers(t *testing.T) {
 			return
 		}
 		packets <- payload
-	}, func(_ peer.ID, payload []byte) {
+	}, func(_ peer.ID, payload []byte) error {
 		if _, err := forward.DecodeEnvelope(payload); err != nil {
-			return
+			return nil
 		}
 		envelopes <- payload
+		return nil
 	})
 	defer receiver.Close()
 	sender := New(ctx, left.Host, p2p.FrameProtocol, nil)
@@ -114,8 +120,9 @@ func TestTransportDeliversEnvelopes(t *testing.T) {
 	}
 
 	envelopes := make(chan []byte, 1)
-	receiver := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, nil, func(_ peer.ID, payload []byte) {
+	receiver := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, nil, func(_ peer.ID, payload []byte) error {
 		envelopes <- payload
+		return nil
 	})
 	defer receiver.Close()
 	sender := New(ctx, left.Host, p2p.FrameProtocol, nil)
@@ -272,6 +279,225 @@ func TestTransportReusesOneStream(t *testing.T) {
 	}
 }
 
+// TestSendScaleDoesNotReuseStalePersistentStream reproduces the idle-stream
+// failure without waiting for the production read deadline. The first packet
+// establishes a persistent stream, that stream is then reset as an idle receiver
+// would do, and the next scale frame must still be delivered and acknowledged.
+func TestSendScaleDoesNotReuseStalePersistentStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	left, cancelLeft := newTestNode(t)
+	defer cancelLeft()
+	defer left.Close()
+	right, cancelRight := newTestNode(t)
+	defer cancelRight()
+	defer right.Close()
+	if err := left.Host.Connect(ctx, peer.AddrInfo{ID: right.Host.ID(), Addrs: right.Host.Addrs()}); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	packets := make(chan struct{}, 1)
+	scales := make(chan []byte, 1)
+	rightTransport := NewWithEnvelope(
+		ctx, right.Host, p2p.FrameProtocol,
+		func(peer.ID, []byte) { packets <- struct{}{} },
+		func(_ peer.ID, payload []byte) error {
+			scales <- payload
+			return nil
+		},
+	)
+	defer rightTransport.Close()
+	leftTransport := New(ctx, left.Host, p2p.FrameProtocol, nil)
+	defer leftTransport.Close()
+
+	if err := leftTransport.SendPacket(right.Host.ID(), []byte{0x45, 0x00}); err != nil {
+		t.Fatalf("seed persistent stream: %v", err)
+	}
+	select {
+	case <-packets:
+	case <-time.After(5 * time.Second):
+		t.Fatal("persistent stream was not established")
+	}
+
+	leftTransport.mu.Lock()
+	conn, ok := leftTransport.conns[right.Host.ID()]
+	stream := conn.stream
+	leftTransport.mu.Unlock()
+	if !ok || stream == nil {
+		t.Fatal("persistent outbound stream was not created")
+	}
+	_ = stream.Reset()
+
+	payload := []byte("first-scale-after-stale-stream")
+	if err := leftTransport.SendScale(right.Host.ID(), payload); err != nil {
+		t.Fatalf("send scale after stale stream: %v", err)
+	}
+	select {
+	case got := <-scales:
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("scale payload mismatch: %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scale frame was lost on a stale persistent stream")
+	}
+}
+
+func TestScaleForwardCounterRequiresDestinationAcknowledgement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	sourceNode, cancelSource := newTestNode(t)
+	defer cancelSource()
+	defer sourceNode.Close()
+	managerNode, cancelManager := newTestNode(t)
+	defer cancelManager()
+	defer managerNode.Close()
+	destinationNode, cancelDestination := newTestNode(t)
+	defer cancelDestination()
+	defer destinationNode.Close()
+	if err := managerNode.Host.Connect(ctx, peer.AddrInfo{
+		ID: destinationNode.Host.ID(), Addrs: destinationNode.Host.Addrs(),
+	}); err != nil {
+		t.Fatalf("connect destination: %v", err)
+	}
+
+	sourceID := sourceNode.Host.ID().String()
+	managerID := managerNode.Host.ID().String()
+	destinationID := destinationNode.Host.ID().String()
+	state := model.NetworkState{
+		NetworkID: "scale-ack-test",
+		Peers: []model.PeerRecord{
+			{PeerID: sourceID, OverlayIP: "100.64.0.1", Groups: []string{"sources"}},
+			{PeerID: destinationID, OverlayIP: "100.64.0.2", Groups: []string{"destinations"}},
+		},
+		Groups: []model.Group{
+			{ID: "sources", PeerIDs: []string{sourceID}},
+			{ID: "destinations", PeerIDs: []string{destinationID}},
+		},
+		Policies: []model.Policy{{
+			ID: "allow-icmp", SourceGroups: []string{"sources"}, DestinationGroups: []string{"destinations"},
+			Services: []model.Service{{Protocol: "icmp"}}, Effect: model.EffectAllow,
+		}},
+		PathFamilies: []model.PathFamily{{
+			ID: "family-via-manager", Kind: model.PathKindViaManager,
+			ManagerHops:  []string{managerID},
+			SourceGroups: []string{"sources"}, DestinationScopes: []string{"group:destinations"},
+			FlowClasses: []string{string(path.FlowLatency)},
+		}},
+		RoutingDomains: []model.RoutingDomainAuthorization{{
+			ID: "manager/sources/group:destinations/latency",
+			Key: model.RoutingDomainKey{
+				SourceManagerID: "manager", SourceGroupID: "sources",
+				DestinationScope: model.DestinationScopeGroup + "destinations",
+				FlowClass:        string(path.FlowLatency),
+			},
+			PathFamilyIDs: []string{"family-via-manager"}, PolicyIDs: []string{"allow-icmp"},
+		}},
+	}
+
+	var rejectScale atomic.Bool
+	packets := make(chan struct{}, 1)
+	delivered := make(chan []byte, 1)
+	destinationTransport := NewWithEnvelope(
+		ctx, destinationNode.Host, p2p.FrameProtocol,
+		func(peer.ID, []byte) { packets <- struct{}{} },
+		func(_ peer.ID, wire []byte) error {
+			if rejectScale.Load() {
+				return errors.New("destination rejected scale frame")
+			}
+			delivered <- wire
+			return nil
+		},
+	)
+	defer destinationTransport.Close()
+	managerTransport := New(ctx, managerNode.Host, p2p.FrameProtocol, nil)
+	defer managerTransport.Close()
+
+	table := forward.NewTable(state, managerID, nil)
+	table.SetScaleRouting(func(_, _, _, _, _ string) (forward.ScaleAuthorization, error) {
+		return forward.ScaleAuthorization{
+			FaceID: managerID, NextHop: destinationID, ExpectedPredecessor: sourceID,
+		}, nil
+	}, func(remote peer.ID, envelope forward.ScaleEnvelope) error {
+		wire, err := forward.EncodeScaleEnvelope(envelope)
+		if err != nil {
+			return err
+		}
+		return managerTransport.SendScale(remote, wire)
+	})
+
+	if err := managerTransport.SendPacket(destinationNode.Host.ID(), []byte{0x45, 0x00}); err != nil {
+		t.Fatalf("seed persistent stream: %v", err)
+	}
+	select {
+	case <-packets:
+	case <-time.After(5 * time.Second):
+		t.Fatal("persistent stream was not established")
+	}
+	managerTransport.mu.Lock()
+	conn := managerTransport.conns[destinationNode.Host.ID()]
+	staleStream := conn.stream
+	managerTransport.mu.Unlock()
+	if staleStream == nil {
+		t.Fatal("persistent stream is missing")
+	}
+	_ = staleStream.Reset()
+
+	newEnvelope := func(t *testing.T, identifier uint16) forward.ScaleEnvelope {
+		t.Helper()
+		payload, err := packet.BuildEchoRequest(
+			net.ParseIP("100.64.0.1"), net.ParseIP("100.64.0.2"), identifier, 1, []byte("ack"),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		flowHash, ok := packet.FlowHash(payload)
+		if !ok {
+			t.Fatal("test payload has no flow hash")
+		}
+		return forward.ScaleEnvelope{
+			Header: forward.ScaleHeader{
+				SourcePeerID: sourceID, DestinationPeerID: destinationID,
+				RoutingDomainID: "manager/sources/group:destinations/latency",
+				PathFamilyID:    "family-via-manager", PathInstanceID: managerID,
+				FlowClass: string(path.FlowLatency), FlowHash: flowHash, TTL: forward.DefaultTTL,
+			},
+			Payload: payload,
+		}
+	}
+	source, err := peer.Decode(sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deliveredResult, err := table.AcceptScale(source, newEnvelope(t, 0x5151))
+	if err != nil || deliveredResult {
+		t.Fatalf("accepted scale frame = (%v, %v), want (false, nil)", deliveredResult, err)
+	}
+	select {
+	case wire := <-delivered:
+		envelope, err := forward.DecodeScaleEnvelope(wire)
+		if err != nil || envelope.Header.SourcePeerID != sourceID {
+			t.Fatalf("delivered scale envelope = (%+v, %v)", envelope.Header, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("scale frame was not delivered before forwarding was counted")
+	}
+	forwarded, dropped := table.Stats()
+	if forwarded != 1 || dropped != 0 {
+		t.Fatalf("after acknowledged frame stats = (%d, %d), want (1, 0)", forwarded, dropped)
+	}
+
+	rejectScale.Store(true)
+	if _, err := table.AcceptScale(source, newEnvelope(t, 0x5152)); err == nil {
+		t.Fatal("rejected scale frame was reported as accepted")
+	}
+	forwarded, dropped = table.Stats()
+	if forwarded != 1 || dropped != 1 {
+		t.Fatalf("after rejected frame stats = (%d, %d), want (1, 1)", forwarded, dropped)
+	}
+}
+
 func TestSendRejectsInvalidFrameSize(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -308,9 +534,10 @@ func TestTransportRejectsOversizedForwardingEnvelope(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	decoded := make(chan error, 1)
-	rightTransport := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, nil, func(_ peer.ID, payload []byte) {
+	rightTransport := NewWithEnvelope(ctx, right.Host, p2p.FrameProtocol, nil, func(_ peer.ID, payload []byte) error {
 		_, err := forward.DecodeEnvelope(payload)
 		decoded <- err
+		return nil
 	})
 	defer rightTransport.Close()
 	leftTransport := NewWithEnvelope(ctx, left.Host, p2p.FrameProtocol, nil, nil)

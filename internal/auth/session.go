@@ -88,6 +88,42 @@ func (manager *SessionManager) Verify(token string, now time.Time) (Identity, er
 	return session.Identity, nil
 }
 
+// SessionID returns the server-side identifier embedded in a valid signed
+// local session. Web handlers persist this identifier and use it for logout and
+// user-wide revocation.
+func (manager *SessionManager) SessionID(token string) (string, error) {
+	if manager == nil {
+		return "", fmt.Errorf("session manager is not configured")
+	}
+	if !strings.HasPrefix(token, LocalSessionPrefix) {
+		return "", fmt.Errorf("invalid session token")
+	}
+	encoded, signature, ok := strings.Cut(strings.TrimPrefix(token, LocalSessionPrefix), ".")
+	if !ok || encoded == "" || signature == "" ||
+		!hmac.Equal([]byte(signature), []byte(manager.sign(encoded))) {
+		return "", fmt.Errorf("invalid session signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decode session token: %w", err)
+	}
+	var session localSession
+	if err := json.Unmarshal(payload, &session); err != nil {
+		return "", fmt.Errorf("decode session token: %w", err)
+	}
+	if session.SessionID == "" {
+		return "", fmt.Errorf("session token has no session id")
+	}
+	return session.SessionID, nil
+}
+
+// ExternalSessionID derives a stable non-secret identifier for an externally
+// issued bearer token. Only the hash is persisted.
+func ExternalSessionID(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return "external-" + base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
 // IssuedAt exposes the certified timestamp used by the web layer to invalidate
 // sessions issued before a target user's credentials changed.
 func (manager *SessionManager) IssuedAt(token string) (time.Time, error) {

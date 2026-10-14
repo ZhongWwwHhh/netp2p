@@ -4,7 +4,7 @@ package version
 
 // Version is the client/manager protocol revision. Override at build time with
 // -ldflags "-X github.com/netp2p/netp2p/internal/version.Version=...".
-var Version = "0.3.4"
+var Version = "0.3.6"
 
 // ProtocolVersion is the wire revision stamped into every libp2p protocol id.
 // Managers and clients refuse to exchange control-plane messages across
@@ -19,6 +19,7 @@ func Capabilities() []string {
 		"protobuf",
 		"sync-heartbeat",
 		"bls-threshold-qc",
+		"threshold-routing-epoch",
 		"committee-reconfig",
 		"quota-enforcement",
 		"multi-hop",

@@ -96,10 +96,6 @@
             {/each}
           </dd>
         </div>
-        <div>
-          <dt class="text-xs uppercase tracking-wide text-slate-500">Browser peer ID</dt>
-          <dd class="break-all font-mono text-xs text-slate-700">{session.client?.peerId?.toString() ?? '—'}</dd>
-        </div>
       </dl>
       <button class="btn-secondary mt-4" onclick={() => void disconnect()}>Sign out of this manager</button>
     </section>

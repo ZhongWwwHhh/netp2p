@@ -5,15 +5,21 @@ package forward
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/netp2p/netp2p/internal/conntrack"
 	"github.com/netp2p/netp2p/internal/metrics"
 	"github.com/netp2p/netp2p/internal/model"
+	"github.com/netp2p/netp2p/internal/packet"
 	"github.com/netp2p/netp2p/internal/path"
+	"github.com/netp2p/netp2p/internal/policy"
 	"github.com/netp2p/netp2p/internal/quota"
 	"github.com/netp2p/netp2p/internal/tracing"
 	"go.opentelemetry.io/otel"
@@ -53,6 +59,7 @@ type Table struct {
 	state           model.NetworkState
 	sender          Sender
 	localID         string
+	faceID          string
 	quota           *quota.Enforcer
 	connections     map[string]struct{}
 	sequence        atomic.Uint64
@@ -64,6 +71,7 @@ type Table struct {
 	bytes           atomic.Uint64
 	metrics         *metrics.Metrics
 	faceBudgets     *quota.FaceBudgetSet
+	scaleFlows      *conntrack.Table
 	scaleAuthorizer ScaleAuthorizer
 	scaleSender     ScaleSender
 }
@@ -76,8 +84,10 @@ func NewTableWithMetrics(state model.NetworkState, localID string, sender Sender
 	return &Table{
 		state:       state,
 		localID:     localID,
+		faceID:      localID,
 		sender:      sender,
 		quota:       quota.NewEnforcer(state.Budgets),
+		scaleFlows:  conntrack.NewTable(),
 		connections: make(map[string]struct{}),
 		metrics:     collector,
 	}
@@ -93,6 +103,18 @@ func (table *Table) SetScaleRouting(authorizer ScaleAuthorizer, sender ScaleSend
 	table.mu.Lock()
 	table.scaleAuthorizer = authorizer
 	table.scaleSender = sender
+	table.mu.Unlock()
+}
+
+// SetFaceID sets the manager label used by the capacity-budget faces. The
+// forwarding path identifies peers by libp2p PeerID, while budgets identify a
+// manager by its certified committee ID; the two must not be conflated.
+func (table *Table) SetFaceID(faceID string) {
+	if faceID == "" {
+		return
+	}
+	table.mu.Lock()
+	table.faceID = faceID
 	table.mu.Unlock()
 }
 
@@ -232,9 +254,15 @@ func (table *Table) SendScale(source, destination peer.ID, envelope ScaleEnvelop
 		return ErrScaleUnauthorized
 	}
 	table.mu.RLock()
+	state := table.state
+	faceBudgets := table.faceBudgets
 	authorizer := table.scaleAuthorizer
 	sender := table.scaleSender
 	table.mu.RUnlock()
+	if err := table.validateScaleEnvelope(state, envelope); err != nil {
+		table.recordDrop()
+		return err
+	}
 	if authorizer == nil || sender == nil {
 		return ErrScaleUnauthorized
 	}
@@ -245,6 +273,16 @@ func (table *Table) SendScale(source, destination peer.ID, envelope ScaleEnvelop
 	}
 	if authorization.Destination || authorization.NextHop == "" {
 		return ErrScaleUnauthorized
+	}
+	if !table.admitScaleQuotas(state, envelope.Header.SourcePeerID, envelope.Header.DestinationPeerID, uint64(len(envelope.Payload))) {
+		table.recordQuotaBlocked()
+		table.recordDrop()
+		return ErrQuotaExceeded
+	}
+	if !table.admitScaleFace(faceBudgets, authorization.FaceID, envelope.Header.FlowClass, uint64(len(envelope.Payload))) {
+		table.recordQuotaBlocked()
+		table.recordDrop()
+		return ErrFaceBudgetExceeded
 	}
 	next, err := peer.Decode(authorization.NextHop)
 	if err != nil {
@@ -266,10 +304,47 @@ func (table *Table) AcceptScale(remote peer.ID, envelope ScaleEnvelope) (bool, e
 		return false, ErrTTLExceeded
 	}
 	table.mu.RLock()
+	state := table.state
 	authorizer := table.scaleAuthorizer
 	sender := table.scaleSender
 	faceBudgets := table.faceBudgets
 	table.mu.RUnlock()
+	returnAuthorization, isReturn, err := table.authorizeScaleReturn(state, remote, envelope)
+	if err != nil {
+		table.recordDrop()
+		return false, err
+	}
+	if isReturn {
+		if !table.admitScaleQuotas(state, envelope.Header.SourcePeerID, envelope.Header.DestinationPeerID, uint64(len(envelope.Payload))) {
+			table.recordQuotaBlocked()
+			table.recordDrop()
+			return false, ErrQuotaExceeded
+		}
+		if !table.admitScaleFace(faceBudgets, returnAuthorization.FaceID, envelope.Header.FlowClass, uint64(len(envelope.Payload))) {
+			table.recordQuotaBlocked()
+			table.recordDrop()
+			return false, ErrFaceBudgetExceeded
+		}
+		next, err := peer.Decode(returnAuthorization.NextHop)
+		if err != nil {
+			table.recordDrop()
+			return false, err
+		}
+		forwarded := envelope
+		forwarded.Header.TTL--
+		if err := table.sendScale(next, forwarded); err != nil {
+			table.recordDrop()
+			return false, err
+		}
+		table.observeConnection(remote)
+		table.bytes.Add(uint64(len(envelope.Payload)))
+		table.recordForwarded()
+		return false, nil
+	}
+	if err := table.validateScaleEnvelope(state, envelope); err != nil {
+		table.recordDrop()
+		return false, err
+	}
 	if authorizer == nil {
 		table.recordDrop()
 		return false, ErrScaleUnauthorized
@@ -282,25 +357,30 @@ func (table *Table) AcceptScale(remote peer.ID, envelope ScaleEnvelope) (bool, e
 	}
 	if authorization.ExpectedPredecessor != remote.String() {
 		table.recordDrop()
-		return false, ErrScaleUnauthorized
+		return false, fmt.Errorf("%w: unexpected predecessor", ErrScaleUnauthorized)
 	}
+	table.recordScaleSelection(envelope)
 	if authorization.Destination {
 		table.observeConnection(remote)
 		table.bytes.Add(uint64(len(envelope.Payload)))
 		return true, nil
 	}
+	if !table.admitScaleFace(faceBudgets, authorization.FaceID, envelope.Header.FlowClass, uint64(len(envelope.Payload))) {
+		table.recordQuotaBlocked()
+		table.recordDrop()
+		return false, ErrFaceBudgetExceeded
+	}
+	// Peer budgets are charged once, at the first certified manager hop. Later
+	// hops enforce their own face budget but must not double-count endpoints.
+	if remote.String() == envelope.Header.SourcePeerID &&
+		!table.admitScaleQuotas(state, envelope.Header.SourcePeerID, envelope.Header.DestinationPeerID, uint64(len(envelope.Payload))) {
+		table.recordQuotaBlocked()
+		table.recordDrop()
+		return false, ErrQuotaExceeded
+	}
 	if authorization.NextHop == "" || sender == nil {
 		table.recordDrop()
 		return false, ErrScaleUnauthorized
-	}
-	if faceBudgets != nil && authorization.FaceID != "" {
-		table.observeFaceQueue(authorization.FaceID)
-		decision := faceBudgets.Admit(authorization.FaceID, path.FlowClass(envelope.Header.FlowClass), uint64(len(envelope.Payload)), time.Now().UTC())
-		if !decision.Allowed || decision.Delay > 0 {
-			table.recordQuotaBlocked()
-			table.recordDrop()
-			return false, ErrFaceBudgetExceeded
-		}
 	}
 	next, err := peer.Decode(authorization.NextHop)
 	if err != nil {
@@ -313,10 +393,173 @@ func (table *Table) AcceptScale(remote peer.ID, envelope ScaleEnvelope) (bool, e
 		table.recordDrop()
 		return false, err
 	}
+	table.observeScaleFlow(envelope)
 	table.observeConnection(remote)
 	table.bytes.Add(uint64(len(envelope.Payload)))
 	table.recordForwarded()
 	return false, nil
+}
+
+// ValidateScaleEnvelope performs the packet-level checks that a routing-domain
+// authorization cannot express: overlay address ownership, service admission,
+// route CIDR membership, and flow-hash integrity.
+func (table *Table) ValidateScaleEnvelope(envelope ScaleEnvelope) error {
+	table.mu.RLock()
+	state := table.state
+	table.mu.RUnlock()
+	return table.validateScaleEnvelope(state, envelope)
+}
+
+func (table *Table) validateScaleEnvelope(state model.NetworkState, envelope ScaleEnvelope) error {
+	if envelope.Header.PathFamilyID == "" || envelope.Header.PathInstanceID == "" {
+		return fmt.Errorf("%w: path family is missing", ErrScaleUnauthorized)
+	}
+	flow, ok := packet.ParseIPFlow(envelope.Payload)
+	if !ok {
+		return ErrMalformedScaleEnvelope
+	}
+	flowHash, ok := packet.FlowHash(envelope.Payload)
+	if !ok || flowHash != envelope.Header.FlowHash {
+		return fmt.Errorf("%w: flow hash mismatch", ErrScaleUnauthorized)
+	}
+	source, ok := peerByID(state, envelope.Header.SourcePeerID)
+	if !ok {
+		return ErrInvalidSource
+	}
+	destination, ok := peerByID(state, envelope.Header.DestinationPeerID)
+	if !ok {
+		return ErrDestinationHeader
+	}
+	sourceIP, err := netip.ParseAddr(source.OverlayIP)
+	if err != nil || sourceIP.Unmap() != flow.Source {
+		return ErrInvalidSource
+	}
+	domain, ok := routingDomainByID(state, envelope.Header.RoutingDomainID)
+	if !ok || domain.Key.FlowClass != envelope.Header.FlowClass {
+		return fmt.Errorf("%w: routing domain does not match", ErrScaleUnauthorized)
+	}
+	family, ok := pathFamilyByID(state, envelope.Header.PathFamilyID)
+	if !ok || family.Kind == model.PathKindDirect || !family.Covers(domain.Key) ||
+		!containsString(domain.PathFamilyIDs, family.ID) {
+		return fmt.Errorf("%w: path family does not cover domain", ErrScaleUnauthorized)
+	}
+	if !scaleDestinationAllows(state, domain, destination, flow) {
+		return ErrDestinationHeader
+	}
+	return scalePolicyAllowsPacket(state, domain, source, destination, flow)
+}
+
+func (table *Table) authorizeScaleReturn(
+	state model.NetworkState, remote peer.ID, envelope ScaleEnvelope,
+) (ScaleAuthorization, bool, error) {
+	table.mu.RLock()
+	faceID := table.faceID
+	table.mu.RUnlock()
+	flow, ok := packet.ParseIPFlow(envelope.Payload)
+	if !ok {
+		return ScaleAuthorization{}, false, ErrMalformedScaleEnvelope
+	}
+	scaleKey, ok := scaleFlowKey(envelope.Payload)
+	if !ok || !table.scaleFlows.ReplyAllowed(scaleKey) {
+		return ScaleAuthorization{}, false, nil
+	}
+	if err := validateScaleReturnEnvelope(state, envelope, flow); err != nil {
+		return ScaleAuthorization{}, false, err
+	}
+	family, _ := pathFamilyByID(state, envelope.Header.PathFamilyID)
+	localIndex := -1
+	for index, hop := range family.ManagerHops {
+		if hop == table.localID {
+			localIndex = index
+			break
+		}
+	}
+	if localIndex < 0 {
+		return ScaleAuthorization{}, false, fmt.Errorf("%w: local manager is not on return family", ErrScaleUnauthorized)
+	}
+	// The destination peer may submit its return envelope to any manager on
+	// the certified family. A manager-to-manager leg must then follow the
+	// family backwards toward the original source.
+	if remote.String() != envelope.Header.SourcePeerID {
+		if localIndex+1 >= len(family.ManagerHops) ||
+			family.ManagerHops[localIndex+1] != remote.String() {
+			return ScaleAuthorization{}, false, fmt.Errorf("%w: unexpected return predecessor", ErrScaleUnauthorized)
+		}
+	}
+	nextHop := envelope.Header.DestinationPeerID
+	if localIndex > 0 {
+		nextHop = family.ManagerHops[localIndex-1]
+	}
+	return ScaleAuthorization{
+		FaceID: faceID, NextHop: nextHop,
+		ExpectedPredecessor: remote.String(),
+	}, true, nil
+}
+
+func validateScaleReturnEnvelope(state model.NetworkState, envelope ScaleEnvelope, flow packet.IPFlow) error {
+	if envelope.Header.PathFamilyID == "" || envelope.Header.PathInstanceID == "" {
+		return fmt.Errorf("%w: path family is missing", ErrScaleUnauthorized)
+	}
+	flowHash, ok := packet.FlowHash(envelope.Payload)
+	if !ok || flowHash != envelope.Header.FlowHash {
+		return fmt.Errorf("%w: flow hash mismatch", ErrScaleUnauthorized)
+	}
+	source, ok := peerByID(state, envelope.Header.SourcePeerID)
+	if !ok {
+		return ErrInvalidSource
+	}
+	destination, ok := peerByID(state, envelope.Header.DestinationPeerID)
+	if !ok {
+		return ErrDestinationHeader
+	}
+	sourceIP, err := netip.ParseAddr(source.OverlayIP)
+	if err != nil || sourceIP.Unmap() != flow.Source {
+		return ErrInvalidSource
+	}
+	destinationIP, err := netip.ParseAddr(destination.OverlayIP)
+	if err != nil || destinationIP.Unmap() != flow.Destination {
+		return ErrDestinationHeader
+	}
+	domain, ok := routingDomainByID(state, envelope.Header.RoutingDomainID)
+	if !ok || domain.Key.FlowClass != envelope.Header.FlowClass {
+		return fmt.Errorf("%w: routing domain does not match", ErrScaleUnauthorized)
+	}
+	family, ok := pathFamilyByID(state, envelope.Header.PathFamilyID)
+	if !ok || family.Kind == model.PathKindDirect || !family.Covers(domain.Key) ||
+		!containsString(domain.PathFamilyIDs, family.ID) {
+		return fmt.Errorf("%w: path family does not cover domain", ErrScaleUnauthorized)
+	}
+	return nil
+}
+
+func (table *Table) observeScaleFlow(envelope ScaleEnvelope) {
+	key, ok := scaleFlowKey(envelope.Payload)
+	if ok {
+		table.scaleFlows.Observe(key)
+	}
+}
+
+func scaleFlowKey(raw []byte) (conntrack.Key, bool) {
+	flow, ok := packet.ParseIPFlow(raw)
+	if !ok {
+		return conntrack.Key{}, false
+	}
+	key := conntrack.Key{
+		Protocol: flow.Protocol, Source: flow.Source, Destination: flow.Destination,
+		SourcePort: flow.SourcePort, DestinationPort: flow.DestinationPort,
+	}
+	if flow.Protocol == packet.ProtocolICMP || flow.Protocol == 58 {
+		offset := 40
+		if flow.Version == 4 {
+			offset = (int(raw[0]) & 0x0f) * 4
+		}
+		if len(raw) >= offset+6 {
+			identifier := binary.BigEndian.Uint16(raw[offset+4 : offset+6])
+			key.SourcePort = identifier
+			key.DestinationPort = identifier
+		}
+	}
+	return key, true
 }
 
 func (table *Table) Dropped() uint64 { return table.dropped.Load() }
@@ -398,6 +641,20 @@ func (table *Table) recordForwarded() {
 	}
 }
 
+func (table *Table) recordScaleSelection(envelope ScaleEnvelope) {
+	if table.metrics == nil {
+		return
+	}
+	table.mu.RLock()
+	state := table.state
+	table.mu.RUnlock()
+	family, ok := pathFamilyByID(state, envelope.Header.PathFamilyID)
+	if !ok {
+		return
+	}
+	table.metrics.RecordScalePathSelection(family.ID, string(family.Kind), len(family.ManagerHops))
+}
+
 func (table *Table) recordDrop() {
 	table.dropped.Add(1)
 	if table.metrics != nil {
@@ -431,28 +688,136 @@ func (table *Table) observeConnection(remote peer.ID) {
 }
 
 func (table *Table) admitQuotas(state model.NetworkState, assignment model.RouteAssignment, bytes uint64) bool {
-	sourceGroups := peerGroups(state, assignment.SourcePeerID)
-	destinationGroups := peerGroups(state, assignment.DestinationPeerID)
+	return table.admitPeerQuotas(state, assignment.SourcePeerID, assignment.DestinationPeerID, bytes)
+}
 
-	sourceBudget, sourceMatched := table.quota.Resolve(assignment.SourcePeerID, sourceGroups, "")
-	destinationBudget, destinationMatched := table.quota.Resolve(assignment.DestinationPeerID, destinationGroups, "")
+func (table *Table) admitScaleQuotas(state model.NetworkState, sourcePeerID, destinationPeerID string, bytes uint64) bool {
+	return table.admitPeerQuotas(state, sourcePeerID, destinationPeerID, bytes)
+}
+
+func (table *Table) admitPeerQuotas(state model.NetworkState, sourcePeerID, destinationPeerID string, bytes uint64) bool {
+	sourceGroups := peerGroups(state, sourcePeerID)
+	destinationGroups := peerGroups(state, destinationPeerID)
+
+	sourceBudget, sourceMatched := table.quota.Resolve(sourcePeerID, sourceGroups, "")
+	destinationBudget, destinationMatched := table.quota.Resolve(destinationPeerID, destinationGroups, "")
 	if sourceMatched && destinationMatched && sourceBudget.ID == destinationBudget.ID {
-		decision := table.quota.Check(assignment.SourcePeerID, sourceGroups, "", bytes)
+		decision := table.quota.Check(sourcePeerID, sourceGroups, "", bytes)
 		return decision.Allowed && decision.Delay == 0
 	}
 	if sourceMatched {
-		decision := table.quota.Check(assignment.SourcePeerID, sourceGroups, "", bytes)
+		decision := table.quota.Check(sourcePeerID, sourceGroups, "", bytes)
 		if !decision.Allowed || decision.Delay > 0 {
 			return false
 		}
 	}
 	if destinationMatched {
-		decision := table.quota.Check(assignment.DestinationPeerID, destinationGroups, "", bytes)
+		decision := table.quota.Check(destinationPeerID, destinationGroups, "", bytes)
 		if !decision.Allowed || decision.Delay > 0 {
 			return false
 		}
 	}
 	return true
+}
+
+func (table *Table) admitScaleFace(budgets *quota.FaceBudgetSet, faceID, flowClass string, bytes uint64) bool {
+	if budgets == nil || faceID == "" {
+		return true
+	}
+	table.observeFaceQueue(faceID)
+	decision := budgets.Admit(faceID, path.FlowClass(flowClass), bytes, time.Now().UTC())
+	return decision.Allowed && decision.Delay == 0
+}
+
+func peerByID(state model.NetworkState, peerID string) (model.PeerRecord, bool) {
+	for _, peer := range state.Peers {
+		if peer.PeerID == peerID {
+			return peer, true
+		}
+	}
+	return model.PeerRecord{}, false
+}
+
+func routingDomainByID(state model.NetworkState, domainID string) (model.RoutingDomainAuthorization, bool) {
+	for _, domain := range state.RoutingDomains {
+		if domain.ID == domainID {
+			return domain, true
+		}
+	}
+	return model.RoutingDomainAuthorization{}, false
+}
+
+func pathFamilyByID(state model.NetworkState, familyID string) (model.PathFamily, bool) {
+	for _, family := range state.PathFamilies {
+		if family.ID == familyID {
+			return family, true
+		}
+	}
+	return model.PathFamily{}, false
+}
+
+func scaleDestinationAllows(state model.NetworkState, domain model.RoutingDomainAuthorization, destination model.PeerRecord, flow packet.IPFlow) bool {
+	kind, id, _ := model.ParseDestinationScope(domain.Key.DestinationScope)
+	switch kind {
+	case model.DestinationScopeGroup, model.DestinationScopePeer:
+		destinationIP, err := netip.ParseAddr(destination.OverlayIP)
+		return err == nil && destinationIP.Unmap() == flow.Destination
+	case model.DestinationScopeRoute:
+		route, ok := routeByID(state, id)
+		if !ok || !destination.IsExitNode || !containsString(peerGroups(state, destination.PeerID), route.RoutingGroup) {
+			return false
+		}
+		prefix, err := netip.ParsePrefix(route.Destination)
+		return err == nil && prefix.Contains(flow.Destination)
+	default:
+		return false
+	}
+}
+
+func routeByID(state model.NetworkState, routeID string) (model.Route, bool) {
+	for _, route := range state.Routes {
+		if route.ID == routeID {
+			return route, true
+		}
+	}
+	return model.Route{}, false
+}
+
+func scalePolicyAllowsPacket(
+	state model.NetworkState, domain model.RoutingDomainAuthorization, source, destination model.PeerRecord, flow packet.IPFlow,
+) error {
+	policies := make([]model.Policy, 0, len(domain.PolicyIDs))
+	for _, policyID := range domain.PolicyIDs {
+		for _, item := range state.Policies {
+			if item.ID == policyID {
+				policies = append(policies, item)
+				break
+			}
+		}
+	}
+	if len(policies) == 0 {
+		return fmt.Errorf("%w: domain has no policies", ErrScaleUnauthorized)
+	}
+	allowed, err := policy.Authorize(policy.State{
+		NetworkID: state.NetworkID, Groups: state.Groups, Policies: policies,
+		Routes: state.Routes, Budgets: state.Budgets,
+	}, source.PeerID, destination.PeerID, flow.ProtocolName(), flow.DestinationPort, source.Posture)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return fmt.Errorf("%w: packet service is denied", ErrScaleUnauthorized)
+	}
+	return nil
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func peerGroups(state model.NetworkState, peerID string) []string {

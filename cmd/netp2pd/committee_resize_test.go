@@ -156,7 +156,13 @@ func TestCommitteeResizeWatcherActivatesFourthManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("approve manager join: %v", err)
 	}
-
+	for index := range engines {
+		if engines[index].Height() < approval.Height {
+			if err := engines[index].CatchUp(approval); err != nil {
+				t.Fatalf("catch up manager %s approval: %v", ids[index], err)
+			}
+		}
+	}
 	watchers := make([]committeeResizeWatcher, managerCount)
 	for index := range watchers {
 		watchers[index] = committeeResizeWatcher{
@@ -165,12 +171,14 @@ func TestCommitteeResizeWatcherActivatesFourthManager(t *testing.T) {
 		}
 	}
 	candidateDataDir := filepath.Join(root, candidateID)
+	watcherContext, watcherCancel := context.WithCancel(ctx)
+	defer watcherCancel()
 	var wait sync.WaitGroup
 	for index := range watchers {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
-			watchers[index].runOnce(ctx)
+			runCommitteeResizeWatcher(watcherContext, watchers[index])
 		}(index)
 	}
 	wait.Add(1)
@@ -197,9 +205,20 @@ func TestCommitteeResizeWatcherActivatesFourthManager(t *testing.T) {
 	if engines[0].CommitteeParams() != activatedParams {
 		t.Fatalf("committee params = %+v, want %+v", engines[0].CommitteeParams(), activatedParams)
 	}
+	watcherCancel()
 	activation, ok := engines[0].LatestSnapshot()
 	if !ok || activation.Transition.Type != bft.TransitionActivateCommittee {
 		t.Fatalf("activation snapshot missing or invalid: ok=%v type=%q", ok, activation.Transition.Type)
+	}
+	for index := range engines {
+		if engines[index].Height() < activation.Height {
+			if err := engines[index].CatchUp(activation); err != nil {
+				t.Fatalf("catch up manager %s activation: %v", ids[index], err)
+			}
+		}
+		if engines[index].CommitteeParams() != activatedParams {
+			t.Fatalf("manager %s committee params = %+v, want %+v", ids[index], engines[index].CommitteeParams(), activatedParams)
+		}
 	}
 	postActivation, err := meshes[0].Submit(model.StateTransition{
 		Type: bft.TransitionUpsertGroup, Group: &model.Group{ID: "post-activation"},

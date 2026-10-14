@@ -216,6 +216,19 @@ func (client *Client) sendToPeer(destination model.PeerRecord, raw []byte) bool 
 	} else {
 		flowClass = client.flowClassFor(destination, ipPacket)
 	}
+	returnTraffic := hasFlow && !isEchoRequest(ipPacket) && client.flows.ReplyAllowed(conntrack.Key(flow))
+	if client.scaleEligible(destination) {
+		manager, status, err := client.sendScale(destination, raw, flowClass, returnTraffic)
+		client.recordPathSelection(target, status)
+		if err != nil {
+			recordDataPlaneDrop()
+			client.markOutboundDrop(fmt.Sprintf("global route to %s failed: %v", destination.PeerID, err))
+			debugDrop("scale route from %s to %s via %s: %v", client.selfPeerID(), destination.PeerID, manager, err)
+			return false
+		}
+		client.clearOutboundDrop()
+		return true
+	}
 	assignment, path, status := client.paths.selectFlowWithStatus(source, target, conntrack.Key(flow), hasFlow, flowClass, len(raw))
 	client.recordPathSelection(target, status)
 	if !status.OK {
@@ -334,18 +347,21 @@ func (client *Client) directPathsEnabled() bool {
 	return client.snapshot.State.Settings.DirectPathEnabled
 }
 
-func (client *Client) handleEnvelope(remote peer.ID, wire []byte) {
+func (client *Client) handleEnvelope(remote peer.ID, wire []byte) error {
+	if len(wire) > 0 && wire[0] == forward.ScaleMagicByte {
+		return client.handleScaleEnvelope(remote, wire)
+	}
 	envelope, err := forward.DecodeEnvelope(wire)
 	if err != nil {
 		recordDataPlaneDrop()
 		debugDrop("forwarded envelope: %v", err)
-		return
+		return fmt.Errorf("decode forwarded envelope: %w", err)
 	}
 	source, err := peer.Decode(envelope.Header.SourcePeerID)
 	if err != nil {
 		recordDataPlaneDrop()
 		debugDrop("forwarded source: %v", err)
-		return
+		return fmt.Errorf("decode forwarded source: %w", err)
 	}
 	delivered, err := client.forwarding.Accept(remote, envelope)
 	if err != nil || !delivered {
@@ -353,9 +369,12 @@ func (client *Client) handleEnvelope(remote peer.ID, wire []byte) {
 			recordDataPlaneDrop()
 			debugDrop("forwarded envelope: %v", err)
 		}
-		return
+		if err != nil {
+			return fmt.Errorf("accept forwarded envelope: %w", err)
+		}
+		return errors.New("forwarded envelope was not destined for this peer")
 	}
-	client.handleFrameWithAdmission(source, envelope.Payload, false)
+	return client.handleFrameWithAdmission(source, envelope.Payload, false)
 }
 
 func (client *Client) sendFrame(target peer.ID, raw []byte) bool {
@@ -377,26 +396,26 @@ func (client *Client) sendFrame(target peer.ID, raw []byte) bool {
 // peer that owns the source address, then admit it either as return traffic for
 // a flow we originated or through the inbound policy.
 func (client *Client) handleFrame(remote peer.ID, raw []byte) {
-	client.handleFrameWithAdmission(remote, raw, true)
+	_ = client.handleFrameWithAdmission(remote, raw, true)
 }
 
-func (client *Client) handleFrameWithAdmission(remote peer.ID, raw []byte, admit bool) {
+func (client *Client) handleFrameWithAdmission(remote peer.ID, raw []byte, admit bool) error {
 	if len(raw) == 0 || len(raw) > maxOverlayPacket {
 		recordDataPlaneDrop()
 		debugDrop("inbound: size %d", len(raw))
-		return
+		return fmt.Errorf("invalid inbound packet size %d", len(raw))
 	}
 	ipPacket := packet.IPv4Packet(raw)
 	if err := ipPacket.Validate(); err != nil {
 		recordDataPlaneDrop()
 		debugDrop("inbound: invalid %v", err)
-		return
+		return fmt.Errorf("validate inbound packet: %w", err)
 	}
 	source, err := client.peerByPeerID(remote.String())
 	if err != nil {
 		recordDataPlaneDrop()
 		debugDrop("inbound: %v", err)
-		return
+		return fmt.Errorf("identify inbound peer: %w", err)
 	}
 	if source.OverlayIP != ipPacket.Source().String() {
 		// A certified exit/subnet gateway legitimately speaks for foreign
@@ -406,20 +425,24 @@ func (client *Client) handleFrameWithAdmission(remote peer.ID, raw []byte, admit
 		if flow, hasFlow := ipPacket.Flow(); hasFlow && client.flows.ReplyAllowed(conntrack.Key(flow)) &&
 			client.gatewayCoversRemote(source, ipPacket.Source()) {
 			if admit && !client.admitDestination(len(raw)) {
-				return
+				return errors.New("inbound destination quota exceeded")
 			}
-			_ = client.sink.WritePacket(raw)
-			return
+			if err := client.sink.WritePacket(raw); err != nil {
+				recordDataPlaneDrop()
+				debugDrop("inbound sink: %v", err)
+				return fmt.Errorf("write inbound packet: %w", err)
+			}
+			return nil
 		}
 		recordDataPlaneDrop()
 		debugDrop("inbound: source %s does not own %s", source.OverlayIP, ipPacket.Source())
-		return
+		return fmt.Errorf("inbound peer %s does not own source %s", source.OverlayIP, ipPacket.Source())
 	}
 	if isEchoReply(ipPacket) && client.deliverDiagnosticPing(ipPacket) {
-		return
+		return nil
 	}
 	if isEchoReply(ipPacket) && client.deliverAdmission(ipPacket) {
-		return
+		return nil
 	}
 	if ipPacket.Destination().String() != client.selfOverlayIP() {
 		// A certified exit/subnet gateway hands the packet to the local network
@@ -430,33 +453,44 @@ func (client *Client) handleFrameWithAdmission(remote peer.ID, raw []byte, admit
 				client.flows.Observe(conntrack.Key(flow))
 			}
 			if admit && !client.admitDestination(len(raw)) {
-				return
+				return errors.New("inbound exit destination quota exceeded")
 			}
-			_ = client.sink.WritePacket(raw)
-			return
+			if err := client.sink.WritePacket(raw); err != nil {
+				recordDataPlaneDrop()
+				debugDrop("inbound sink: %v", err)
+				return fmt.Errorf("write inbound exit packet: %w", err)
+			}
+			return nil
 		}
 		// Otherwise we do not forward on behalf of third parties.
 		recordDataPlaneDrop()
 		debugDrop("inbound: not for us (%s)", ipPacket.Destination())
-		return
+		return fmt.Errorf("inbound packet is destined for %s", ipPacket.Destination())
 	}
 	flow, hasFlow := ipPacket.Flow()
 	if hasFlow && !isEchoRequest(ipPacket) && client.flows.ReplyAllowed(conntrack.Key(flow)) {
 		if admit && !client.admitDestination(len(raw)) {
-			return
+			return errors.New("inbound reply destination quota exceeded")
 		}
-		_ = client.sink.WritePacket(raw)
-		return
+		if err := client.sink.WritePacket(raw); err != nil {
+			recordDataPlaneDrop()
+			debugDrop("inbound sink: %v", err)
+			return fmt.Errorf("write inbound reply: %w", err)
+		}
+		return nil
 	}
 	protocolName, port := describePacket(ipPacket)
 	allowed, err := client.authorizeInbound(source, protocolName, port)
 	if err != nil || !allowed {
 		recordDataPlaneDrop()
 		debugDrop("inbound: denied %s/%d from %s (err=%v)", protocolName, port, source.OverlayIP, err)
-		return
+		if err != nil {
+			return fmt.Errorf("authorize inbound %s/%d: %w", protocolName, port, err)
+		}
+		return fmt.Errorf("inbound %s/%d from %s denied by policy", protocolName, port, source.OverlayIP)
 	}
 	if admit && !client.admitDestination(len(raw)) {
-		return
+		return errors.New("inbound destination quota exceeded")
 	}
 	// The response the local stack produces is return traffic for this flow.
 	if hasFlow {
@@ -465,17 +499,24 @@ func (client *Client) handleFrameWithAdmission(remote peer.ID, raw []byte, admit
 	if client.synthesizeICMP {
 		if reply, ok := buildEchoReply(ipPacket); ok {
 			if isEchoReply(reply) && client.deliverAdmissionSynthesized(reply) {
-				return
+				return nil
 			}
 			// The userspace endpoint has no kernel to answer the echo request,
 			// so build the reply here. Route it through the same certified
 			// assignment lookup as any other outbound packet so a
 			// via-manager-only network can answer.
-			client.sendToPeer(source, reply)
-			return
+			if !client.sendToPeer(source, reply) {
+				return errors.New("send synthesized ICMP reply")
+			}
+			return nil
 		}
 	}
-	_ = client.sink.WritePacket(raw)
+	if err := client.sink.WritePacket(raw); err != nil {
+		recordDataPlaneDrop()
+		debugDrop("inbound sink: %v", err)
+		return fmt.Errorf("write inbound packet: %w", err)
+	}
+	return nil
 }
 
 func (client *Client) refreshPeerAddressesLoop(ctx context.Context) {

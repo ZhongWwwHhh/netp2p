@@ -6,6 +6,15 @@
     children?: import('svelte').Snippet;
     footer?: import('svelte').Snippet;
   } = $props();
+
+  $effect(() => {
+    if (!open) return;
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    globalThis.addEventListener('keydown', onKeydown);
+    return () => globalThis.removeEventListener('keydown', onKeydown);
+  });
 </script>
 
 {#if open}

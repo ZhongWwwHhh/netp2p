@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -36,6 +37,7 @@ func TestOpenConfiguresWALAndFullSync(t *testing.T) {
 	for _, table := range []string{
 		"certified_snapshots", "decision_log", "transitions", "users",
 		"sessions", "setup_key_verifiers", "audit_events", "local_auth_state", "auth_events",
+		"web_sessions",
 	} {
 		var name string
 		if err := store.db.QueryRow(
@@ -43,6 +45,51 @@ func TestOpenConfiguresWALAndFullSync(t *testing.T) {
 		).Scan(&name); err != nil {
 			t.Fatalf("table %s missing: %v", table, err)
 		}
+	}
+}
+
+func TestRecordCommitReportsWriteFailure(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "manager.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported error
+	store.SetCommitErrorCallback(func(err error) { reported = err })
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordCommit(model.SignedSnapshot{}); err == nil {
+		t.Fatal("record commit on a closed store unexpectedly succeeded")
+	}
+	if reported == nil {
+		t.Fatal("write failure callback was not invoked")
+	}
+}
+
+func TestRecordCommitDoesNotFailOnRetentionMaintenance(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "manager.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// An impossible history limit must not make a durable commit fail; pruning
+	// is scheduled by the manager and reports its own maintenance errors.
+	if err := store.SetLedgerRetention(LedgerRetention{
+		MaxAge: time.Hour, MaxBytes: 1, TargetBytes: 1, MinHeights: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := model.SignedSnapshot{
+		Epoch: 1, Height: 1, StateHash: []byte{1},
+		State:      model.NetworkState{NetworkID: "netp2p-retention-commit-test"},
+		Transition: model.StateTransition{Type: "genesis"},
+	}
+	if err := store.RecordCommit(snapshot); err != nil {
+		t.Fatalf("record commit unexpectedly failed on retention policy: %v", err)
+	}
+	if _, ok, err := store.LatestSnapshot(); err != nil || !ok {
+		t.Fatalf("latest snapshot after commit = ok=%v err=%v", ok, err)
 	}
 }
 
@@ -88,6 +135,115 @@ func TestAuthFailureLockAndAudit(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Type != "login" || events[0].Result != "success" {
 		t.Fatalf("auth events = %+v", events)
+	}
+}
+
+func TestWebSessionRecordAndRevocation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "manager.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	session := WebSession{
+		ID: "session-1", UserID: "user-1",
+		IssuedAt:  now.Format(time.RFC3339Nano),
+		ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	if err := store.RecordWebSession(session); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := store.WebSession("session-1")
+	if err != nil || !found {
+		t.Fatalf("load web session = %+v found=%v err=%v", loaded, found, err)
+	}
+	if loaded.UserID != "user-1" || loaded.RevokedAt != "" {
+		t.Fatalf("web session = %+v", loaded)
+	}
+
+	if err := store.RevokeUserWebSessions("user-1", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err = store.WebSession("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RevokedAt == "" {
+		t.Fatalf("user revocation did not mark session: %+v", loaded)
+	}
+
+	revoked := loaded.RevokedAt
+	if err := store.RecordWebSession(session); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err = store.WebSession("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RevokedAt != revoked {
+		t.Fatalf("re-recording a revoked session resurrected it: %+v", loaded)
+	}
+}
+
+func TestMergeWebSessionsIsMonotonicAndPages(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "manager.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	active := WebSession{
+		ID: "session-a", UserID: "user-1",
+		IssuedAt:  now.Format(time.RFC3339Nano),
+		ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	if err := store.MergeWebSessions([]WebSession{active}, now); err != nil {
+		t.Fatal(err)
+	}
+	revoked := active
+	revoked.RevokedAt = now.Add(time.Minute).Format(time.RFC3339Nano)
+	if err := store.MergeWebSessions([]WebSession{revoked}, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MergeWebSessions([]WebSession{active}, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := store.WebSession("session-a")
+	if err != nil || !found {
+		t.Fatalf("load merged session = %+v found=%v err=%v", loaded, found, err)
+	}
+	if loaded.RevokedAt != revoked.RevokedAt {
+		t.Fatalf("active merge resurrected revoked session: %+v", loaded)
+	}
+
+	for index := 0; index < 1001; index++ {
+		session := WebSession{
+			ID: fmt.Sprintf("session-%04d", index), UserID: "user-1",
+			IssuedAt:  now.Format(time.RFC3339Nano),
+			ExpiresAt: now.Add(time.Hour).Format(time.RFC3339Nano),
+		}
+		if err := store.RecordWebSession(session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstPage, err := store.WebSessionsAfter("", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage) != 500 {
+		t.Fatalf("first page length = %d, want 500", len(firstPage))
+	}
+	secondPage, err := store.WebSessionsAfter(firstPage[len(firstPage)-1].ID, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(secondPage) != 500 {
+		t.Fatalf("second page length = %d, want 500", len(secondPage))
+	}
+	if secondPage[0].ID <= firstPage[len(firstPage)-1].ID {
+		t.Fatalf("pagination did not advance: %s <= %s", secondPage[0].ID, firstPage[len(firstPage)-1].ID)
 	}
 }
 

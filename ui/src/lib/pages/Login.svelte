@@ -23,7 +23,7 @@
 
   const needsOwner = $derived(session.authStatus?.needsOwner ?? false);
 
-  async function finishLogin(token: string) {
+  async function finishLogin(token = '') {
     if (await connect(token)) {
       await Promise.all([refresh(), refreshPresence()]);
     }
@@ -38,7 +38,7 @@
     const result = needsOwner
       ? await bootstrapOwner(email, name, password)
       : await loginLocal(email, password);
-    if (result) await finishLogin(result.sessionToken);
+    if (result) await finishLogin();
   }
 
   async function submitAdminToken() {

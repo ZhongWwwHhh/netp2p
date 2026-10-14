@@ -2,11 +2,34 @@ package bft
 
 import (
 	"bytes"
+	"encoding/hex"
 	"testing"
 
 	"github.com/netp2p/netp2p/internal/model"
 	"github.com/netp2p/netp2p/internal/wire"
 )
+
+func TestTransitionHashMatchesV020RegisterUser(t *testing.T) {
+	// This hash was generated with the v0.2.0 transition encoder, whose User
+	// proto did not carry PasswordVerifier. Keep it fixed so later User wire
+	// fields cannot silently change certified transition hashes.
+	expected, err := hex.DecodeString(
+		"f309f9e4905343d7232be4be55e2b6e2ffb97d68d27dcd0d52153c197ec5d659",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transition := model.StateTransition{
+		Type: TransitionRegisterUser,
+		User: &model.User{
+			ID: "user-1", Email: "user@example.com", Role: model.RoleUser,
+			PasswordVerifier: []byte("fixed-historical-verifier"),
+		},
+	}
+	if !bytes.Equal(TransitionHash(transition), expected) {
+		t.Fatalf("register_user transition hash changed from v0.2.0: %x", TransitionHash(transition))
+	}
+}
 
 func TestTransitionHashKeepsHistoricalUserVerifierCompatibility(t *testing.T) {
 	verifier := model.HashPassword("correct horse battery")

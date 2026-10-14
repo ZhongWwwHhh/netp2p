@@ -41,7 +41,12 @@ const (
 	// MaxEnvelopePayloadLength bounds every control-plane payload before it is
 	// allocated or read from an untrusted stream.
 	MaxEnvelopePayloadLength = 4 << 20
+	controlWriteDeadline     = 30 * time.Second
 )
+
+// controlReadDeadline is variable so tests can exercise partial-frame timeouts
+// without holding a real libp2p stream open for ten seconds.
+var controlReadDeadline = 10 * time.Second
 
 var (
 	LoginProtocol       = protocol.ID(ProtocolPrefix + "/control/login/" + Version)
@@ -54,6 +59,7 @@ var (
 	WebAPIProtocol      = protocol.ID(ProtocolPrefix + "/web-api/" + Version)
 	PresenceProtocol    = protocol.ID(ProtocolPrefix + "/presence/" + Version)
 	LinkGossipProtocol  = protocol.ID(ProtocolPrefix + "/link/gossip/" + Version)
+	WebSessionProtocol  = protocol.ID(ProtocolPrefix + "/control/web-session/" + Version)
 	DKGProtocol         = protocol.ID(ProtocolPrefix + "/control/dkg/" + Version)
 )
 
@@ -242,6 +248,12 @@ func (node *Node) Handle(id protocol.ID, handler func(network.Stream)) {
 	node.Host.SetStreamHandler(id, handler)
 }
 
+// ControlReadDeadline exposes the framed control-plane read budget so
+// long-poll protocols can keep their heartbeat cadence safely inside it.
+func ControlReadDeadline() time.Duration {
+	return controlReadDeadline
+}
+
 type Envelope struct {
 	Protocol protocol.ID
 	Payload  []byte
@@ -257,6 +269,11 @@ func EncodeEnvelope(writer io.Writer, id protocol.ID, payload []byte) error {
 	}
 	if len(payload) > MaxEnvelopePayloadLength {
 		return fmt.Errorf("payload too large: %d", len(payload))
+	}
+	if deadlineSetter, ok := writer.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		if err := deadlineSetter.SetWriteDeadline(time.Now().Add(controlWriteDeadline)); err != nil {
+			return fmt.Errorf("set control write deadline: %w", err)
+		}
 	}
 	header := make([]byte, 4)
 	binary.BigEndian.PutUint32(header, uint32(len(id)))
@@ -321,6 +338,9 @@ func (node *Node) sendDirect(ctx context.Context, peerID peer.ID, id protocol.ID
 }
 
 func DecodeEnvelope(stream network.Stream) (Envelope, error) {
+	if err := stream.SetReadDeadline(time.Now().Add(controlReadDeadline)); err != nil {
+		return Envelope{}, fmt.Errorf("set control read deadline: %w", err)
+	}
 	reader := io.LimitReader(stream, int64(MaxEnvelopePayloadLength+MaxProtocolIDLength+8))
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(reader, header); err != nil {

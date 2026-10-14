@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -18,8 +20,43 @@ type envelopeStream struct {
 	reader io.Reader
 }
 
+func (stream envelopeStream) SetReadDeadline(time.Time) error { return nil }
+
 func (stream envelopeStream) Read(buffer []byte) (int, error) {
 	return stream.reader.Read(buffer)
+}
+
+type deadlineStream struct {
+	network.Stream
+	deadline time.Time
+}
+
+func (stream *deadlineStream) SetReadDeadline(deadline time.Time) error {
+	stream.deadline = deadline
+	return nil
+}
+
+func (stream *deadlineStream) Read([]byte) (int, error) {
+	delay := time.Until(stream.deadline)
+	if delay <= 0 {
+		return 0, os.ErrDeadlineExceeded
+	}
+	time.Sleep(delay)
+	return 0, os.ErrDeadlineExceeded
+}
+
+func TestDecodeEnvelopeTimesOutPartialFrame(t *testing.T) {
+	previousDeadline := controlReadDeadline
+	controlReadDeadline = 20 * time.Millisecond
+	defer func() { controlReadDeadline = previousDeadline }()
+
+	started := time.Now()
+	if _, err := DecodeEnvelope(&deadlineStream{deadline: time.Now().Add(time.Hour)}); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("DecodeEnvelope error = %v, want %v", err, os.ErrDeadlineExceeded)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("partial frame blocked for %s", elapsed)
+	}
 }
 
 func TestEnvelopeRejectsOversizedPayload(t *testing.T) {

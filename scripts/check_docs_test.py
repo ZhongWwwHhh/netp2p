@@ -1,5 +1,7 @@
 import io
+import gzip
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -110,6 +112,81 @@ class ReleaseScanTest(unittest.TestCase):
         findings = self.scan({"netp2p.deb": deb_bytes("data.tar.gz", buffer.getvalue())})
         self.assertEqual(len(findings), 1)
         self.assertIn("data.tar.gz", findings[0])
+
+    def test_finds_marker_in_compressed_oci_layer(self):
+        layer = io.BytesIO()
+        with tarfile.open(fileobj=layer, mode="w") as archive:
+            payload = MARKER.encode("utf-8")
+            member = tarfile.TarInfo("etc/netp2p/runtime.yaml")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+
+        image = io.BytesIO()
+        with tarfile.open(fileobj=image, mode="w") as archive:
+            blob = gzip.compress(layer.getvalue())
+            member = tarfile.TarInfo("blobs/sha256/" + "a" * 64)
+            member.size = len(blob)
+            archive.addfile(member, io.BytesIO(blob))
+            index = b'{"manifests":[]}'
+            member = tarfile.TarInfo("index.json")
+            member.size = len(index)
+            archive.addfile(member, io.BytesIO(index))
+
+        findings = self.scan({"netp2p-image.tar": image.getvalue()})
+        self.assertEqual(len(findings), 1)
+        self.assertIn("etc/netp2p/runtime.yaml", findings[0])
+
+    def test_invalid_compressed_oci_layer_is_explicit_failure(self):
+        image = io.BytesIO()
+        with tarfile.open(fileobj=image, mode="w") as archive:
+            blob = b"\x1f\x8bbroken"
+            member = tarfile.TarInfo("blobs/sha256/" + "b" * 64)
+            member.size = len(blob)
+            archive.addfile(member, io.BytesIO(blob))
+
+        findings = self.scan({"netp2p-image.tar": image.getvalue()})
+        self.assertEqual(len(findings), 1)
+        self.assertIn("invalid gzip OCI blob", findings[0])
+
+    def test_unsupported_zstd_oci_layer_is_explicit_failure(self):
+        image = io.BytesIO()
+        with tarfile.open(fileobj=image, mode="w") as archive:
+            blob = b"\x28\xb5\x2f\xfdunsupported"
+            member = tarfile.TarInfo("blobs/sha256/" + "c" * 64)
+            member.size = len(blob)
+            archive.addfile(member, io.BytesIO(blob))
+
+        findings = self.scan({"netp2p-image.tar": image.getvalue()})
+        self.assertEqual(
+            findings,
+            ["netp2p-image.tar:blobs/sha256/" + "c" * 64 + ": zstd OCI blobs are not supported by the scanner"],
+        )
+
+    def test_release_mode_scans_tracked_source_and_release_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_dir = root / "dist"
+            release_dir.mkdir()
+            (release_dir / "safe.txt").write_bytes(b"safe release artifact\n")
+            denylist = root / "denylist.txt"
+            absent_probe = "__netp2p_release_scan_" + "probe_not_present__"
+            denylist.write_text(
+                absent_probe + "\n", encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).with_name("check_docs.py")),
+                    "--release-dir",
+                    str(release_dir),
+                    "--denylist",
+                    str(denylist),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_clean_directory_has_no_findings(self):
         self.assertEqual(self.scan({"checksums.txt": b"only safe bytes\n"}), [])

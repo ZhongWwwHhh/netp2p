@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: NetP2P Management API
-  version: 0.3.4
+  version: 0.3.6
   description: |
     Contract for the NetP2P manager REST API. Paths with `x-status: planned`
     do not exist in the current implementation and are reserved for a future
@@ -9,6 +9,7 @@ info:
     The wire protocol is 3.0.0.
   license:
     name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
 servers:
   - url: https://{managerHost}
     description: Any NetP2P manager API endpoint
@@ -18,12 +19,19 @@ servers:
         description: Manager DNS name and HTTPS port.
 tags:
   - name: Bootstrap
+    description: Public manager discovery and first-owner setup.
   - name: Auth
+    description: Browser session authentication and logout.
   - name: Snapshot
+    description: Certified BFT state reads.
   - name: Users
+    description: User and credential management.
   - name: Setup Keys
+    description: Peer enrollment key lifecycle.
   - name: Transitions
+    description: Authenticated state transitions.
   - name: Operations
+    description: Diagnostics, telemetry, quota, and planned management resources.
 security:
   - sessionCookie: []
   - bearerSession: []
@@ -31,6 +39,7 @@ security:
 paths:
   /healthz:
     get:
+      operationId: getHealthz
       tags: [Operations]
       summary: Process liveness
       security: []
@@ -46,6 +55,7 @@ paths:
                   status: { type: string, example: ok }
   /readyz:
     get:
+      operationId: getReadyz
       tags: [Operations]
       summary: Committee and ledger readiness
       security: []
@@ -56,6 +66,7 @@ paths:
           description: Not ready; body includes readiness details
   /api/bootstrap:
     get:
+      operationId: getBootstrap
       tags: [Bootstrap]
       summary: Browser and client bootstrap metadata
       security: []
@@ -67,6 +78,7 @@ paths:
               schema: { $ref: "#/components/schemas/Bootstrap" }
   /api/v1/bootstrap/status:
     get:
+      operationId: getBootstrapStatus
       tags: [Bootstrap]
       summary: Owner bootstrap state
       security: []
@@ -78,6 +90,7 @@ paths:
               schema: { $ref: "#/components/schemas/BootstrapStatus" }
   /api/v1/bootstrap/owner:
     post:
+      operationId: createOwner
       tags: [Bootstrap]
       summary: Create the first owner
       description: Returns 409 once an owner exists.
@@ -93,6 +106,7 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
   /api/v1/auth/status:
     get:
+      operationId: getAuthStatus
       tags: [Auth]
       summary: Authentication availability and owner state
       security: []
@@ -104,6 +118,7 @@ paths:
               schema: { $ref: "#/components/schemas/BootstrapStatus" }
   /api/v1/auth/login:
     post:
+      operationId: login
       tags: [Auth]
       summary: Local email/password login
       security: []
@@ -118,6 +133,7 @@ paths:
         "429": { $ref: "#/components/responses/RateLimited" }
   /api/v1/auth/logout:
     post:
+      operationId: logout
       tags: [Auth]
       summary: Clear browser session
       security: []
@@ -126,6 +142,7 @@ paths:
           description: Signed out
   /api/v1/auth/session:
     get:
+      operationId: getAuthSession
       tags: [Auth]
       summary: Resolve the current session
       responses:
@@ -133,6 +150,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
   /api/v1/session:
     get:
+      operationId: getSession
       tags: [Auth]
       summary: Identity and permissions
       responses:
@@ -144,6 +162,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
   /api/v1/snapshot:
     get:
+      operationId: getSnapshot
       tags: [Snapshot]
       summary: Latest or historical certified snapshot
       parameters:
@@ -160,6 +179,7 @@ paths:
         "503": { $ref: "#/components/responses/ServiceUnavailable" }
   /api/v1/users:
     get:
+      operationId: listUsers
       tags: [Users]
       summary: List redacted users
       responses:
@@ -177,6 +197,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v1/users/{id}/credentials:
     post:
+      operationId: updateUserCredentials
       tags: [Users]
       summary: Update user email or password
       description: |
@@ -203,6 +224,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v1/setup-keys:
     post:
+      operationId: createSetupKey
       tags: [Setup Keys]
       summary: Create a setup key
       requestBody:
@@ -225,6 +247,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v1/transitions:
     post:
+      operationId: submitTransition
       tags: [Transitions]
       summary: Submit an authenticated BFT transition
       requestBody:
@@ -245,12 +268,14 @@ paths:
         "502": { $ref: "#/components/responses/BadGateway" }
   /api/v1/presence:
     get:
+      operationId: getPresence
       tags: [Operations]
       summary: Client presence observations
       responses:
         "200": { description: Presence observations }
   /api/v1/activity:
     get:
+      operationId: listActivity
       tags: [Operations]
       summary: Recent certified activity
       parameters:
@@ -260,6 +285,7 @@ paths:
         "200": { description: Activity entries }
   /api/v1/events:
     get:
+      operationId: listEvents
       tags: [Operations]
       summary: Certified decision/audit events
       parameters:
@@ -271,6 +297,7 @@ paths:
         "200": { description: Audit events }
   /api/v1/auth/events:
     get:
+      operationId: listAuthEvents
       tags: [Operations]
       summary: Authentication audit events
       parameters:
@@ -279,18 +306,21 @@ paths:
         "200": { description: Authentication events }
   /api/v1/diagnostics:
     get:
+      operationId: getDiagnostics
       tags: [Operations]
       summary: Operational diagnostics
       responses:
         "200": { description: Diagnostics object }
   /api/v1/committee/status:
     get:
+      operationId: getCommitteeStatus
       tags: [Operations]
       summary: Local committee connectivity and height view
       responses:
         "200": { description: Committee status }
   /api/v1/link-view:
     get:
+      operationId: getLinkView
       tags: [Operations]
       summary: Link view
       responses:
@@ -446,18 +476,21 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
   /api/v1/assignments:
     get:
+      operationId: getAssignments
       tags: [Operations]
       summary: Certified assignments and admissions
       responses:
         "200": { description: Assignments }
   /api/v1/quota:
     get:
+      operationId: getQuota
       tags: [Operations]
       summary: Current quota usage
       responses:
         "200": { description: Quota usage }
   /api/v1/quota/history:
     get:
+      operationId: getQuotaHistory
       tags: [Operations]
       summary: Quota history
       parameters:
@@ -468,32 +501,34 @@ paths:
         "200": { description: Quota history entries }
   /api/v1/alerts:
     get:
+      operationId: getAlerts
       tags: [Operations]
       summary: Active alerts
       responses:
         "200": { description: Alerts }
   /api/v1/schema:
     get:
+      operationId: getSchema
       tags: [Operations]
       summary: WebAPI protocol identifier
       responses:
         "200": { description: Protocol schema name }
   /api/v1/peers:
-    get: { tags: [Operations], x-status: planned, summary: List peers, responses: { "200": { description: Planned } } }
+    get: { operationId: listPeers, tags: [Operations], x-status: planned, summary: List peers, responses: { "200": { description: Planned } } }
   /api/v1/groups:
-    get: { tags: [Operations], x-status: planned, summary: List groups, responses: { "200": { description: Planned } } }
+    get: { operationId: listGroups, tags: [Operations], x-status: planned, summary: List groups, responses: { "200": { description: Planned } } }
   /api/v1/policies:
-    get: { tags: [Operations], x-status: planned, summary: List policies, responses: { "200": { description: Planned } } }
+    get: { operationId: listPolicies, tags: [Operations], x-status: planned, summary: List policies, responses: { "200": { description: Planned } } }
   /api/v1/routes:
-    get: { tags: [Operations], x-status: planned, summary: List routes, responses: { "200": { description: Planned } } }
+    get: { operationId: listRoutes, tags: [Operations], x-status: planned, summary: List routes, responses: { "200": { description: Planned } } }
   /api/v1/resources:
-    get: { tags: [Operations], x-status: planned, summary: List routing resources, responses: { "200": { description: Planned } } }
+    get: { operationId: listResources, tags: [Operations], x-status: planned, summary: List routing resources, responses: { "200": { description: Planned } } }
   /api/v1/dns:
-    get: { tags: [Operations], x-status: planned, summary: DNS configuration, responses: { "200": { description: Planned } } }
+    get: { operationId: getDns, tags: [Operations], x-status: planned, summary: DNS configuration, responses: { "200": { description: Planned } } }
   /api/v1/tokens:
-    get: { tags: [Operations], x-status: planned, summary: List service-user PAT metadata, responses: { "200": { description: Planned } } }
+    get: { operationId: listTokens, tags: [Operations], x-status: planned, summary: List service-user PAT metadata, responses: { "200": { description: Planned } } }
   /api/v1/settings:
-    get: { tags: [Operations], x-status: planned, summary: Get certified network settings, responses: { "200": { description: Planned } } }
+    get: { operationId: getSettings, tags: [Operations], x-status: planned, summary: Get certified network settings, responses: { "200": { description: Planned } } }
 components:
   securitySchemes:
     sessionCookie:

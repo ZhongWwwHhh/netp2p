@@ -1,8 +1,10 @@
 package web
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -15,9 +17,12 @@ import (
 )
 
 const (
-	loginMaxAttempts  = 5
-	loginLockDuration = 15 * time.Minute
+	loginMaxAttempts           = 5
+	loginLockDuration          = 15 * time.Minute
+	sessionReplicationAttempts = 4
 )
+
+var sessionReplicationRetryDelay = 100 * time.Millisecond
 
 type accountDirectory interface {
 	Users() []model.User
@@ -68,16 +73,17 @@ func (server *Server) handleAuthSession(writer http.ResponseWriter, request *htt
 		writeError(writer, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	token, _ := sessionToken(request)
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"identity": identity, "permissions": auth.Permissions(identity.Role), "sessionToken": token,
+		"identity": identity, "permissions": auth.Permissions(identity.Role),
+		"sessionReplicationDegraded": server.sessionReplicationDegraded.Load(),
 	})
 }
 
 func (server *Server) handleAuthStatus(writer http.ResponseWriter) {
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"needsOwner": server.needsOwner(),
-		"localLogin": server.sessions != nil && server.authStore != nil,
+		"needsOwner":                 server.needsOwner(),
+		"localLogin":                 server.sessions != nil && server.authStore != nil,
+		"sessionReplicationDegraded": server.sessionReplicationDegraded.Load(),
 	})
 }
 
@@ -107,6 +113,9 @@ func (server *Server) handleLogin(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		writeError(writer, http.StatusTooManyRequests, "too many failed attempts; try again later")
+		return
+	}
+	if !server.allowLogin(writer, userID, email, request) {
 		return
 	}
 	verifier := user.PasswordVerifier
@@ -141,9 +150,9 @@ func (server *Server) handleLogin(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	identity := identityForUser(user)
-	token, expires, err := server.sessions.Issue(identity, now)
+	token, expires, err := server.issueLocalSession(identity, now)
 	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "cannot create session")
+		writeError(writer, http.StatusInternalServerError, "cannot create or persist session")
 		return
 	}
 	if !server.recordAuthEvent(writer, userID, email, "login", "success", request) {
@@ -152,15 +161,36 @@ func (server *Server) handleLogin(writer http.ResponseWriter, request *http.Requ
 	server.setSessionCookie(writer, token, expires)
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"identity": identity, "permissions": auth.Permissions(identity.Role),
-		"sessionToken": token, "expiresAt": expires.Format(time.RFC3339),
+		"expiresAt":                  expires.Format(time.RFC3339),
+		"sessionReplicationDegraded": server.sessionReplicationDegraded.Load(),
 	})
+}
+
+func (server *Server) allowLogin(writer http.ResponseWriter, userID, email string, request *http.Request) bool {
+	server.loginLimiterOnce.Do(func() {
+		if server.loginLimiter == nil {
+			server.loginLimiter = newLoginRateLimiter()
+		}
+	})
+	if !server.loginLimiter.Allow(loginClientIP(request), hashIdentity(email)) {
+		if !server.recordAuthEvent(writer, userID, email, "login", "rate_limited", request) {
+			return false
+		}
+		writeError(writer, http.StatusTooManyRequests, "too many login attempts; try again later")
+		return false
+	}
+	return true
 }
 
 func (server *Server) handleLogout(writer http.ResponseWriter, request *http.Request) {
 	server.clearSessionCookie(writer)
-	if token, ok := sessionToken(request); ok && strings.HasPrefix(token, auth.LocalSessionPrefix) {
-		if identity, err := server.sessions.Verify(token, time.Now()); err == nil {
+	if token, ok := requestSessionToken(request); ok {
+		if identity, valid := server.validPersistedSession(token, time.Now()); valid {
 			if !server.recordAuthEvent(writer, identity.UserID, identity.Email, "logout", "success", request) {
+				return
+			}
+			if err := server.revokeSessionToken(token, time.Now()); err != nil {
+				writeError(writer, http.StatusInternalServerError, "cannot revoke session")
 				return
 			}
 		}
@@ -238,6 +268,10 @@ func (server *Server) handleUserCredentials(writer http.ResponseWriter, request 
 	if !server.recordAuthEvent(writer, target.ID, update.Email, "update_credentials", "success", request) {
 		return
 	}
+	if err := server.authStore.RevokeUserWebSessions(target.ID, time.Now()); err != nil {
+		writeError(writer, http.StatusInternalServerError, "cannot revoke user sessions")
+		return
+	}
 	server.clearSessionCookie(writer)
 	updated, _ := server.findUserByID(target.ID)
 	writeJSON(writer, http.StatusOK, publicUsers([]model.User{updated})[0])
@@ -298,9 +332,9 @@ func (server *Server) handleOwnerBootstrap(writer http.ResponseWriter, request *
 	}
 	_ = snapshot
 	identity := identityForUser(user)
-	token, expires, issueErr := server.sessions.Issue(identity, time.Now())
+	token, expires, issueErr := server.issueLocalSession(identity, time.Now())
 	if issueErr != nil {
-		writeError(writer, http.StatusInternalServerError, "cannot create session")
+		writeError(writer, http.StatusInternalServerError, "cannot create or persist session")
 		return
 	}
 	if !server.recordAuthEvent(writer, user.ID, email, "bootstrap_owner", "success", request) {
@@ -309,8 +343,62 @@ func (server *Server) handleOwnerBootstrap(writer http.ResponseWriter, request *
 	server.setSessionCookie(writer, token, expires)
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"identity": identity, "permissions": auth.Permissions(identity.Role),
-		"sessionToken": token, "expiresAt": expires.Format(time.RFC3339),
+		"expiresAt":                  expires.Format(time.RFC3339),
+		"sessionReplicationDegraded": server.sessionReplicationDegraded.Load(),
 	})
+}
+
+func (server *Server) issueLocalSession(identity auth.Identity, now time.Time) (string, time.Time, error) {
+	token, expires, err := server.sessions.Issue(identity, now)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	sessionID, err := server.sessions.SessionID(token)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if err := server.authStore.RecordWebSession(store.WebSession{
+		ID: sessionID, UserID: identity.UserID,
+		IssuedAt:  now.UTC().Format(time.RFC3339Nano),
+		ExpiresAt: expires.UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		return "", time.Time{}, err
+	}
+	server.syncWebSessionsWithRetry()
+	return token, expires, nil
+}
+
+func (server *Server) syncWebSessionsWithRetry() bool {
+	if server.sessionSyncer == nil {
+		server.sessionReplicationDegraded.Store(false)
+		return true
+	}
+	var syncErr error
+	for attempt := 1; attempt <= sessionReplicationAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		syncErr = server.sessionSyncer.Sync(ctx)
+		cancel()
+		if syncErr == nil {
+			server.sessionReplicationDegraded.Store(false)
+			return true
+		}
+		if attempt < sessionReplicationAttempts {
+			time.Sleep(sessionReplicationRetryDelay)
+		}
+	}
+	server.sessionReplicationDegraded.Store(true)
+	log.Printf("web session replication degraded=true attempts=%d error=%v",
+		sessionReplicationAttempts, syncErr)
+	return false
+}
+
+func (server *Server) syncWebSessions() error {
+	if server.sessionSyncer == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return server.sessionSyncer.Sync(ctx)
 }
 
 func (server *Server) decodeAuthBody(writer http.ResponseWriter, request *http.Request, target any) bool {

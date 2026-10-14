@@ -130,6 +130,7 @@ func newClusterWithHook(t *testing.T, state model.NetworkState, config manager.C
 
 	const count = bft.CommitteeSize
 	group.members = make([]model.CommitteeMember, count)
+	libp2pKeys := make([]crypto.PrivKey, count)
 	for index := range group.members {
 		seed := int64(index + 101)
 		privateKey := bft.SeededPrivateKey(seed)
@@ -141,6 +142,7 @@ func newClusterWithHook(t *testing.T, state model.NetworkState, config manager.C
 		if err != nil {
 			t.Fatal(err)
 		}
+		libp2pKeys[index] = libp2pKey
 		group.members[index] = model.CommitteeMember{
 			ID: managerName(index), PeerID: peerID.String(), KeySeed: seed,
 			// Committee members forward by default so via-manager paths are
@@ -150,7 +152,7 @@ func newClusterWithHook(t *testing.T, state model.NetworkState, config manager.C
 	}
 	for index := range group.members {
 		node, err := p2p.New(ctx, p2p.Config{
-			IdentitySeed: group.members[index].KeySeed,
+			Identity:     libp2pKeys[index],
 			Listen:       []string{"/ip4/127.0.0.1/udp/0/quic-v1"},
 			WebRTCListen: []string{"/ip4/127.0.0.1/udp/0/webrtc-direct"},
 		})
@@ -236,6 +238,36 @@ func (group *cluster) stop() {
 }
 
 func newTestClient(t *testing.T, seed int64, managerAddr, setupKey string) (*client.Client, *packet.UDPPacketSink) {
+	t.Helper()
+	ctx := t.Context()
+	node, err := p2p.New(ctx, p2p.Config{
+		IdentitySeed: seed,
+		Listen:       []string{"/ip4/127.0.0.1/udp/0/quic-v1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = node.Close() })
+	sink, err := packet.NewUDPPacketSink("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sink.Close() })
+	netClient, err := client.New(node, managerAddr, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := netClient.Login(ctx, networkID, setupKey, ""); err != nil {
+		t.Fatalf("login %s: %v", setupKey, err)
+	}
+	go netClient.ServePackets(ctx)
+	go netClient.SyncLoop(ctx)
+	return netClient, sink
+}
+
+// newScaleTestClient runs the real client daemon path: login, sync, packet
+// endpoint, frame transport, and scale envelope admission.
+func newScaleTestClient(t *testing.T, seed int64, managerAddr, setupKey string) (*client.Client, *packet.UDPPacketSink) {
 	t.Helper()
 	ctx := t.Context()
 	node, err := p2p.New(ctx, p2p.Config{
@@ -454,43 +486,68 @@ func TestViaManagerForwardsOverlayProbe(t *testing.T) {
 }
 
 // TestProbeDrivenViaManagerAssignment closes the loop end to end: real manager
-// probes produce access segments, the planner turns them into certified
-// via-manager assignments, and the data plane then forwards a userspace probe.
+// probes produce access segments, the global planner certifies routing
+// families and domains, and a signed epoch forwards a userspace probe.
 func TestProbeDrivenViaManagerAssignment(t *testing.T) {
 	group := newForwardingCluster(t, probeDrivenState())
 	address := group.members[0].Address
-	managerID := group.nodes[0].Host.ID().String()
 
-	clientA, sinkA := newTestClient(t, 241, address, keyA)
-	clientB, _ := newTestClient(t, 242, address, keyB)
+	clientA, sinkA := newScaleTestClient(t, 241, address, keyA)
+	clientB, _ := newScaleTestClient(t, 242, address, keyB)
 	waitForPeers(t, clientA, 2)
 	waitForPeers(t, clientB, 2)
 
 	sourceID := clientA.Self().PeerID
 	destinationID := clientB.Self().PeerID
+	managerID := group.nodes[0].Host.ID().String()
 	waitForAccessSegments(t, group.managers[0], managerID, sourceID, destinationID)
-	waitForCertifiedAssignments(t, group, sourceID, destinationID)
+	_, family, epoch := waitForGlobalRouting(t, group, "clients-a", "clients-b")
+	_, _, _ = waitForGlobalRouting(t, group, "clients-b", "clients-a")
 
-	var ok bool
-	var err error
-	for attempt := 0; attempt < 10; attempt++ {
-		ok, err = probe(t, sinkA, clientA.Self().OverlayIP, clientB.Self().OverlayIP, 3*time.Second)
-		if err == nil && ok {
-			break
-		}
-		t.Logf("attempt %d: ok=%v err=%v", attempt+1, ok, err)
-		time.Sleep(200 * time.Millisecond)
+	state := group.engines[0].CurrentState()
+	if len(state.Assignments) != 0 {
+		t.Fatalf("global planner generated %d peer-pair assignments", len(state.Assignments))
 	}
+	if (family.Kind != model.PathKindViaManager && family.Kind != model.PathKindMultiHop) || len(family.ManagerHops) == 0 {
+		t.Fatalf("selected family is not manager-forwarded: %+v", family)
+	}
+	if epoch.Epoch.NetworkID != networkID || epoch.Epoch.SnapshotHeight == 0 || len(epoch.Epoch.Allocations) == 0 {
+		t.Fatalf("invalid signed routing epoch: %+v", epoch.Epoch)
+	}
+
+	beforeForwarded, beforeDropped := clusterForwardingStats(group)
+	ok, err := probe(t, sinkA, clientA.Self().OverlayIP, clientB.Self().OverlayIP, 10*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("A->B probe over a measured assignment never succeeded: ok=%v err=%v", ok, err)
 	}
-	forwarded, dropped := group.managers[0].ForwardingStats()
-	if forwarded == 0 {
-		t.Fatal("manager never forwarded a frame")
+	afterForwarded, afterDropped := waitForForwardingSettlement(group, beforeForwarded, beforeDropped)
+	if afterForwarded <= beforeForwarded {
+		t.Fatalf("manager forwarding did not advance: before=%d after=%d", beforeForwarded, afterForwarded)
 	}
-	if dropped != 0 {
-		t.Fatalf("manager dropped %d frames", dropped)
+	if afterDropped != beforeDropped {
+		t.Fatalf("manager dropped frames while forwarding: before=%d after=%d", beforeDropped, afterDropped)
 	}
+}
+
+func clusterForwardingStats(group *cluster) (forwarded, dropped uint64) {
+	for _, netManager := range group.managers {
+		managerForwarded, managerDropped := netManager.ForwardingStats()
+		forwarded += managerForwarded
+		dropped += managerDropped
+	}
+	return forwarded, dropped
+}
+
+func waitForForwardingSettlement(group *cluster, beforeForwarded, beforeDropped uint64) (uint64, uint64) {
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		forwarded, dropped := clusterForwardingStats(group)
+		if forwarded > beforeForwarded {
+			return forwarded, dropped
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return clusterForwardingStats(group)
 }
 
 func waitForAccessSegments(t *testing.T, netManager *manager.Manager, managerID string, peers ...string) {
@@ -521,29 +578,94 @@ func hasAccessSegments(view link.LinkView, managerID string, peers []string) boo
 	return true
 }
 
-// waitForCertifiedAssignments drives the planner until both directions are
-// certified. Each reconcile pass submits at most one changed assignment, so the
-// loop may need several passes.
-func waitForCertifiedAssignments(t *testing.T, group *cluster, sourceID, destinationID string) {
+// waitForGlobalRouting drives the leader until the committee has certified an
+// aggregate routing domain and every manager has the committee-signed epoch.
+func waitForGlobalRouting(
+	t *testing.T, group *cluster, sourceGroup, destinationGroup string,
+) (model.RoutingDomainAuthorization, model.PathFamily, *link.SignedRoutingEpoch) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
+	var leader *manager.Manager
+	var state model.NetworkState
 	for time.Now().Before(deadline) {
-		if err := group.managers[0].ReconcileAssignments(); err != nil {
-			t.Logf("reconcile assignments: %v", err)
+		leader = routingLeader(group)
+		if err := leader.ReconcileRouting(); err != nil {
+			t.Logf("reconcile global routing: %v", err)
 		}
-		found := make(map[string]bool)
-		for _, assignment := range group.engines[0].CurrentState().Assignments {
-			if assignment.Primary.Kind != model.PathKindViaManager {
+		state = group.engines[0].CurrentState()
+		var domain model.RoutingDomainAuthorization
+		for _, candidate := range state.RoutingDomains {
+			if candidate.Key.SourceManagerID == managerName(0) &&
+				candidate.Key.SourceGroupID == sourceGroup &&
+				candidate.Key.DestinationScope == model.DestinationScopeGroup+destinationGroup &&
+				candidate.Key.FlowClass == model.FlowClassLatency {
+				domain = candidate
+				break
+			}
+		}
+		if domain.ID == "" {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		epoch := leader.RoutingEpoch()
+		if epoch == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		for _, netManager := range group.managers {
+			if netManager.RoutingEpoch() == nil {
+				epoch = nil
+				break
+			}
+		}
+		if epoch == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		for _, allocation := range epoch.Epoch.Allocations {
+			if allocation.Domain.SourceManagerID != domain.Key.SourceManagerID ||
+				allocation.Domain.SourceGroupID != domain.Key.SourceGroupID ||
+				allocation.Domain.DestinationScope != domain.Key.DestinationScope ||
+				string(allocation.Domain.FlowClass) != domain.Key.FlowClass {
 				continue
 			}
-			found[assignment.SourcePeerID+"->"+assignment.DestinationPeerID] = true
+			for _, candidate := range state.PathFamilies {
+				if candidate.ID == allocation.PathID && len(candidate.ManagerHops) > 0 {
+					return domain, candidate, epoch
+				}
+			}
 		}
-		if found[sourceID+"->"+destinationID] && found[destinationID+"->"+sourceID] {
-			return
-		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("planner never certified via-manager assignments for %s/%s", sourceID, destinationID)
+	epochManagers := 0
+	for _, netManager := range group.managers {
+		if netManager.RoutingEpoch() != nil {
+			epochManagers++
+		}
+	}
+	allocations := 0
+	if signed := leader.RoutingEpoch(); signed != nil {
+		for range signed.Epoch.Allocations {
+			allocations++
+		}
+	}
+	t.Fatalf(
+		"global planner never produced a signed via-manager routing epoch: leader=%s height=%d round=%d domains=%d families=%d epochs=%d/%d allocations=%d",
+		leader.LocalID(), group.engines[0].Height(), group.engines[0].CurrentRound(),
+		len(state.RoutingDomains), len(state.PathFamilies), epochManagers, len(group.managers), allocations,
+	)
+	return model.RoutingDomainAuthorization{}, model.PathFamily{}, nil
+}
+
+func routingLeader(group *cluster) *manager.Manager {
+	height := group.engines[0].Height()
+	leaderID := group.engines[0].Leader(height+1, group.engines[0].CurrentRound()).ID
+	for index, engine := range group.engines {
+		if engine.LocalID() == leaderID {
+			return group.managers[index]
+		}
+	}
+	return group.managers[0]
 }
 
 func TestManagerFailureBlocksWrites(t *testing.T) {

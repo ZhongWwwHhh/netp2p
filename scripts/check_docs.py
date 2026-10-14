@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import argparse
+import gzip
 import io
 import subprocess
 import sys
@@ -63,6 +64,10 @@ INTERNAL_PATH_RES = [
 LINK_RE = re.compile(r"\[[^\]]*\]\(<([^>]+)>|\[[^\]]*\]\(([^)\s]+)")
 
 
+class ReleaseArchiveError(Exception):
+    """A release archive could not be inspected completely."""
+
+
 def load_denylist(path: str) -> list[str]:
     values: list[str] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -85,9 +90,27 @@ def tar_members(label: str, payload: bytes):
                 stream = archive.extractfile(member)
                 if stream is None:
                     continue
-                yield f"{label}:{member.name}", stream.read()
-    except (tarfile.TarError, OSError):
+                content = stream.read()
+                yield f"{label}:{member.name}", content
+                if member.name.startswith("blobs/sha256/"):
+                    yield from oci_blob_members(f"{label}:{member.name}", content)
+    except (tarfile.TarError, OSError) as error:
+        raise ReleaseArchiveError(f"{label}: invalid tar archive: {error}") from error
+
+
+def oci_blob_members(label: str, payload: bytes):
+    """Expand an OCI layer blob so compressed image contents are scanned."""
+    if payload.startswith(b"\x28\xb5\x2f\xfd"):
+        raise ReleaseArchiveError(f"{label}: zstd OCI blobs are not supported by the scanner")
+    if not payload.startswith(b"\x1f\x8b"):
+        if payload[257:262] == b"ustar":
+            yield from tar_members(label, payload)
         return
+    try:
+        expanded = gzip.decompress(payload)
+    except (OSError, EOFError) as error:
+        raise ReleaseArchiveError(f"{label}: invalid gzip OCI blob: {error}") from error
+    yield from tar_members(label, expanded)
 
 
 def deb_members(label: str, data: bytes):
@@ -237,9 +260,12 @@ def scan_release_artifacts(directory: Path, values: list[str]) -> list[str]:
             continue
         if denied_values(data, values):
             findings.append(f"{path}: contains a denied deployment value")
-        for label, payload in archive_members(path, data):
-            if denied_values(payload, values):
-                findings.append(f"{label}: contains a denied deployment value")
+        try:
+            for label, payload in archive_members(path, data):
+                if denied_values(payload, values):
+                    findings.append(f"{label}: contains a denied deployment value")
+        except ReleaseArchiveError as error:
+            findings.append(str(error))
         extracted, package_findings = extracted_members(path)
         findings.extend(package_findings)
         for relative, payload in extracted:
@@ -322,15 +348,24 @@ def main() -> int:
     if bool(args.release_dir) != bool(args.denylist):
         parser.error("--release-dir and --denylist must be used together")
     files = tracked_files()
+    release_values = load_denylist(args.denylist) if args.denylist else []
     failures: list[str] = []
     for name in files:
         if name.startswith("tmp/") or "/tmp/" in name:
             failures.append(f"{name}: tracked tmp path")
+        path = Path(name)
+        if args.release_dir:
+            try:
+                source_data = path.read_bytes()
+            except OSError as error:
+                failures.append(f"{name}: unreadable release source file: {error}")
+            else:
+                if denied_values(source_data, release_values):
+                    failures.append(f"{name}: contains a denied deployment value")
         if name == "scripts/check_docs.py":
             continue
-        if name.startswith("internal/web/dist/"):
+        if name.startswith("internal/web/dist/") and not args.release_dir:
             continue
-        path = Path(name)
         if path.suffix.lower() not in TEXT_SUFFIXES:
             continue
         try:
@@ -352,7 +387,8 @@ def main() -> int:
             failures.extend(f"{name}: {finding}" for finding in md_findings)
 
     if args.release_dir:
-        release_values = load_denylist(args.denylist)
+        if not release_values:
+            failures.append(f"{args.denylist}: denylist must contain at least one value")
         failures.extend(scan_release_artifacts(args.release_dir, release_values))
 
     if failures:

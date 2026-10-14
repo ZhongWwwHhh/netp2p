@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/crypto/argon2"
 )
 
 type CommitteeMember struct {
@@ -408,7 +406,6 @@ func (family PathFamily) Normalized() PathFamily {
 	family.SourceGroups = dedupe(family.SourceGroups)
 	family.DestinationScopes = dedupe(family.DestinationScopes)
 	family.FlowClasses = dedupe(family.FlowClasses)
-	sort.Strings(family.ManagerHops)
 	sort.Strings(family.SourceGroups)
 	sort.Strings(family.DestinationScopes)
 	sort.Strings(family.FlowClasses)
@@ -497,7 +494,7 @@ func HashPassword(password string) []byte {
 	if _, err := rand.Read(salt); err != nil {
 		panic(fmt.Sprintf("netp2p: read password salt: %v", err))
 	}
-	digest := argon2.IDKey([]byte(password), salt, 1, 64*1024, 1, 32)
+	digest := argon2IDKey([]byte(password), salt, 1, 64*1024, 1, 32)
 	return []byte(fmt.Sprintf(
 		"$argon2id$v=19$m=65536,t=1,p=1$%s$%s",
 		base64.RawStdEncoding.EncodeToString(salt),
@@ -535,10 +532,10 @@ func VerifyPassword(password string, verifier []byte) bool {
 	if err != nil {
 		return false
 	}
-	if memory <= 0 || iterations <= 0 || parallelism <= 0 || len(salt) < 8 || len(expected) == 0 {
+	if memory != 64*1024 || iterations != 1 || parallelism != 1 || len(salt) < 8 || len(expected) != 32 {
 		return false
 	}
-	actual := argon2.IDKey([]byte(password), salt, uint32(iterations), uint32(memory), uint8(parallelism), uint32(len(expected)))
+	actual := argon2IDKey([]byte(password), salt, uint32(iterations), uint32(memory), uint8(parallelism), uint32(len(expected)))
 	return subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
@@ -587,7 +584,7 @@ func (key SetupKey) SetupKeyValid(now string) bool {
 // digest remains deterministic for committee-wide comparison.
 func SetupKeyHash(token string) []byte {
 	salt := sha256.Sum256([]byte("netp2p-setup-key:" + token))
-	return argon2.IDKey([]byte(token), salt[:], 1, 64*1024, 1, 32)
+	return argon2IDKey([]byte(token), salt[:], 1, 64*1024, 1, 32)
 }
 
 // ManagerJoinTokenHash computes the verifier stored by an existing committee
@@ -595,7 +592,7 @@ func SetupKeyHash(token string) []byte {
 // in the candidate manager's private join bundle.
 func ManagerJoinTokenHash(token string) []byte {
 	salt := sha256.Sum256([]byte("netp2p-manager-join:" + token))
-	return argon2.IDKey([]byte(token), salt[:], 1, 64*1024, 1, 32)
+	return argon2IDKey([]byte(token), salt[:], 1, 64*1024, 1, 32)
 }
 
 // Nameserver is a certified DNS resolver that applies to the groups listed in
@@ -654,7 +651,10 @@ type StateTransition struct {
 	PathFamily  *PathFamily                 `json:"pathFamily,omitempty"`
 	Domain      *RoutingDomainAuthorization `json:"routingDomain,omitempty"`
 	ManagerJoin *ManagerJoinRequest         `json:"managerJoin,omitempty"`
-	TargetID    string                      `json:"targetId,omitempty"`
+	// ManagerJoinTokenHash carries the certified verifier for a manager
+	// enrollment token rotation. The plaintext token never enters state.
+	ManagerJoinTokenHash []byte `json:"managerJoinTokenHash,omitempty"`
+	TargetID             string `json:"targetId,omitempty"`
 	// Committee carries the full replacement committee for update_committee.
 	Committee []CommitteeMember `json:"committee,omitempty"`
 	// CommitteeConfig carries the new threshold parameters for
@@ -729,6 +729,7 @@ func ClientSnapshot(snapshot SignedSnapshot) SignedSnapshot {
 func redactNetworkState(state NetworkState) NetworkState {
 	state.SetupKeys = redactSetupKeys(state.SetupKeys)
 	state.Users = redactUsers(state.Users)
+	state.ManagerJoinTokenHash = nil
 	state.EngineCommittee = redactCommittee(state.EngineCommittee)
 	return state
 }
@@ -773,6 +774,7 @@ func redactCommittee(members []CommitteeMember) []CommitteeMember {
 
 func redactTransition(transition StateTransition) StateTransition {
 	transition.SetupKey = ""
+	transition.ManagerJoinTokenHash = nil
 	transition.Committee = redactCommittee(transition.Committee)
 	if transition.User != nil {
 		user := *transition.User
@@ -804,7 +806,16 @@ type NetworkState struct {
 	PathFamilies   []PathFamily                 `json:"pathFamilies"`
 	RoutingDomains []RoutingDomainAuthorization `json:"routingDomains"`
 	ManagerJoins   []ManagerJoinRequest         `json:"managerJoinRequests"`
-	NextIPOffset   uint32                       `json:"nextIpOffset"`
+	// ManagerJoinTokenHash is the certified verifier for the active enrollment
+	// token after an explicit rotation. A committee expansion marks the token
+	// consumed, and a certified rotation installs a fresh verifier.
+	ManagerJoinTokenHash     []byte `json:"managerJoinTokenHash,omitempty"`
+	ManagerJoinTokenConsumed bool   `json:"managerJoinTokenConsumed,omitempty"`
+	// PendingCommitteeShrink is the certified target committee for a controlled
+	// shrink. Retained managers run the next DKG epoch against this target, and
+	// activate_committee clears it after the smaller committee is certified.
+	PendingCommitteeShrink []CommitteeMember `json:"pendingCommitteeShrink,omitempty"`
+	NextIPOffset           uint32            `json:"nextIpOffset"`
 	// CommitteeConfig is mirrored into certified state so a client can verify a
 	// snapshot using only the snapshot itself.
 	CommitteeConfig CommitteeConfig `json:"committeeConfig"`

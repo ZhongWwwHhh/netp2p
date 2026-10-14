@@ -66,13 +66,19 @@ Use when one manager's data is corrupted or its disk is replaced:
    ```
 
 2. Restore `/etc/netp2p` and the matching DKG share from the config archive.
-3. Restore the SQLite ledger:
+3. Stage the backup inside the manager data volume and restore it:
 
    ```bash
-   docker compose run --rm manager netp2pd manager restore \
-     --backup /var/backups/netp2p/manager-BACKUP_ID.sqlite \
+   sudo install -o 999 -g 999 -m 600 \
+     /var/backups/netp2p/manager-BACKUP_ID.sqlite \
+     /var/lib/netp2p/.restore-manager.sqlite
+
+   docker compose run --rm manager manager restore \
+     --backup /var/lib/netp2p/.restore-manager.sqlite \
      --data-dir /var/lib/netp2p \
      --overwrite
+
+   sudo rm /var/lib/netp2p/.restore-manager.sqlite
    ```
 
 4. Start the manager:

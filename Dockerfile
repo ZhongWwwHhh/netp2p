@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM node:24-bookworm AS ui
+FROM --platform=$BUILDPLATFORM node:24-bookworm@sha256:3d27e5c11e5786e309ec3e03f93ae536eb36e6e5eb3714d5eb3300a36157add0 AS ui
 ARG VERSION=0.0.0-dev
 WORKDIR /src/ui
  COPY ui/package.json ui/package-lock.json ui/.npmrc ./
@@ -6,7 +6,7 @@ WORKDIR /src/ui
 COPY ui/ ./
 RUN VITE_NETP2P_VERSION=${VERSION} npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build
 ARG VERSION=0.0.0-dev
 ARG TARGETOS
 ARG TARGETARCH
@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "${LDFLAGS}" -o /out/netp2p-probe ./cmd/netp2p-probe && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags "${LDFLAGS}" -o /out/netp2p-mockidp ./cmd/netp2p-mockidp
 
-FROM debian:bookworm-slim AS base
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS base
 ARG VERSION=0.0.0-dev
 LABEL org.opencontainers.image.title="NetP2P" \
       org.opencontainers.image.description="Decentralized overlay VPN with a BFT committee control plane" \

@@ -28,6 +28,28 @@ func TestFinalizeHashesSetupKeys(t *testing.T) {
 	}
 }
 
+func TestDevelopmentSeedNormalizesForwardingManagers(t *testing.T) {
+	seed := Seed{
+		Development: true,
+		NetworkID:   "net",
+		OverlayCIDR: "100.64.0.0/24",
+		Managers: []model.CommitteeMember{
+			{ID: "m1", Address: "/ip4/127.0.0.1/udp/1", KeySeed: 1},
+			{ID: "m2", Address: "/ip4/127.0.0.1/udp/2", KeySeed: 2},
+			{ID: "m3", Address: "/ip4/127.0.0.1/udp/3", KeySeed: 3},
+		},
+	}
+
+	if err := seed.Validate(); err != nil {
+		t.Fatalf("validate development seed: %v", err)
+	}
+	for index, manager := range seed.Managers {
+		if !manager.ForwardingEnabled {
+			t.Fatalf("manager %d forwardingEnabled=false, want true", index+1)
+		}
+	}
+}
+
 func TestBootstrapAddrInfos(t *testing.T) {
 	seed := Seed{
 		NetworkID:   "net",

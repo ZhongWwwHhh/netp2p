@@ -244,7 +244,10 @@ func TestUnassignedDirectUsesExplicitPacketFrame(t *testing.T) {
 	receiver := transport.NewWithEnvelope(
 		context.Background(), destinationNode.Host, p2p.FrameProtocol,
 		func(remote peer.ID, payload []byte) { packets <- payload },
-		func(remote peer.ID, payload []byte) { envelopes <- payload },
+		func(remote peer.ID, payload []byte) error {
+			envelopes <- payload
+			return nil
+		},
 	)
 	defer receiver.Close()
 	client := &Client{

@@ -3,6 +3,8 @@ package manager
 
 import (
 	"context"
+	"crypto/hmac"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -24,6 +26,7 @@ import (
 	"github.com/netp2p/netp2p/internal/p2p"
 	"github.com/netp2p/netp2p/internal/presence"
 	"github.com/netp2p/netp2p/internal/protocol"
+	"github.com/netp2p/netp2p/internal/quota"
 	"github.com/netp2p/netp2p/internal/tracing"
 	"github.com/netp2p/netp2p/internal/transport"
 	"github.com/netp2p/netp2p/internal/version"
@@ -34,30 +37,42 @@ import (
 )
 
 type Manager struct {
-	node           *p2p.Node
-	engine         *bft.Engine
-	mesh           *CommitteeMesh
-	presence       *presence.Table
-	gossiper       *presence.Gossiper
-	links          *link.Gossiper
-	prober         *link.Prober
-	forwarding     *forward.Table
-	dataTransport  *transport.Transport
-	admissions     map[string]map[string]protocol.AdmissionReport
-	quotaPending   map[string]uint64
-	quotaSettledAt time.Time
-	metrics        *metrics.Metrics
-	alerts         *alerts.Alerter
-	sso            *oidc.Verifier
-	mu             sync.RWMutex
-	snapshot       model.SignedSnapshot
-	waiters        map[chan model.SignedSnapshot]struct{}
+	node            *p2p.Node
+	engine          *bft.Engine
+	mesh            *CommitteeMesh
+	presence        *presence.Table
+	gossiper        *presence.Gossiper
+	links           *link.Gossiper
+	prober          *link.Prober
+	forwarding      *forward.Table
+	dataTransport   *transport.Transport
+	routing         *routingRuntime
+	faceBudgets     *quota.FaceBudgetSet
+	admissions      map[string]map[string]protocol.AdmissionReport
+	quotaPending    map[string]uint64
+	quotaSettledAt  time.Time
+	metrics         *metrics.Metrics
+	alerts          *alerts.Alerter
+	sso             *oidc.Verifier
+	tokenLimiter    *tokenRateLimiter
+	mu              sync.RWMutex
+	snapshot        model.SignedSnapshot
+	waiters         map[chan model.SignedSnapshot]syncWaiter
+	registeredPeers map[string]struct{}
 }
 
 var (
-	syncHeartbeatInterval = 10 * time.Second
+	defaultSyncHeartbeatInterval = 5 * time.Second
+	// Tests shorten this value to keep the heartbeat coverage fast.
+	syncHeartbeatInterval = defaultSyncHeartbeatInterval
 	syncMaxLifetime       = 10 * time.Minute
+	syncMaxWaiters        = 131072
+	syncMaxWaitersPerPeer = 4
 )
+
+type syncWaiter struct {
+	peerID string
+}
 
 // Config wires optional capabilities into the manager.
 type Config struct {
@@ -78,11 +93,13 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 	table := presence.NewTable()
 	manager := &Manager{
 		node: node, engine: engine, mesh: mesh, presence: table, sso: config.SSO, links: config.Links,
-		metrics:    config.Metrics,
-		alerts:     config.Alerts,
-		gossiper:   presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
-		admissions: make(map[string]map[string]protocol.AdmissionReport),
-		waiters:    make(map[chan model.SignedSnapshot]struct{}),
+		metrics:         config.Metrics,
+		alerts:          config.Alerts,
+		gossiper:        presence.NewGossiper(node, table, engine.LocalID(), mesh.PeerIDs()),
+		admissions:      make(map[string]map[string]protocol.AdmissionReport),
+		waiters:         make(map[chan model.SignedSnapshot]syncWaiter),
+		registeredPeers: peerIndex(engine.CurrentState()),
+		tokenLimiter:    newTokenRateLimiter(),
 	}
 	if config.Forwarding {
 		// The forwarding table keys hops by libp2p PeerID, so the local
@@ -97,6 +114,7 @@ func New(node *p2p.Node, engine *bft.Engine, mesh *CommitteeMesh, config Config)
 			}
 			return manager.dataTransport.Send(remote, wire)
 		}, config.Metrics)
+		manager.routing = newRoutingRuntime(manager)
 	}
 	if config.Links != nil {
 		manager.prober = link.NewProber(node, engine.CurrentState, engine.CommitteeMembers, config.Links)
@@ -133,33 +151,67 @@ func (manager *Manager) EnableForwarding(ctx context.Context) {
 	}
 	manager.dataTransport = transport.NewWithEnvelope(ctx, manager.node.Host, p2p.FrameProtocol, nil, manager.handleForwardedWire)
 	manager.forwarding.Replace(manager.engine.CurrentState())
+	manager.forwarding.SetScaleRouting(manager.authorizeScale, manager.sendScaleFrame)
+	manager.forwarding.SetFaceID(manager.engine.LocalID())
+	manager.updateFaceBudgets(manager.engine.CurrentState())
+	manager.node.Handle(routingGossipProtocol, manager.routing.handleGossip)
 }
 
-func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) {
+func (manager *Manager) handleForwardedWire(remote peer.ID, wire []byte) error {
 	if manager.forwarding == nil {
-		return
+		return errors.New("forwarding is not enabled")
+	}
+	if len(wire) > 0 && wire[0] == forward.ScaleMagicByte {
+		return manager.handleScaleWire(remote, wire)
 	}
 	envelope, err := forward.DecodeEnvelope(wire)
 	if err != nil {
-		return
+		return fmt.Errorf("decode forwarded envelope: %w", err)
 	}
 	if _, err := manager.forwarding.Accept(remote, envelope); err != nil {
 		log.Printf("forward frame: %v", err)
+		return fmt.Errorf("accept forwarded envelope: %w", err)
 	}
+	return nil
+}
+
+func (manager *Manager) handleScaleWire(remote peer.ID, wire []byte) error {
+	envelope, err := forward.DecodeScaleEnvelope(wire)
+	if err != nil {
+		return fmt.Errorf("decode scale envelope: %w", err)
+	}
+	if manager.routing == nil || manager.forwarding == nil {
+		return errors.New("scale routing is not enabled")
+	}
+	if err := manager.routing.applySelection(&envelope); err != nil {
+		return fmt.Errorf("select scale path: %w", err)
+	}
+	if _, err := manager.forwarding.AcceptScale(remote, envelope); err != nil {
+		log.Printf("scale frame: %v", err)
+		return fmt.Errorf("accept scale envelope: %w", err)
+	}
+	manager.routing.recordScale(envelope)
+	return nil
+}
+
+func (manager *Manager) sendScaleFrame(remote peer.ID, envelope forward.ScaleEnvelope) error {
+	wire, err := forward.EncodeScaleEnvelope(envelope)
+	if err != nil {
+		return err
+	}
+	if manager.dataTransport == nil {
+		return fmt.Errorf("frame transport not started")
+	}
+	return manager.dataTransport.SendScale(remote, wire)
 }
 
 // RunScheduler periodically converts manager mesh observations into certified
-// route assignments. Transitions remain quorum-certified.
+// routing families and domains, then publishes a signed runtime epoch.
 func (manager *Manager) RunScheduler(ctx context.Context) {
-	scheduler := link.NewScheduler(manager, manager.engine.CommitteeMembers(), manager.LinkView)
-	scheduler.SetAdmissions(manager.Admissions)
-	scheduler.SetAutomaticLeader(func() bool {
-		height := manager.engine.Height()
-		round := manager.engine.CurrentRound()
-		leader := manager.engine.Leader(height+1, round)
-		return leader.ID != "" && leader.ID == manager.engine.LocalID()
-	})
-	scheduler.Run(ctx, manager.engine.CurrentState)
+	if manager.routing == nil {
+		return
+	}
+	manager.routing.Run(ctx)
 }
 
 // RunCatchUp periodically repairs a manager that misses one or more heights
@@ -278,14 +330,13 @@ func (manager *Manager) DisconnectedMembers() []string {
 	return disconnected
 }
 
-// ReconcileAssignments runs a single planner pass now and submits at most one
-// changed assignment. It is exposed for tests and admin tooling that need to
-// drive the planner deterministically instead of waiting for the ticker.
-func (manager *Manager) ReconcileAssignments() error {
-	scheduler := link.NewScheduler(manager.mesh, manager.engine.CommitteeMembers(), manager.LinkView)
-	scheduler.SetCooldown(0)
-	scheduler.SetAdmissions(manager.Admissions)
-	return scheduler.Reconcile(manager.engine.CurrentState())
+// ReconcileRouting runs one global planner pass now. It is exposed for tests
+// and admin tooling that need deterministic behavior instead of the ticker.
+func (manager *Manager) ReconcileRouting() error {
+	if manager.routing == nil {
+		return nil
+	}
+	return manager.routing.Reconcile()
 }
 
 // RunPresenceGossip exchanges observed peer presence with the other committee
@@ -358,6 +409,12 @@ func (manager *Manager) Height() uint64 {
 	return manager.engine.Height()
 }
 
+// KnownHeight reports the highest certified height this manager has observed,
+// even when a gap temporarily prevents the local ledger from adopting it.
+func (manager *Manager) KnownHeight() uint64 {
+	return manager.engine.KnownHeight()
+}
+
 func (manager *Manager) LocalID() string {
 	return manager.engine.LocalID()
 }
@@ -426,6 +483,27 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{Error: "peer id mismatch"})
 		return
 	}
+	if request.SetupKey != "" {
+		if err := manager.setupKeyPreflight(); err != nil {
+			manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{
+				Error: err.Error(), Code: protocol.CodeCommitteeUnavailable, ProtocolVersion: version.ProtocolVersion,
+			})
+			return
+		}
+		if !manager.tokenLimiter.Allow(request.PeerID, setupKeyTokenAttempts) {
+			manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{
+				Error: "setup key verification rate limit exceeded", Code: protocol.CodeInvalidSetupKey,
+				ProtocolVersion: version.ProtocolVersion,
+			})
+			return
+		}
+	}
+	if request.SetupKey != "" && !manager.validSetupKey(request.SetupKey) {
+		manager.respond(stream, p2p.LoginProtocol, protocol.LoginResponse{
+			Error: "invalid setup key", Code: protocol.CodeInvalidSetupKey, ProtocolVersion: version.ProtocolVersion,
+		})
+		return
+	}
 	// Remember how to reach the client so the link prober can dial it back and
 	// measure the access segment even when the client is idle.
 	manager.rememberAddrs(request.PeerID, request.Addresses)
@@ -444,6 +522,11 @@ func (manager *Manager) handleLogin(stream network.Stream) {
 		Snapshot: model.ClientSnapshot(snapshot), Peer: peerRecord,
 		ProtocolVersion: version.ProtocolVersion, Capabilities: version.Capabilities(),
 	})
+}
+
+func (manager *Manager) setupKeyPreflight() error {
+	_, err := manager.mesh.ensureCommitteeAvailableCached()
+	return err
 }
 
 func (manager *Manager) rememberAddrs(peerID string, addresses []string) {
@@ -517,6 +600,10 @@ func (manager *Manager) handleSync(stream network.Stream) {
 		))
 		return
 	}
+	if !manager.isRegisteredPeer(request.PeerID) {
+		writeSyncError("peer_not_registered", "sync peer is not registered")
+		return
+	}
 	manager.presence.Observe(request.PeerID, stream.Conn().RemoteMultiaddr().String(), manager.engine.LocalID())
 	manager.observeAdmissions(request.PeerID, request.Admissions)
 	networkID := manager.engine.CurrentState().NetworkID
@@ -534,11 +621,23 @@ func (manager *Manager) handleSync(stream network.Stream) {
 	}
 	waiter := make(chan model.SignedSnapshot, 1)
 	manager.mu.Lock()
-	manager.waiters[waiter] = struct{}{}
+	if len(manager.waiters) >= syncMaxWaiters {
+		manager.mu.Unlock()
+		writeSyncError("waiter_limit", "sync waiter limit exceeded")
+		return
+	}
+	if manager.waitersByPeer(request.PeerID) >= syncMaxWaitersPerPeer {
+		manager.mu.Unlock()
+		writeSyncError("waiter_limit", "sync waiter limit exceeded for peer")
+		return
+	}
+	manager.waiters[waiter] = syncWaiter{peerID: request.PeerID}
 	manager.mu.Unlock()
 	defer func() {
 		manager.mu.Lock()
-		delete(manager.waiters, waiter)
+		if _, active := manager.waiters[waiter]; active {
+			delete(manager.waiters, waiter)
+		}
 		manager.mu.Unlock()
 	}()
 	streamContext, cancelStreamContext := context.WithCancel(context.Background())
@@ -729,13 +828,18 @@ func (manager *Manager) onCommit(snapshot model.SignedSnapshot) {
 	for waiter := range manager.waiters {
 		waiters = append(waiters, waiter)
 	}
-	manager.waiters = make(map[chan model.SignedSnapshot]struct{})
+	manager.waiters = make(map[chan model.SignedSnapshot]syncWaiter)
+	manager.registeredPeers = peerIndex(snapshot.State)
 	manager.mu.Unlock()
 	for _, waiter := range waiters {
 		waiter <- snapshot
 	}
 	if manager.forwarding != nil {
 		manager.forwarding.Replace(snapshot.State)
+		manager.updateFaceBudgets(snapshot.State)
+		if manager.routing != nil {
+			manager.routing.replace(snapshot.State)
+		}
 	}
 	manager.publishMetrics(snapshot)
 }
@@ -757,6 +861,41 @@ func (manager *Manager) publishMetrics(snapshot model.SignedSnapshot) {
 	if minimum := minimumConfidence(view); minimum >= 0 {
 		manager.metrics.LinkConfidence.Set(minimum)
 	}
+}
+
+func peerIndex(state model.NetworkState) map[string]struct{} {
+	result := make(map[string]struct{}, len(state.Peers))
+	for _, peer := range state.Peers {
+		result[peer.PeerID] = struct{}{}
+	}
+	return result
+}
+
+func (manager *Manager) isRegisteredPeer(peerID string) bool {
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	_, registered := manager.registeredPeers[peerID]
+	return registered
+}
+
+func (manager *Manager) waitersByPeer(peerID string) int {
+	count := 0
+	for _, waiter := range manager.waiters {
+		if waiter.peerID == peerID {
+			count++
+		}
+	}
+	return count
+}
+
+func (manager *Manager) validSetupKey(token string) bool {
+	hash := model.SetupKeyHash(token)
+	for _, key := range manager.engine.CurrentState().SetupKeys {
+		if hmac.Equal(key.TokenHash, hash) && key.SetupKeyValid(time.Now().UTC().Format(time.RFC3339)) {
+			return true
+		}
+	}
+	return false
 }
 
 func minimumConfidence(view link.LinkView) float64 {

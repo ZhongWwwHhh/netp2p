@@ -20,6 +20,53 @@ func TestCommitteeTransitionRequiresConfig(t *testing.T) {
 	}
 }
 
+func TestLatestSnapshotPreservesHistoricalCommittee(t *testing.T) {
+	state := testState()
+	members := committeeMembersForIDs(t, []string{"A", "B", "C"}, 101)
+	keys := committeePrivateKeys(members, 101)
+	engines := newCommitteeEngines(t, state, members, keys, model.DefaultCommitteeParams())
+
+	submitAndApproveManagerJoin(t, engines, keys, "D", int64('D'))
+	fourMembers := committeeMembersForIDs(t, []string{"A", "B", "C", "D"}, 101)
+	fourParams := model.CommitteeParams{Size: 4, FaultLimit: 1, QuorumSize: 3}
+	_, activation := activateCommitteeWithDKG(
+		t, engines, keys, fourMembers, fourParams, 1,
+	)
+
+	latest, ok := engines[0].LatestSnapshot()
+	if !ok {
+		t.Fatal("activation did not produce a latest snapshot")
+	}
+	if len(latest.Committee) != len(members) {
+		t.Fatalf("latest historical committee has %d members, want the signing committee size %d", len(latest.Committee), len(members))
+	}
+	if len(engines[0].CommitteeMembers()) != len(fourMembers) {
+		t.Fatalf("engine committee has %d members, want activated size %d", len(engines[0].CommitteeMembers()), len(fourMembers))
+	}
+	if err := ValidateSnapshot(latest); err != nil {
+		t.Fatalf("validate latest historical snapshot after activation: %v", err)
+	}
+	if !sameCommitteeIDs(latest.Committee, activation.Committee) {
+		t.Fatal("latest snapshot changed its certified signing committee")
+	}
+}
+
+func sameCommitteeIDs(left, right []model.CommitteeMember) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	ids := make(map[string]struct{}, len(left))
+	for _, member := range left {
+		ids[member.ID] = struct{}{}
+	}
+	for _, member := range right {
+		if _, ok := ids[member.ID]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func TestCommitteeResizeThreeFourSevenFiveFourWithDKGAndRecovery(t *testing.T) {
 	state := testState()
 	members := committeeMembersForIDs(t, []string{"A", "B", "C"}, 101)
@@ -35,6 +82,11 @@ func TestCommitteeResizeThreeFourSevenFiveFourWithDKGAndRecovery(t *testing.T) {
 	engines = append(engines, appendCommitteeEngine(t, fourSnapshot, fourMembers, fourParams, fourKeys, "D", int64('D'), 1))
 	keys = append(keys, SeededPrivateKey(int64('D')))
 	assertCommitteeParams(t, engines, fourParams, fourSnapshot)
+
+	if !fourSnapshot.State.ManagerJoinTokenConsumed {
+		t.Fatal("3-to-4 activation did not consume the manager join token")
+	}
+	rotateManagerJoinToken(t, keys, engines, 101)
 
 	// 4 -> 7: three more managers join and the committee moves to 5-of-7.
 	for _, id := range []string{"E", "F", "G"} {
@@ -55,12 +107,14 @@ func TestCommitteeResizeThreeFourSevenFiveFourWithDKGAndRecovery(t *testing.T) {
 	// heights with old shares.
 	fiveMembers := committeeMembersForIDs(t, []string{"A", "C", "D", "E", "G"}, 101)
 	fiveParams := model.CommitteeParams{Size: 5, FaultLimit: 1, QuorumSize: 4}
+	requestShrink(t, keys, engines, fiveMembers)
 	_, fiveSnapshot := activateCommitteeWithDKG(t, engines, keys, fiveMembers, fiveParams, 3)
 	engines, keys = retainCommitteeEngines(engines, keys, fiveMembers)
 	assertCommitteeParams(t, engines, fiveParams, fiveSnapshot)
 
 	fourMembers = committeeMembersForIDs(t, []string{"A", "C", "E", "G"}, 101)
 	fourParams = model.CommitteeParams{Size: 4, FaultLimit: 1, QuorumSize: 3}
+	requestShrink(t, keys, engines, fourMembers)
 	finalKeys, finalSnapshot := activateCommitteeWithDKG(t, engines, keys, fourMembers, fourParams, 4)
 	engines, keys = retainCommitteeEngines(engines, keys, fourMembers)
 	assertCommitteeParams(t, engines, fourParams, finalSnapshot)
@@ -102,6 +156,44 @@ func TestCommitteeResizeThreeFourSevenFiveFourWithDKGAndRecovery(t *testing.T) {
 	}
 }
 
+func TestCommitteeShrinkRequiresCertifiedRequest(t *testing.T) {
+	members := committeeMembersForIDs(t, []string{"A", "B", "C", "D"}, 101)
+	retained := members[:3]
+	params := model.CommitteeParams{Size: 4, FaultLimit: 1, QuorumSize: 3}
+	config, _, _, err := deriveCommitteeKeys(retained, "net-1", 2, 3)
+	if err != nil {
+		t.Fatalf("derive activated committee keys: %v", err)
+	}
+	activation := model.StateTransition{
+		Type: TransitionActivateCommittee, Committee: retained, CommitteeConfig: &config,
+		Actor: &model.Actor{ID: "owner", Role: model.RoleOwner},
+	}
+
+	state := testState()
+	state.EngineCommittee = members
+	state.CommitteeConfig = params.CommitteeConfig(1, config.GroupPublicKey)
+	if err := ApplyTransition(&state, activation); err == nil || !strings.Contains(err.Error(), "pending shrink") {
+		t.Fatalf("activation without a request error = %v", err)
+	}
+
+	request := model.StateTransition{
+		Type: TransitionRequestCommitteeShrink, Committee: retained,
+		Actor: &model.Actor{ID: "owner", Role: model.RoleOwner},
+	}
+	if err := ApplyTransition(&state, request); err != nil {
+		t.Fatalf("request committee shrink: %v", err)
+	}
+	if !sameCommitteeIdentity(state.PendingCommitteeShrink, retained) {
+		t.Fatal("shrink request did not persist the retained committee")
+	}
+	if err := ApplyTransition(&state, activation); err != nil {
+		t.Fatalf("activate certified shrink: %v", err)
+	}
+	if len(state.PendingCommitteeShrink) != 0 {
+		t.Fatal("shrink activation did not clear the pending request")
+	}
+}
+
 func committeeMembersForIDs(t *testing.T, ids []string, firstSeed int64) []model.CommitteeMember {
 	t.Helper()
 	members := make([]model.CommitteeMember, len(ids))
@@ -117,6 +209,41 @@ func committeeMembersForIDs(t *testing.T, ids []string, firstSeed int64) []model
 		}
 	}
 	return members
+}
+
+func rotateManagerJoinToken(t *testing.T, keys []ed25519.PrivateKey, engines []*Engine, seed int64) {
+	t.Helper()
+	verifier := make([]byte, 32)
+	for index := range verifier {
+		verifier[index] = byte(seed + int64(index))
+	}
+	snapshot := advance(t, keys, engines, model.StateTransition{
+		Type: TransitionRotateManagerJoinToken, ManagerJoinTokenHash: verifier,
+		Actor: &model.Actor{ID: "owner", Role: model.RoleOwner},
+	})
+	if snapshot.State.ManagerJoinTokenConsumed {
+		t.Fatal("manager join token rotation did not clear consumption")
+	}
+	if !bytes.Equal(snapshot.State.ManagerJoinTokenHash, verifier) {
+		t.Fatal("manager join token rotation did not install the certified verifier")
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("validate manager join token rotation: %v", err)
+	}
+}
+
+func requestShrink(t *testing.T, keys []ed25519.PrivateKey, engines []*Engine, target []model.CommitteeMember) {
+	t.Helper()
+	snapshot := advance(t, keys, engines, model.StateTransition{
+		Type: TransitionRequestCommitteeShrink, Committee: target,
+		Actor: &model.Actor{ID: "owner", Role: model.RoleOwner},
+	})
+	if !sameCommitteeIdentity(snapshot.State.PendingCommitteeShrink, target) {
+		t.Fatal("committee shrink request did not persist its target")
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("validate committee shrink request: %v", err)
+	}
 }
 
 func itoa(value int) string {

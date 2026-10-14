@@ -16,10 +16,11 @@ func defaultSeed() config.Seed {
 	managers := make([]model.CommitteeMember, 3)
 	for index := range managers {
 		managers[index] = model.CommitteeMember{
-			ID:         fmt.Sprintf("manager-%d", index+1),
-			Address:    fmt.Sprintf("/dns4/manager-%d/udp/4001/quic-v1", index+1),
-			KeySeed:    int64(index + 101),
-			ListenAddr: fmt.Sprintf("/ip4/0.0.0.0/udp/%d/webrtc-direct", 4101+index),
+			ID:                fmt.Sprintf("manager-%d", index+1),
+			Address:           fmt.Sprintf("/dns4/manager-%d/udp/4001/quic-v1", index+1),
+			KeySeed:           int64(index + 101),
+			ListenAddr:        fmt.Sprintf("/ip4/0.0.0.0/udp/%d/webrtc-direct", 4101+index),
+			ForwardingEnabled: true,
 		}
 	}
 	return config.Seed{
@@ -63,6 +64,7 @@ func defaultSeed() config.Seed {
 			DirectPathEnabled:   true,
 			ViaManagerEnabled:   true,
 			MaxManagerHops:      2,
+			DefaultFlowClass:    model.FlowClassLatency,
 			DNSDomain:           "netp2p.internal",
 			LoginExpirationDays: 30,
 			JWTGroupsEnabled:    true,
@@ -70,11 +72,12 @@ func defaultSeed() config.Seed {
 			ExitNodeEnabled:     true,
 		},
 		OIDC: oidc.Config{
-			Issuer:      "http://mock-idp:9999",
-			ClientID:    "netp2p",
-			WebClientID: "netp2p-web",
-			GroupsClaim: "groups",
-			AdminGroups: []string{"netp2p-admins"},
+			Issuer:         "http://mock-idp:9999",
+			ClientID:       "netp2p",
+			WebClientID:    "netp2p-web",
+			WebRedirectURI: "http://localhost:8080/auth/callback",
+			GroupsClaim:    "groups",
+			AdminGroups:    []string{"netp2p-admins"},
 		},
 		NextIPOffset: 1,
 	}

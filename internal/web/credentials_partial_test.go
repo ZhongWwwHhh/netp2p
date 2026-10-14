@@ -19,7 +19,7 @@ func TestEmailOnlyCredentialUpdatePreservesVerifier(t *testing.T) {
 		ID: "user-1", Email: "old@example.com", Role: model.RoleUser,
 		PasswordVerifier: originalVerifier,
 	}}
-	token, _, err := server.sessions.Issue(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now().Add(-time.Second))
+	token, _, err := server.issueLocalSession(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now().Add(-time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestPasswordOnlyCredentialUpdatePreservesEmail(t *testing.T) {
 		ID: "user-1", Email: "user@example.com", Role: model.RoleUser,
 		PasswordVerifier: model.HashPassword("original password"),
 	}}
-	token, _, err := server.sessions.Issue(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now().Add(-time.Second))
+	token, _, err := server.issueLocalSession(auth.Identity{UserID: "user-1", Role: model.RoleUser}, time.Now().Add(-time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

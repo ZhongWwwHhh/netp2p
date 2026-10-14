@@ -3,6 +3,8 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -20,19 +22,23 @@ const (
 	minBackoff        = 250 * time.Millisecond
 	maxBackoff        = 5 * time.Second
 	writeDeadline     = 5 * time.Second
+	readDeadline      = time.Minute
+	scaleAckTimeout   = 10 * time.Second
+	scaleAckByte      = 0x01
 )
 
 // ErrQueueFull reports that the per-peer send queue was full and the frame was
 // dropped. Callers treat it as backpressure rather than a fatal error.
 var ErrQueueFull = errors.New("frame queue full")
+var ErrScaleRejected = errors.New("scale frame rejected by receiver")
 
 // PacketHandler receives a decoded frame from a remote peer.
 type PacketHandler func(remote peer.ID, payload []byte)
 
 // EnvelopeHandler receives a binary forwarding frame without decoding it. The
 // forwarding codec lives with the forwarding table so client and manager cannot
-// drift apart.
-type EnvelopeHandler func(remote peer.ID, wire []byte)
+// drift apart. A nil error acknowledges a scale frame; an error rejects it.
+type EnvelopeHandler func(remote peer.ID, wire []byte) error
 
 type outboundFrame struct {
 	protocol string
@@ -94,6 +100,68 @@ func (transport *Transport) SendEnvelope(remote peer.ID, payload []byte) error {
 	return transport.sendFrame(remote, ProtocolEnvelope, payload)
 }
 
+// SendScale sends an explicit global-routing scale frame.
+func (transport *Transport) SendScale(remote peer.ID, payload []byte) error {
+	if len(payload) == 0 || len(payload) > MaxProtocolFramePayloadSize {
+		return errors.New("invalid frame size")
+	}
+	transport.mu.Lock()
+	if transport.closed {
+		transport.mu.Unlock()
+		return errors.New("transport closed")
+	}
+	ctx := transport.ctx
+	transport.mu.Unlock()
+
+	// Scale frames use one acknowledged stream per frame. Persistent streams
+	// are not reused because the receiver closes an idle stream after its read
+	// deadline while the sender may still believe the queued write is valid.
+	streamCtx, cancel := context.WithTimeout(ctx, scaleAckTimeout)
+	defer cancel()
+	stream, err := transport.host.NewStream(streamCtx, remote, transport.protocol)
+	if err != nil {
+		return fmt.Errorf("open scale stream: %w", err)
+	}
+	defer stream.Close()
+	if err := stream.SetWriteDeadline(time.Now().Add(scaleAckTimeout)); err != nil {
+		_ = stream.Reset()
+		return fmt.Errorf("set scale write deadline: %w", err)
+	}
+	if err := WriteScaleFrame(stream, payload); err != nil {
+		_ = stream.Reset()
+		return fmt.Errorf("write scale frame: %w", err)
+	}
+	if err := stream.CloseWrite(); err != nil {
+		_ = stream.Reset()
+		return fmt.Errorf("finish scale frame: %w", err)
+	}
+	if err := stream.SetReadDeadline(time.Now().Add(scaleAckTimeout)); err != nil {
+		_ = stream.Reset()
+		return fmt.Errorf("set scale ack deadline: %w", err)
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(stream, ack[:]); err != nil {
+		_ = stream.Reset()
+		return fmt.Errorf("read scale ack: %w", err)
+	}
+	if ack[0] != scaleAckByte {
+		_ = stream.Reset()
+		return ErrScaleRejected
+	}
+	return nil
+}
+
+// QueueStats reports the current and configured queue depth for one peer.
+func (transport *Transport) QueueStats(remote peer.ID) (depth, capacity uint64) {
+	transport.mu.Lock()
+	conn, ok := transport.conns[remote]
+	transport.mu.Unlock()
+	if !ok {
+		return 0, uint64(transport.depth)
+	}
+	return uint64(len(conn.queue)), uint64(cap(conn.queue))
+}
+
 func (transport *Transport) sendFrame(remote peer.ID, protocolID string, payload []byte) error {
 	transport.mu.Lock()
 	if transport.closed {
@@ -126,6 +194,10 @@ func (transport *Transport) handleStream(stream network.Stream) {
 	defer stream.Close()
 	remote := stream.Conn().RemotePeer()
 	for {
+		if err := stream.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
+			log.Printf("frame stream from %s could not set read deadline: %v", remote.ShortString(), err)
+			return
+		}
 		frame, err := ReadProtocolFrame(stream)
 		if err != nil {
 			if transport.ctx.Err() != nil {
@@ -143,7 +215,30 @@ func (transport *Transport) handleStream(stream network.Stream) {
 			}
 		case ProtocolEnvelope:
 			if transport.onEnvelope != nil {
-				transport.onEnvelope(remote, frame.Payload)
+				if err := transport.onEnvelope(remote, frame.Payload); err != nil {
+					log.Printf("envelope frame from %s was rejected: %v", remote.ShortString(), err)
+				}
+			}
+		case ProtocolScale:
+			if transport.onEnvelope == nil {
+				_ = stream.Reset()
+				log.Printf("scale frame from %s had no receiver", remote.ShortString())
+				return
+			}
+			if err := transport.onEnvelope(remote, frame.Payload); err != nil {
+				_ = stream.Reset()
+				log.Printf("scale frame from %s was rejected: %v", remote.ShortString(), err)
+				return
+			}
+			if err := stream.SetWriteDeadline(time.Now().Add(scaleAckTimeout)); err != nil {
+				_ = stream.Reset()
+				log.Printf("scale ack from %s could not set write deadline: %v", remote.ShortString(), err)
+				return
+			}
+			if _, err := stream.Write([]byte{scaleAckByte}); err != nil {
+				_ = stream.Reset()
+				log.Printf("scale ack to %s failed: %v", remote.ShortString(), err)
+				return
 			}
 		default:
 			log.Printf("frame stream from %s used unknown protocol %q", remote.ShortString(), frame.Protocol)
@@ -256,6 +351,11 @@ func frameProtocolFor(payload []byte) string {
 	if len(payload) > 0 && payload[0] == forward.MagicByte {
 		if _, err := forward.DecodeEnvelope(payload); err == nil {
 			return ProtocolEnvelope
+		}
+	}
+	if len(payload) > 0 && payload[0] == forward.ScaleMagicByte {
+		if _, err := forward.DecodeScaleEnvelope(payload); err == nil {
+			return ProtocolScale
 		}
 	}
 	return ProtocolPacket

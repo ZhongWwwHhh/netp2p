@@ -83,6 +83,7 @@ message PathSpec {
   double bandwidth_mbps = 6;
   double confidence = 7;
   uint64 cost = 8;
+  double jitter_milliseconds = 9;
 }
 
 message RouteAssignment {
@@ -288,6 +289,9 @@ message NetworkState {
   repeated PathFamily path_families = 17;
   repeated RoutingDomainAuthorization routing_domains = 18;
   repeated ManagerJoinRequest manager_joins = 19;
+  bool manager_join_token_consumed = 20;
+  bytes manager_join_token_hash = 21;
+  repeated CommitteeMember pending_committee_shrink = 22;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +323,7 @@ message StateTransition {
   PathFamily path_family = 22;
   RoutingDomainAuthorization routing_domain = 23;
   ManagerJoinRequest manager_join = 24;
+  bytes manager_join_token_hash = 25;
 }
 
 message BudgetUsage {

@@ -515,17 +515,18 @@ func (x *NetworkSettings) GetExitNodeEnabled() bool {
 }
 
 type PathSpec struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	Id              string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Kind            string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
-	ManagerHops     []string               `protobuf:"bytes,3,rep,name=manager_hops,json=managerHops,proto3" json:"manager_hops,omitempty"`
-	RttMilliseconds float64                `protobuf:"fixed64,4,opt,name=rtt_milliseconds,json=rttMilliseconds,proto3" json:"rtt_milliseconds,omitempty"`
-	LossPercent     float64                `protobuf:"fixed64,5,opt,name=loss_percent,json=lossPercent,proto3" json:"loss_percent,omitempty"`
-	BandwidthMbps   float64                `protobuf:"fixed64,6,opt,name=bandwidth_mbps,json=bandwidthMbps,proto3" json:"bandwidth_mbps,omitempty"`
-	Confidence      float64                `protobuf:"fixed64,7,opt,name=confidence,proto3" json:"confidence,omitempty"`
-	Cost            uint64                 `protobuf:"varint,8,opt,name=cost,proto3" json:"cost,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Id                 string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Kind               string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	ManagerHops        []string               `protobuf:"bytes,3,rep,name=manager_hops,json=managerHops,proto3" json:"manager_hops,omitempty"`
+	RttMilliseconds    float64                `protobuf:"fixed64,4,opt,name=rtt_milliseconds,json=rttMilliseconds,proto3" json:"rtt_milliseconds,omitempty"`
+	LossPercent        float64                `protobuf:"fixed64,5,opt,name=loss_percent,json=lossPercent,proto3" json:"loss_percent,omitempty"`
+	BandwidthMbps      float64                `protobuf:"fixed64,6,opt,name=bandwidth_mbps,json=bandwidthMbps,proto3" json:"bandwidth_mbps,omitempty"`
+	Confidence         float64                `protobuf:"fixed64,7,opt,name=confidence,proto3" json:"confidence,omitempty"`
+	Cost               uint64                 `protobuf:"varint,8,opt,name=cost,proto3" json:"cost,omitempty"`
+	JitterMilliseconds float64                `protobuf:"fixed64,9,opt,name=jitter_milliseconds,json=jitterMilliseconds,proto3" json:"jitter_milliseconds,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *PathSpec) Reset() {
@@ -610,6 +611,13 @@ func (x *PathSpec) GetConfidence() float64 {
 func (x *PathSpec) GetCost() uint64 {
 	if x != nil {
 		return x.Cost
+	}
+	return 0
+}
+
+func (x *PathSpec) GetJitterMilliseconds() float64 {
+	if x != nil {
+		return x.JitterMilliseconds
 	}
 	return 0
 }
@@ -2262,28 +2270,31 @@ func (x *ManagerJoinRequest) GetReason() string {
 }
 
 type NetworkState struct {
-	state           protoimpl.MessageState        `protogen:"open.v1"`
-	NetworkId       string                        `protobuf:"bytes,1,opt,name=network_id,json=networkId,proto3" json:"network_id,omitempty"`
-	OverlayCidr     string                        `protobuf:"bytes,2,opt,name=overlay_cidr,json=overlayCidr,proto3" json:"overlay_cidr,omitempty"`
-	Peers           []*PeerRecord                 `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`
-	Users           []*User                       `protobuf:"bytes,4,rep,name=users,proto3" json:"users,omitempty"`
-	Groups          []*Group                      `protobuf:"bytes,5,rep,name=groups,proto3" json:"groups,omitempty"`
-	Policies        []*Policy                     `protobuf:"bytes,6,rep,name=policies,proto3" json:"policies,omitempty"`
-	Routes          []*Route                      `protobuf:"bytes,7,rep,name=routes,proto3" json:"routes,omitempty"`
-	Budgets         []*TrafficBudget              `protobuf:"bytes,8,rep,name=budgets,proto3" json:"budgets,omitempty"`
-	SetupKeys       []*SetupKey                   `protobuf:"bytes,9,rep,name=setup_keys,json=setupKeys,proto3" json:"setup_keys,omitempty"`
-	Nameservers     []*Nameserver                 `protobuf:"bytes,10,rep,name=nameservers,proto3" json:"nameservers,omitempty"`
-	Zones           []*DNSZone                    `protobuf:"bytes,11,rep,name=zones,proto3" json:"zones,omitempty"`
-	DnsSettings     *DNSSettings                  `protobuf:"bytes,12,opt,name=dns_settings,json=dnsSettings,proto3" json:"dns_settings,omitempty"`
-	Settings        *NetworkSettings              `protobuf:"bytes,13,opt,name=settings,proto3" json:"settings,omitempty"`
-	Assignments     []*RouteAssignment            `protobuf:"bytes,14,rep,name=assignments,proto3" json:"assignments,omitempty"`
-	NextIpOffset    uint32                        `protobuf:"varint,15,opt,name=next_ip_offset,json=nextIpOffset,proto3" json:"next_ip_offset,omitempty"`
-	CommitteeConfig *CommitteeConfig              `protobuf:"bytes,16,opt,name=committee_config,json=committeeConfig,proto3" json:"committee_config,omitempty"`
-	PathFamilies    []*PathFamily                 `protobuf:"bytes,17,rep,name=path_families,json=pathFamilies,proto3" json:"path_families,omitempty"`
-	RoutingDomains  []*RoutingDomainAuthorization `protobuf:"bytes,18,rep,name=routing_domains,json=routingDomains,proto3" json:"routing_domains,omitempty"`
-	ManagerJoins    []*ManagerJoinRequest         `protobuf:"bytes,19,rep,name=manager_joins,json=managerJoins,proto3" json:"manager_joins,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state                    protoimpl.MessageState        `protogen:"open.v1"`
+	NetworkId                string                        `protobuf:"bytes,1,opt,name=network_id,json=networkId,proto3" json:"network_id,omitempty"`
+	OverlayCidr              string                        `protobuf:"bytes,2,opt,name=overlay_cidr,json=overlayCidr,proto3" json:"overlay_cidr,omitempty"`
+	Peers                    []*PeerRecord                 `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`
+	Users                    []*User                       `protobuf:"bytes,4,rep,name=users,proto3" json:"users,omitempty"`
+	Groups                   []*Group                      `protobuf:"bytes,5,rep,name=groups,proto3" json:"groups,omitempty"`
+	Policies                 []*Policy                     `protobuf:"bytes,6,rep,name=policies,proto3" json:"policies,omitempty"`
+	Routes                   []*Route                      `protobuf:"bytes,7,rep,name=routes,proto3" json:"routes,omitempty"`
+	Budgets                  []*TrafficBudget              `protobuf:"bytes,8,rep,name=budgets,proto3" json:"budgets,omitempty"`
+	SetupKeys                []*SetupKey                   `protobuf:"bytes,9,rep,name=setup_keys,json=setupKeys,proto3" json:"setup_keys,omitempty"`
+	Nameservers              []*Nameserver                 `protobuf:"bytes,10,rep,name=nameservers,proto3" json:"nameservers,omitempty"`
+	Zones                    []*DNSZone                    `protobuf:"bytes,11,rep,name=zones,proto3" json:"zones,omitempty"`
+	DnsSettings              *DNSSettings                  `protobuf:"bytes,12,opt,name=dns_settings,json=dnsSettings,proto3" json:"dns_settings,omitempty"`
+	Settings                 *NetworkSettings              `protobuf:"bytes,13,opt,name=settings,proto3" json:"settings,omitempty"`
+	Assignments              []*RouteAssignment            `protobuf:"bytes,14,rep,name=assignments,proto3" json:"assignments,omitempty"`
+	NextIpOffset             uint32                        `protobuf:"varint,15,opt,name=next_ip_offset,json=nextIpOffset,proto3" json:"next_ip_offset,omitempty"`
+	CommitteeConfig          *CommitteeConfig              `protobuf:"bytes,16,opt,name=committee_config,json=committeeConfig,proto3" json:"committee_config,omitempty"`
+	PathFamilies             []*PathFamily                 `protobuf:"bytes,17,rep,name=path_families,json=pathFamilies,proto3" json:"path_families,omitempty"`
+	RoutingDomains           []*RoutingDomainAuthorization `protobuf:"bytes,18,rep,name=routing_domains,json=routingDomains,proto3" json:"routing_domains,omitempty"`
+	ManagerJoins             []*ManagerJoinRequest         `protobuf:"bytes,19,rep,name=manager_joins,json=managerJoins,proto3" json:"manager_joins,omitempty"`
+	ManagerJoinTokenConsumed bool                          `protobuf:"varint,20,opt,name=manager_join_token_consumed,json=managerJoinTokenConsumed,proto3" json:"manager_join_token_consumed,omitempty"`
+	ManagerJoinTokenHash     []byte                        `protobuf:"bytes,21,opt,name=manager_join_token_hash,json=managerJoinTokenHash,proto3" json:"manager_join_token_hash,omitempty"`
+	PendingCommitteeShrink   []*CommitteeMember            `protobuf:"bytes,22,rep,name=pending_committee_shrink,json=pendingCommitteeShrink,proto3" json:"pending_committee_shrink,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *NetworkState) Reset() {
@@ -2449,6 +2460,27 @@ func (x *NetworkState) GetManagerJoins() []*ManagerJoinRequest {
 	return nil
 }
 
+func (x *NetworkState) GetManagerJoinTokenConsumed() bool {
+	if x != nil {
+		return x.ManagerJoinTokenConsumed
+	}
+	return false
+}
+
+func (x *NetworkState) GetManagerJoinTokenHash() []byte {
+	if x != nil {
+		return x.ManagerJoinTokenHash
+	}
+	return nil
+}
+
+func (x *NetworkState) GetPendingCommitteeShrink() []*CommitteeMember {
+	if x != nil {
+		return x.PendingCommitteeShrink
+	}
+	return nil
+}
+
 type StateTransition struct {
 	state                protoimpl.MessageState      `protogen:"open.v1"`
 	Type                 string                      `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
@@ -2475,6 +2507,7 @@ type StateTransition struct {
 	PathFamily           *PathFamily                 `protobuf:"bytes,22,opt,name=path_family,json=pathFamily,proto3" json:"path_family,omitempty"`
 	RoutingDomain        *RoutingDomainAuthorization `protobuf:"bytes,23,opt,name=routing_domain,json=routingDomain,proto3" json:"routing_domain,omitempty"`
 	ManagerJoin          *ManagerJoinRequest         `protobuf:"bytes,24,opt,name=manager_join,json=managerJoin,proto3" json:"manager_join,omitempty"`
+	ManagerJoinTokenHash []byte                      `protobuf:"bytes,25,opt,name=manager_join_token_hash,json=managerJoinTokenHash,proto3" json:"manager_join_token_hash,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
 }
@@ -2673,6 +2706,13 @@ func (x *StateTransition) GetRoutingDomain() *RoutingDomainAuthorization {
 func (x *StateTransition) GetManagerJoin() *ManagerJoinRequest {
 	if x != nil {
 		return x.ManagerJoin
+	}
+	return nil
+}
+
+func (x *StateTransition) GetManagerJoinTokenHash() []byte {
+	if x != nil {
+		return x.ManagerJoinTokenHash
 	}
 	return nil
 }
@@ -4628,7 +4668,7 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\x19quota_enforcement_enabled\x18\x0f \x01(\bR\x17quotaEnforcementEnabled\x12A\n" +
 	"\x1dquota_report_interval_seconds\x18\x10 \x01(\x05R\x1aquotaReportIntervalSeconds\x12,\n" +
 	"\x12default_flow_class\x18\x11 \x01(\tR\x10defaultFlowClass\x12*\n" +
-	"\x11exit_node_enabled\x18\x12 \x01(\bR\x0fexitNodeEnabled\"\xfa\x01\n" +
+	"\x11exit_node_enabled\x18\x12 \x01(\bR\x0fexitNodeEnabled\"\xab\x02\n" +
 	"\bPathSpec\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04kind\x18\x02 \x01(\tR\x04kind\x12!\n" +
@@ -4639,7 +4679,8 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\n" +
 	"confidence\x18\a \x01(\x01R\n" +
 	"confidence\x12\x12\n" +
-	"\x04cost\x18\b \x01(\x04R\x04cost\"\xf7\x02\n" +
+	"\x04cost\x18\b \x01(\x04R\x04cost\x12/\n" +
+	"\x13jitter_milliseconds\x18\t \x01(\x01R\x12jitterMilliseconds\"\xf7\x02\n" +
 	"\x0fRouteAssignment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -4821,7 +4862,7 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\vreviewed_at\x18\n" +
 	" \x01(\tR\n" +
 	"reviewedAt\x12\x16\n" +
-	"\x06reason\x18\v \x01(\tR\x06reason\"\xe0\a\n" +
+	"\x06reason\x18\v \x01(\tR\x06reason\"\xac\t\n" +
 	"\fNetworkState\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\tR\tnetworkId\x12!\n" +
@@ -4844,7 +4885,10 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\x10committee_config\x18\x10 \x01(\v2\x1a.netp2p.v1.CommitteeConfigR\x0fcommitteeConfig\x12:\n" +
 	"\rpath_families\x18\x11 \x03(\v2\x15.netp2p.v1.PathFamilyR\fpathFamilies\x12N\n" +
 	"\x0frouting_domains\x18\x12 \x03(\v2%.netp2p.v1.RoutingDomainAuthorizationR\x0eroutingDomains\x12B\n" +
-	"\rmanager_joins\x18\x13 \x03(\v2\x1d.netp2p.v1.ManagerJoinRequestR\fmanagerJoins\"\xaa\t\n" +
+	"\rmanager_joins\x18\x13 \x03(\v2\x1d.netp2p.v1.ManagerJoinRequestR\fmanagerJoins\x12=\n" +
+	"\x1bmanager_join_token_consumed\x18\x14 \x01(\bR\x18managerJoinTokenConsumed\x125\n" +
+	"\x17manager_join_token_hash\x18\x15 \x01(\fR\x14managerJoinTokenHash\x12T\n" +
+	"\x18pending_committee_shrink\x18\x16 \x03(\v2\x1a.netp2p.v1.CommitteeMemberR\x16pendingCommitteeShrink\"\xe1\t\n" +
 	"\x0fStateTransition\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12)\n" +
 	"\x04peer\x18\x02 \x01(\v2\x15.netp2p.v1.PeerRecordR\x04peer\x12\x1b\n" +
@@ -4876,7 +4920,8 @@ const file_netp2p_v1_netp2p_proto_rawDesc = "" +
 	"\vpath_family\x18\x16 \x01(\v2\x15.netp2p.v1.PathFamilyR\n" +
 	"pathFamily\x12L\n" +
 	"\x0erouting_domain\x18\x17 \x01(\v2%.netp2p.v1.RoutingDomainAuthorizationR\rroutingDomain\x12@\n" +
-	"\fmanager_join\x18\x18 \x01(\v2\x1d.netp2p.v1.ManagerJoinRequestR\vmanagerJoin\"\xb2\x01\n" +
+	"\fmanager_join\x18\x18 \x01(\v2\x1d.netp2p.v1.ManagerJoinRequestR\vmanagerJoin\x125\n" +
+	"\x17manager_join_token_hash\x18\x19 \x01(\fR\x14managerJoinTokenHash\"\xb2\x01\n" +
 	"\vBudgetUsage\x12\x1b\n" +
 	"\tbudget_id\x18\x01 \x01(\tR\bbudgetId\x12\x1f\n" +
 	"\vdaily_bytes\x18\x02 \x01(\x04R\n" +
@@ -5151,54 +5196,55 @@ var file_netp2p_v1_netp2p_proto_depIdxs = []int32{
 	19, // 19: netp2p.v1.NetworkState.path_families:type_name -> netp2p.v1.PathFamily
 	20, // 20: netp2p.v1.NetworkState.routing_domains:type_name -> netp2p.v1.RoutingDomainAuthorization
 	21, // 21: netp2p.v1.NetworkState.manager_joins:type_name -> netp2p.v1.ManagerJoinRequest
-	2,  // 22: netp2p.v1.StateTransition.peer:type_name -> netp2p.v1.PeerRecord
-	13, // 23: netp2p.v1.StateTransition.group:type_name -> netp2p.v1.Group
-	15, // 24: netp2p.v1.StateTransition.policy:type_name -> netp2p.v1.Policy
-	16, // 25: netp2p.v1.StateTransition.route:type_name -> netp2p.v1.Route
-	17, // 26: netp2p.v1.StateTransition.budget:type_name -> netp2p.v1.TrafficBudget
-	8,  // 27: netp2p.v1.StateTransition.setup_key_record:type_name -> netp2p.v1.SetupKey
-	9,  // 28: netp2p.v1.StateTransition.nameserver:type_name -> netp2p.v1.Nameserver
-	11, // 29: netp2p.v1.StateTransition.zone:type_name -> netp2p.v1.DNSZone
-	12, // 30: netp2p.v1.StateTransition.dns_settings:type_name -> netp2p.v1.DNSSettings
-	6,  // 31: netp2p.v1.StateTransition.user:type_name -> netp2p.v1.User
-	3,  // 32: netp2p.v1.StateTransition.settings:type_name -> netp2p.v1.NetworkSettings
-	5,  // 33: netp2p.v1.StateTransition.assignment:type_name -> netp2p.v1.RouteAssignment
-	1,  // 34: netp2p.v1.StateTransition.committee_config:type_name -> netp2p.v1.CommitteeConfig
-	0,  // 35: netp2p.v1.StateTransition.committee:type_name -> netp2p.v1.CommitteeMember
-	24, // 36: netp2p.v1.StateTransition.budget_usage:type_name -> netp2p.v1.BudgetUsage
-	7,  // 37: netp2p.v1.StateTransition.actor:type_name -> netp2p.v1.Actor
-	19, // 38: netp2p.v1.StateTransition.path_family:type_name -> netp2p.v1.PathFamily
-	20, // 39: netp2p.v1.StateTransition.routing_domain:type_name -> netp2p.v1.RoutingDomainAuthorization
-	21, // 40: netp2p.v1.StateTransition.manager_join:type_name -> netp2p.v1.ManagerJoinRequest
-	22, // 41: netp2p.v1.SignedSnapshot.state:type_name -> netp2p.v1.NetworkState
-	0,  // 42: netp2p.v1.SignedSnapshot.committee:type_name -> netp2p.v1.CommitteeMember
-	25, // 43: netp2p.v1.SignedSnapshot.qc:type_name -> netp2p.v1.QuorumCertificate
-	23, // 44: netp2p.v1.SignedSnapshot.transition:type_name -> netp2p.v1.StateTransition
-	1,  // 45: netp2p.v1.SignedSnapshot.committee_config:type_name -> netp2p.v1.CommitteeConfig
-	22, // 46: netp2p.v1.Proposal.state:type_name -> netp2p.v1.NetworkState
-	23, // 47: netp2p.v1.Proposal.transition:type_name -> netp2p.v1.StateTransition
-	22, // 48: netp2p.v1.ClientView.state:type_name -> netp2p.v1.NetworkState
-	23, // 49: netp2p.v1.ClientView.transition:type_name -> netp2p.v1.StateTransition
-	27, // 50: netp2p.v1.CommitteeEnvelope.proposal:type_name -> netp2p.v1.Proposal
-	28, // 51: netp2p.v1.CommitteeEnvelope.vote:type_name -> netp2p.v1.Vote
-	26, // 52: netp2p.v1.CommitteeEnvelope.snapshot:type_name -> netp2p.v1.SignedSnapshot
-	23, // 53: netp2p.v1.CommitteeEnvelope.transition:type_name -> netp2p.v1.StateTransition
-	26, // 54: netp2p.v1.LoginResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
-	2,  // 55: netp2p.v1.LoginResponse.peer:type_name -> netp2p.v1.PeerRecord
-	37, // 56: netp2p.v1.SyncRequest.admissions:type_name -> netp2p.v1.AdmissionReport
-	26, // 57: netp2p.v1.SyncResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
-	34, // 58: netp2p.v1.SyncResponse.heartbeat:type_name -> netp2p.v1.SyncHeartbeat
-	35, // 59: netp2p.v1.SyncResponse.error:type_name -> netp2p.v1.SyncError
-	23, // 60: netp2p.v1.AdminRequest.transition:type_name -> netp2p.v1.StateTransition
-	26, // 61: netp2p.v1.AdminResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
-	40, // 62: netp2p.v1.PresenceGossip.observations:type_name -> netp2p.v1.PresenceObservation
-	42, // 63: netp2p.v1.LinkGossip.observations:type_name -> netp2p.v1.LinkObservation
-	47, // 64: netp2p.v1.QuotaReport.increments:type_name -> netp2p.v1.BudgetIncrement
-	65, // [65:65] is the sub-list for method output_type
-	65, // [65:65] is the sub-list for method input_type
-	65, // [65:65] is the sub-list for extension type_name
-	65, // [65:65] is the sub-list for extension extendee
-	0,  // [0:65] is the sub-list for field type_name
+	0,  // 22: netp2p.v1.NetworkState.pending_committee_shrink:type_name -> netp2p.v1.CommitteeMember
+	2,  // 23: netp2p.v1.StateTransition.peer:type_name -> netp2p.v1.PeerRecord
+	13, // 24: netp2p.v1.StateTransition.group:type_name -> netp2p.v1.Group
+	15, // 25: netp2p.v1.StateTransition.policy:type_name -> netp2p.v1.Policy
+	16, // 26: netp2p.v1.StateTransition.route:type_name -> netp2p.v1.Route
+	17, // 27: netp2p.v1.StateTransition.budget:type_name -> netp2p.v1.TrafficBudget
+	8,  // 28: netp2p.v1.StateTransition.setup_key_record:type_name -> netp2p.v1.SetupKey
+	9,  // 29: netp2p.v1.StateTransition.nameserver:type_name -> netp2p.v1.Nameserver
+	11, // 30: netp2p.v1.StateTransition.zone:type_name -> netp2p.v1.DNSZone
+	12, // 31: netp2p.v1.StateTransition.dns_settings:type_name -> netp2p.v1.DNSSettings
+	6,  // 32: netp2p.v1.StateTransition.user:type_name -> netp2p.v1.User
+	3,  // 33: netp2p.v1.StateTransition.settings:type_name -> netp2p.v1.NetworkSettings
+	5,  // 34: netp2p.v1.StateTransition.assignment:type_name -> netp2p.v1.RouteAssignment
+	1,  // 35: netp2p.v1.StateTransition.committee_config:type_name -> netp2p.v1.CommitteeConfig
+	0,  // 36: netp2p.v1.StateTransition.committee:type_name -> netp2p.v1.CommitteeMember
+	24, // 37: netp2p.v1.StateTransition.budget_usage:type_name -> netp2p.v1.BudgetUsage
+	7,  // 38: netp2p.v1.StateTransition.actor:type_name -> netp2p.v1.Actor
+	19, // 39: netp2p.v1.StateTransition.path_family:type_name -> netp2p.v1.PathFamily
+	20, // 40: netp2p.v1.StateTransition.routing_domain:type_name -> netp2p.v1.RoutingDomainAuthorization
+	21, // 41: netp2p.v1.StateTransition.manager_join:type_name -> netp2p.v1.ManagerJoinRequest
+	22, // 42: netp2p.v1.SignedSnapshot.state:type_name -> netp2p.v1.NetworkState
+	0,  // 43: netp2p.v1.SignedSnapshot.committee:type_name -> netp2p.v1.CommitteeMember
+	25, // 44: netp2p.v1.SignedSnapshot.qc:type_name -> netp2p.v1.QuorumCertificate
+	23, // 45: netp2p.v1.SignedSnapshot.transition:type_name -> netp2p.v1.StateTransition
+	1,  // 46: netp2p.v1.SignedSnapshot.committee_config:type_name -> netp2p.v1.CommitteeConfig
+	22, // 47: netp2p.v1.Proposal.state:type_name -> netp2p.v1.NetworkState
+	23, // 48: netp2p.v1.Proposal.transition:type_name -> netp2p.v1.StateTransition
+	22, // 49: netp2p.v1.ClientView.state:type_name -> netp2p.v1.NetworkState
+	23, // 50: netp2p.v1.ClientView.transition:type_name -> netp2p.v1.StateTransition
+	27, // 51: netp2p.v1.CommitteeEnvelope.proposal:type_name -> netp2p.v1.Proposal
+	28, // 52: netp2p.v1.CommitteeEnvelope.vote:type_name -> netp2p.v1.Vote
+	26, // 53: netp2p.v1.CommitteeEnvelope.snapshot:type_name -> netp2p.v1.SignedSnapshot
+	23, // 54: netp2p.v1.CommitteeEnvelope.transition:type_name -> netp2p.v1.StateTransition
+	26, // 55: netp2p.v1.LoginResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
+	2,  // 56: netp2p.v1.LoginResponse.peer:type_name -> netp2p.v1.PeerRecord
+	37, // 57: netp2p.v1.SyncRequest.admissions:type_name -> netp2p.v1.AdmissionReport
+	26, // 58: netp2p.v1.SyncResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
+	34, // 59: netp2p.v1.SyncResponse.heartbeat:type_name -> netp2p.v1.SyncHeartbeat
+	35, // 60: netp2p.v1.SyncResponse.error:type_name -> netp2p.v1.SyncError
+	23, // 61: netp2p.v1.AdminRequest.transition:type_name -> netp2p.v1.StateTransition
+	26, // 62: netp2p.v1.AdminResponse.snapshot:type_name -> netp2p.v1.SignedSnapshot
+	40, // 63: netp2p.v1.PresenceGossip.observations:type_name -> netp2p.v1.PresenceObservation
+	42, // 64: netp2p.v1.LinkGossip.observations:type_name -> netp2p.v1.LinkObservation
+	47, // 65: netp2p.v1.QuotaReport.increments:type_name -> netp2p.v1.BudgetIncrement
+	66, // [66:66] is the sub-list for method output_type
+	66, // [66:66] is the sub-list for method input_type
+	66, // [66:66] is the sub-list for extension type_name
+	66, // [66:66] is the sub-list for extension extendee
+	0,  // [0:66] is the sub-list for field type_name
 }
 
 func init() { file_netp2p_v1_netp2p_proto_init() }

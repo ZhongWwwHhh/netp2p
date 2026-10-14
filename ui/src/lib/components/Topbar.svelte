@@ -11,6 +11,7 @@
   let password = $state('');
   let confirmation = $state('');
   let error = $state('');
+  let { onMenu }: { onMenu?: () => void } = $props();
 
   async function reload() {
     refreshing = true;
@@ -45,15 +46,16 @@
   });
 </script>
 
-<header class="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3">
-  <div class="flex items-center gap-3">
-    <h2 class="text-sm font-medium text-slate-900">{routeTitle(router.path)}</h2>
+<header class="flex min-w-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
+  <div class="flex min-w-0 items-center gap-2">
+    <button aria-label="Open navigation" class="btn-ghost px-2 lg:hidden" onclick={onMenu}>☰</button>
+    <h2 class="truncate text-sm font-medium text-slate-900">{routeTitle(router.path)}</h2>
     {#if network.snapshot}
-      <span class="text-xs text-slate-500">height {network.snapshot.height}</span>
+      <span class="hidden text-xs text-slate-500 sm:inline">height {network.snapshot.height}</span>
     {/if}
     {#if network.alerts.length > 0}
       <button
-        class="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-200"
+        class="hidden items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 hover:bg-amber-200 sm:inline-flex"
         title={network.alerts.map((alert) => alert.summary).join('\n')}
         onclick={() => navigate('/diagnostics')}
       >
@@ -61,17 +63,17 @@
       </button>
     {/if}
   </div>
-  <div class="flex items-center gap-3">
+  <div class="flex shrink-0 items-center gap-2 sm:gap-3">
     {#if network.lastRefresh}
-      <span class="text-xs text-slate-500">refreshed {relativeTime(network.lastRefresh)}</span>
+      <span class="hidden text-xs text-slate-500 md:inline">refreshed {relativeTime(network.lastRefresh)}</span>
     {/if}
-    <button class="btn-secondary" onclick={reload} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>
-    <div class="flex items-center gap-2 border-l border-slate-200 pl-3">
-      <div class="text-right">
+    <button class="btn-secondary hidden sm:inline-flex" onclick={reload} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>
+    <div class="flex items-center gap-2 border-l border-slate-200 pl-3 sm:border-l sm:pl-3">
+      <div class="hidden text-right sm:block">
         <p class="text-xs font-medium text-slate-700">{session.identity?.name || session.identity?.email || 'Admin'}</p>
         <p class="text-xs text-slate-500">{session.identity?.email || (session.bootstrap?.peerId.slice(0, 10) ?? '')}</p>
       </div>
-      <button class="btn-ghost" onclick={() => (changingPassword = true)}>Password</button>
+      <button class="btn-ghost hidden sm:inline-flex" onclick={() => (changingPassword = true)}>Password</button>
       <button class="btn-ghost" onclick={() => void logout()}>Sign out</button>
     </div>
   </div>

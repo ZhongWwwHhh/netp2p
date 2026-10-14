@@ -12,8 +12,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -53,8 +56,38 @@ type BootstrapOIDC struct {
 	RedirectURI           string   `json:"redirectUri,omitempty"`
 }
 
+// ScopedSnapshot is the least state a limited console user needs: their own
+// peers and the policy, route, and DNS objects that apply to those peers. It
+// deliberately does not reuse SignedSnapshot, so a scoped response cannot leak
+// the full certified network.
+type ScopedSnapshot struct {
+	NetworkID   string                `json:"networkId"`
+	OverlayCIDR string                `json:"overlayCidr,omitempty"`
+	Epoch       uint64                `json:"epoch"`
+	Height      uint64                `json:"height"`
+	User        model.User            `json:"user"`
+	Peers       []model.PeerRecord    `json:"peers"`
+	Groups      []model.Group         `json:"groups"`
+	Policies    []model.Policy        `json:"policies"`
+	Routes      []model.Route         `json:"routes"`
+	Nameservers []model.Nameserver    `json:"nameservers"`
+	Zones       []model.DNSZone       `json:"zones"`
+	DNSSettings model.DNSSettings     `json:"dnsSettings"`
+	Settings    model.NetworkSettings `json:"settings"`
+}
+
 type TransitionRequest struct {
 	Transition model.StateTransition `json:"transition"`
+}
+
+func normalizeTransitionForSubmit(transition model.StateTransition, now time.Time) model.StateTransition {
+	if transition.Type == bft.TransitionUpdateAssignment && transition.Assignment != nil &&
+		transition.Assignment.UpdatedAt.IsZero() {
+		assignment := *transition.Assignment
+		assignment.UpdatedAt = now.UTC()
+		transition.Assignment = &assignment
+	}
+	return transition
 }
 
 type SetupKeyCreateRequest struct {
@@ -81,6 +114,8 @@ type CommitteeStatus struct {
 type ReadinessStatus struct {
 	Status          string   `json:"status"`
 	Height          uint64   `json:"height"`
+	KnownHeight     uint64   `json:"knownHeight,omitempty"`
+	HeightLag       uint64   `json:"heightLag,omitempty"`
 	CommitteeOnline int      `json:"committeeOnline"`
 	CommitteeSize   int      `json:"committeeSize"`
 	QuorumSize      int      `json:"quorumSize"`
@@ -105,6 +140,10 @@ type Config struct {
 	Authenticator Authenticator
 	// OIDC is advertised to the browser console for PKCE login.
 	OIDC *BootstrapOIDC
+	// SessionSyncer exchanges manager-local web-session records with the other
+	// committee members. It keeps round-robin console cookies valid and makes
+	// logout revocation global without writing interactive logins into BFT.
+	SessionSyncer SessionSyncer
 	// Readiness overrides the default manager/node-derived readiness signal.
 	Readiness ReadinessFunc
 	// RoutingStatus supplies signed epochs, manager telemetry, demand, and FEC
@@ -119,21 +158,29 @@ type Authenticator interface {
 	Authenticate(ctx context.Context, token string) (auth.Identity, error)
 }
 
+type SessionSyncer interface {
+	Sync(ctx context.Context) error
+}
+
 type Server struct {
-	manager               *manager.Manager
-	node                  *p2p.Node
-	config                Config
-	httpHost              *libp2phttp.Host
-	publicKey             []byte
-	addresses             []string
-	bootstrap             []byte
-	httpServer            *http.Server
-	oidcProxy             *oidcProxy
-	accounts              accountDirectory
-	authStore             *store.Store
-	sessions              *auth.SessionManager
-	readinessFunc         ReadinessFunc
-	dummyPasswordVerifier []byte
+	manager                    *manager.Manager
+	node                       *p2p.Node
+	config                     Config
+	httpHost                   *libp2phttp.Host
+	publicKey                  []byte
+	addresses                  []string
+	bootstrap                  []byte
+	httpServer                 *http.Server
+	oidcProxy                  *oidcProxy
+	accounts                   accountDirectory
+	authStore                  *store.Store
+	sessions                   *auth.SessionManager
+	sessionSyncer              SessionSyncer
+	sessionReplicationDegraded atomic.Bool
+	readinessFunc              ReadinessFunc
+	dummyPasswordVerifier      []byte
+	loginLimiter               *loginRateLimiter
+	loginLimiterOnce           sync.Once
 }
 
 func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server, error) {
@@ -155,6 +202,10 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 	if config.AuthStore == nil {
 		return nil, fmt.Errorf("auth store is required")
 	}
+	oidcProxy, err := newOIDCProxy(config.OIDC)
+	if err != nil {
+		return nil, err
+	}
 	server := &Server{
 		manager:               manager,
 		node:                  node,
@@ -162,12 +213,31 @@ func NewServer(node *p2p.Node, manager *manager.Manager, config Config) (*Server
 		httpHost:              &libp2phttp.Host{StreamHost: node.Host},
 		publicKey:             publicKey,
 		addresses:             addresses,
-		oidcProxy:             newOIDCProxy(config.OIDC),
+		oidcProxy:             oidcProxy,
 		accounts:              manager,
 		authStore:             config.AuthStore,
 		sessions:              sessions,
+		sessionSyncer:         config.SessionSyncer,
 		readinessFunc:         config.Readiness,
 		dummyPasswordVerifier: model.HashPassword("netp2p-dummy-verifier"),
+		loginLimiter:          newLoginRateLimiter(),
+	}
+	if server.oidcProxy != nil && config.Authenticator != nil {
+		server.oidcProxy.recordSession = func(ctx context.Context, token string, expires time.Time) error {
+			identity, authErr := config.Authenticator.Authenticate(ctx, token)
+			if authErr != nil {
+				return authErr
+			}
+			if err := server.authStore.RecordWebSession(store.WebSession{
+				ID: auth.ExternalSessionID(token), UserID: identity.UserID,
+				IssuedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+				ExpiresAt: expires.UTC().Format(time.RFC3339Nano),
+			}); err != nil {
+				return err
+			}
+			server.syncWebSessionsWithRetry()
+			return nil
+		}
 	}
 	server.httpHost.SetHTTPHandler(p2p.WebAPIProtocol, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		server.handleAPI(writer, request)
@@ -222,6 +292,9 @@ func (server *Server) HTTPHost() *libp2phttp.Host {
 }
 
 func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Request) {
+	if !server.validateMutationOrigin(writer, request) {
+		return
+	}
 	if server.handlePublicAuth(writer, request) {
 		return
 	}
@@ -238,8 +311,16 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			"permissions": auth.Permissions(identity.Role),
 		})
 	case request.Method == http.MethodGet && path == "/api/v1/snapshot":
-		server.handleSnapshot(writer, request)
+		if !identity.Allows(auth.ModulePeers, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
+		server.handleSnapshot(writer, request, identity)
 	case request.Method == http.MethodGet && path == "/api/v1/presence":
+		if !identity.Allows(auth.ModulePresence, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
 		writeJSON(writer, http.StatusOK, map[string]any{"observations": server.manager.Presence()})
 	case request.Method == http.MethodGet && path == "/api/v1/users":
 		if !identity.Allows(auth.ModuleUsers, auth.OpRead) {
@@ -274,6 +355,10 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{"events": events})
 	case request.Method == http.MethodGet && path == "/api/v1/activity":
+		if !identity.Allows(auth.ModuleEvents, auth.OpRead) {
+			writeError(writer, http.StatusForbidden, "forbidden")
+			return
+		}
 		server.handleActivity(writer, request)
 	case request.Method == http.MethodGet && path == "/api/v1/events":
 		if !identity.Allows(auth.ModuleEvents, auth.OpRead) {
@@ -431,11 +516,16 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 			writeError(writer, http.StatusForbidden, err.Error())
 			return
 		}
+		body.Transition = normalizeTransitionForSubmit(body.Transition, time.Now())
 		// The actor is derived from the authenticated identity, never from the
 		// request body, so a caller cannot forge an audit identity.
 		snapshot, err := server.manager.SubmitAs(body.Transition, auth.ActorOf(identity))
 		if err != nil {
 			writeError(writer, http.StatusConflict, err.Error())
+			return
+		}
+		if err := server.revokeSessionsForTransition(body.Transition); err != nil {
+			writeError(writer, http.StatusInternalServerError, "cannot revoke affected sessions")
 			return
 		}
 		if err := bft.ValidateSnapshot(snapshot); err != nil {
@@ -451,8 +541,13 @@ func (server *Server) handleAPI(writer http.ResponseWriter, request *http.Reques
 // handleSnapshot serves the latest certified state, or a historical height when
 // ?height= is given. Historical lookups are how the console inspects the
 // decision log without trusting any single manager's memory.
-func (server *Server) handleSnapshot(writer http.ResponseWriter, request *http.Request) {
+func (server *Server) handleSnapshot(writer http.ResponseWriter, request *http.Request, identity auth.Identity) {
+	fullState := canReadFullSnapshot(identity)
 	if raw := request.URL.Query().Get("height"); raw != "" {
+		if !fullState {
+			writeError(writer, http.StatusForbidden, "historical snapshots require full-state permission")
+			return
+		}
 		height, err := strconv.ParseUint(raw, 10, 64)
 		if err != nil {
 			writeError(writer, http.StatusBadRequest, "invalid height")
@@ -464,6 +559,10 @@ func (server *Server) handleSnapshot(writer http.ResponseWriter, request *http.R
 			return
 		}
 		writeJSON(writer, http.StatusOK, model.ClientSnapshot(snapshot))
+		return
+	}
+	if !fullState {
+		writeJSON(writer, http.StatusOK, scopedSnapshot(server.accounts.Snapshot(), identity))
 		return
 	}
 	snapshot, ok := server.manager.LatestSnapshot()
@@ -501,6 +600,152 @@ func (server *Server) handleActivity(writer http.ResponseWriter, request *http.R
 		entries[index] = model.ClientSnapshot(entries[index])
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"entries": entries})
+}
+
+func canReadFullSnapshot(identity auth.Identity) bool {
+	return identity.Allows(auth.ModulePeers, auth.OpRead) &&
+		identity.Allows(auth.ModuleEvents, auth.OpRead)
+}
+
+func scopedSnapshot(snapshot model.SignedSnapshot, identity auth.Identity) ScopedSnapshot {
+	subject := identity.UserID
+	if subject == "" {
+		subject = identity.Subject
+	}
+	result := ScopedSnapshot{
+		NetworkID: snapshot.State.NetworkID, OverlayCIDR: snapshot.State.OverlayCIDR,
+		Epoch: snapshot.Epoch, Height: snapshot.Height,
+	}
+	relevantGroups := make(map[string]struct{})
+	addGroups := func(groups []string) {
+		for _, group := range groups {
+			if group != "" {
+				relevantGroups[group] = struct{}{}
+			}
+		}
+	}
+
+	for _, user := range snapshot.State.Users {
+		if user.ID == subject {
+			result.User = publicUsers([]model.User{user})[0]
+			addGroups(user.AutoGroups)
+			break
+		}
+	}
+	for _, peer := range snapshot.State.Peers {
+		if peer.UserID == subject {
+			result.Peers = append(result.Peers, peer)
+			addGroups(peer.Groups)
+		}
+	}
+	ownPeerIDs := make(map[string]struct{}, len(result.Peers))
+	for _, peer := range result.Peers {
+		ownPeerIDs[peer.PeerID] = struct{}{}
+	}
+	for _, group := range snapshot.State.Groups {
+		matchesUser := containsString(group.UserIDs, subject)
+		matchesPeer := false
+		for peerID := range ownPeerIDs {
+			if containsString(group.PeerIDs, peerID) {
+				matchesPeer = true
+				break
+			}
+		}
+		if !matchesUser && !matchesPeer {
+			continue
+		}
+		relevantGroups[group.ID] = struct{}{}
+		scoped := group
+		scoped.UserIDs = nil
+		scoped.PeerIDs = nil
+		result.Groups = append(result.Groups, scoped)
+	}
+	for _, policy := range snapshot.State.Policies {
+		if intersectsGroups(policy.SourceGroups, relevantGroups) ||
+			intersectsGroups(policy.DestinationGroups, relevantGroups) {
+			result.Policies = append(result.Policies, policy)
+		}
+	}
+	for _, route := range snapshot.State.Routes {
+		if intersectsGroups([]string{route.RoutingGroup}, relevantGroups) ||
+			intersectsGroups(route.DistributionGroup, relevantGroups) {
+			result.Routes = append(result.Routes, route)
+		}
+	}
+	for _, nameserver := range snapshot.State.Nameservers {
+		if len(nameserver.Groups) == 0 || intersectsGroups(nameserver.Groups, relevantGroups) {
+			result.Nameservers = append(result.Nameservers, nameserver)
+		}
+	}
+	for _, zone := range snapshot.State.Zones {
+		if len(zone.Groups) == 0 || intersectsGroups(zone.Groups, relevantGroups) {
+			result.Zones = append(result.Zones, zone)
+		}
+	}
+	if len(snapshot.State.DNSSettings.Groups) == 0 ||
+		intersectsGroups(snapshot.State.DNSSettings.Groups, relevantGroups) {
+		result.DNSSettings = snapshot.State.DNSSettings
+	}
+	result.Settings = snapshot.State.Settings
+	return result
+}
+
+func intersectsGroups(groups []string, relevant map[string]struct{}) bool {
+	for _, group := range groups {
+		if _, ok := relevant[group]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func (server *Server) validateMutationOrigin(writer http.ResponseWriter, request *http.Request) bool {
+	switch request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	}
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	if origin == "" {
+		if _, hasCookie := sessionToken(request); hasCookie {
+			writeError(writer, http.StatusForbidden, "missing same-origin header")
+			return false
+		}
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || parsed.User != nil ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		!strings.EqualFold(parsed.Host, request.Host) {
+		writeError(writer, http.StatusForbidden, "cross-origin request rejected")
+		return false
+	}
+	return true
+}
+
+func (server *Server) revokeSessionsForTransition(transition model.StateTransition) error {
+	target := transition.TargetID
+	if target == "" && transition.User != nil {
+		target = transition.User.ID
+	}
+	if target == "" {
+		return nil
+	}
+	switch transition.Type {
+	case bft.TransitionUpdateUserCredentials, bft.TransitionUpdateUserRole,
+		bft.TransitionSetUserBlocked, bft.TransitionRemoveUser:
+		return server.authStore.RevokeUserWebSessions(target, time.Now())
+	default:
+		return nil
+	}
 }
 
 // AuditEvent is the authenticated decision-log entry exposed to the console.
@@ -723,6 +968,14 @@ func (server *Server) readinessFromManager() ReadinessStatus {
 
 	snapshot, hasSnapshot := server.manager.LatestSnapshot()
 	status.Height = server.manager.Height()
+	status.KnownHeight = server.manager.KnownHeight()
+	if status.KnownHeight > status.Height {
+		status.HeightLag = status.KnownHeight - status.Height
+		status.Reasons = append(status.Reasons, fmt.Sprintf(
+			"certified height is behind the committee: local %d, known %d",
+			status.Height, status.KnownHeight,
+		))
+	}
 	status.LedgerReady = hasSnapshot && snapshot.Height > 0 && snapshot.Height == status.Height
 	if !status.LedgerReady {
 		if status.Height == 0 {
@@ -760,7 +1013,7 @@ func (server *Server) readinessFromManager() ReadinessStatus {
 	}
 
 	status.Degraded = !status.LedgerReady || status.QuorumSize <= 0 ||
-		status.CommitteeOnline < status.QuorumSize
+		status.CommitteeOnline < status.QuorumSize || status.HeightLag > 0
 	if status.Degraded {
 		status.Status = "degraded"
 	} else {
@@ -771,7 +1024,8 @@ func (server *Server) readinessFromManager() ReadinessStatus {
 
 func readinessIsReady(status ReadinessStatus) bool {
 	return !status.Degraded && status.LedgerReady &&
-		status.QuorumSize > 0 && status.CommitteeOnline >= status.QuorumSize
+		status.QuorumSize > 0 && status.CommitteeOnline >= status.QuorumSize &&
+		status.HeightLag == 0
 }
 
 func (server *Server) BootstrapHandler() http.Handler {
@@ -842,10 +1096,7 @@ func hasFileExtension(path string) bool {
 // admin token is always accepted as break-glass; any other token is delegated
 // to the configured SSO verifier.
 func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) {
-	token, ok := bearerToken(request)
-	if !ok {
-		token, ok = sessionToken(request)
-	}
+	token, ok := requestSessionToken(request)
 	if !ok {
 		return auth.Identity{}, false
 	}
@@ -853,11 +1104,11 @@ func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) 
 		subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) == 1 {
 		return auth.BreakGlass(), true
 	}
+	identity, persisted := server.validPersistedSession(token, time.Now())
+	if !persisted {
+		return auth.Identity{}, false
+	}
 	if strings.HasPrefix(token, auth.LocalSessionPrefix) {
-		identity, err := server.sessions.Verify(token, time.Now())
-		if err != nil {
-			return auth.Identity{}, false
-		}
 		issuedAt, err := server.sessions.IssuedAt(token)
 		if err != nil {
 			return auth.Identity{}, false
@@ -879,13 +1130,88 @@ func (server *Server) authenticate(request *http.Request) (auth.Identity, bool) 
 		}
 		return auth.Identity{}, false
 	}
-	if server.config.Authenticator != nil {
-		identity, err := server.config.Authenticator.Authenticate(request.Context(), token)
-		if err == nil && identity.Role != "" {
-			return identity, true
+	return identity, true
+}
+
+func (server *Server) validPersistedSession(token string, now time.Time) (auth.Identity, bool) {
+	if server.authStore == nil {
+		return auth.Identity{}, false
+	}
+	if strings.HasPrefix(token, auth.LocalSessionPrefix) {
+		identity, err := server.sessions.Verify(token, now)
+		if err != nil {
+			return auth.Identity{}, false
+		}
+		sessionID, err := server.sessions.SessionID(token)
+		if err != nil {
+			return auth.Identity{}, false
+		}
+		if !server.persistedSessionIsValid(sessionID, identity.UserID, now) {
+			// A valid signed cookie can reach a manager that missed the login
+			// broadcast, for example after a restart. Pull the committee
+			// projection once before rejecting; this also fetches revocations.
+			if server.sessionSyncer == nil || server.syncWebSessions() != nil {
+				return auth.Identity{}, false
+			}
+			if !server.persistedSessionIsValid(sessionID, identity.UserID, now) {
+				return auth.Identity{}, false
+			}
+		}
+		return identity, true
+	}
+	if server.config.Authenticator == nil {
+		return auth.Identity{}, false
+	}
+	identity, err := server.config.Authenticator.Authenticate(context.Background(), token)
+	if err != nil || identity.Role == "" {
+		return auth.Identity{}, false
+	}
+	if !server.persistedSessionIsValid(auth.ExternalSessionID(token), identity.UserID, time.Now()) {
+		if server.sessionSyncer == nil || server.syncWebSessions() != nil {
+			return auth.Identity{}, false
+		}
+		if !server.persistedSessionIsValid(auth.ExternalSessionID(token), identity.UserID, time.Now()) {
+			return auth.Identity{}, false
 		}
 	}
-	return auth.Identity{}, false
+	return identity, true
+}
+
+func (server *Server) persistedSessionIsValid(sessionID, userID string, now time.Time) bool {
+	session, found, err := server.authStore.WebSession(sessionID)
+	if err != nil || !found || session.UserID != userID || session.RevokedAt != "" {
+		return false
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, session.ExpiresAt)
+	return err == nil && !now.UTC().After(expiresAt)
+}
+
+func (server *Server) revokeSessionToken(token string, now time.Time) error {
+	if strings.HasPrefix(token, auth.LocalSessionPrefix) {
+		sessionID, err := server.sessions.SessionID(token)
+		if err != nil {
+			return err
+		}
+		if err := server.authStore.RevokeWebSession(sessionID, now); err != nil {
+			return err
+		}
+		return server.syncWebSessions()
+	}
+	if server.config.Authenticator == nil {
+		return nil
+	}
+	if err := server.authStore.RevokeWebSession(auth.ExternalSessionID(token), now); err != nil {
+		return err
+	}
+	server.syncWebSessionsWithRetry()
+	return nil
+}
+
+func requestSessionToken(request *http.Request) (string, bool) {
+	if token, ok := bearerToken(request); ok {
+		return token, true
+	}
+	return sessionToken(request)
 }
 
 func sessionToken(request *http.Request) (string, bool) {

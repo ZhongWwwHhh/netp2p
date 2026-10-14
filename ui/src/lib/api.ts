@@ -1,4 +1,4 @@
-import { apiClient } from './libp2p';
+import { apiClient } from './http';
 import type {
   ActivityEntry, AdmissionReport, Alert, AuditEvent, Bootstrap, Budget, Diagnostics, Presence, RouteAssignment,
   DemandSample, EdgeTelemetry, FECDiagnostics, ManagerCapacityStatus, PathFamily, RoutingDomain, RoutingEpoch,
@@ -13,7 +13,6 @@ export interface AssignmentsView {
 }
 
 export interface ApiClient {
-  peerId: { toString(): string };
   setToken(value: string): void;
   stop(): Promise<void>;
   snapshot(): Promise<Snapshot>;

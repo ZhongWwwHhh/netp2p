@@ -2,6 +2,7 @@ package wire_test
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 	"time"
 
@@ -94,6 +95,11 @@ func sampleState() model.NetworkState {
 			ListenAddr: "/ip4/0.0.0.0/udp/4101/webrtc-direct", PublicKey: []byte{4, 5, 6},
 			RequestedAt: "2026-01-01T00:00:00Z", Status: model.ManagerJoinPending,
 		}},
+		PendingCommitteeShrink: []model.CommitteeMember{{
+			ID: "manager-1", PeerID: "peer-manager-1",
+			Address: "/dns4/manager-1.netp2p.example/udp/4001/quic-v1", PublicKey: []byte{7, 8, 9},
+			ForwardingEnabled: true,
+		}},
 		NextIPOffset:    3,
 		CommitteeConfig: model.CommitteeConfig{Threshold: 3, Size: 4, GroupPublicKey: []byte{9, 9}, CommitteeEpoch: 1},
 	}
@@ -120,6 +126,9 @@ func TestNetworkStateRoundTripIsDeterministic(t *testing.T) {
 	reEncoded := deterministic(t, wire.NetworkStateToProto(roundTripped))
 	if !bytes.Equal(encoded, reEncoded) {
 		t.Fatalf("protobuf round trip changed the deterministic encoding")
+	}
+	if !reflect.DeepEqual(state, roundTripped) {
+		t.Fatalf("protobuf round trip changed network state: got %#v want %#v", roundTripped, state)
 	}
 }
 
@@ -175,8 +184,11 @@ func TestControlMessagesRoundTrip(t *testing.T) {
 
 func TestCommitteeScaleFieldsRoundTrip(t *testing.T) {
 	state := sampleState()
+	state.ManagerJoinTokenHash = []byte{1, 2, 3}
+	state.ManagerJoinTokenConsumed = true
 	transition := model.StateTransition{
-		Type: "submit_manager_join",
+		Type:                 "rotate_manager_join_token",
+		ManagerJoinTokenHash: []byte{4, 5, 6},
 		PathFamily: &model.PathFamily{
 			ID: "family-1", Kind: model.PathKindViaManager, ManagerHops: []string{"m1"},
 			SourceGroups: []string{"clients"}, DestinationScopes: []string{"10.0.0.0/24"},
@@ -203,7 +215,8 @@ func TestCommitteeScaleFieldsRoundTrip(t *testing.T) {
 	gotState := wire.NetworkStateFromProto(&restoredState)
 	if len(gotState.PathFamilies) != 1 || gotState.PathFamilies[0].ID != "family-1" ||
 		len(gotState.RoutingDomains) != 1 || gotState.RoutingDomains[0].ID != "domain-1" ||
-		len(gotState.ManagerJoins) != 1 || gotState.ManagerJoins[0].ManagerID != "manager-4" {
+		len(gotState.ManagerJoins) != 1 || gotState.ManagerJoins[0].ManagerID != "manager-4" ||
+		!bytes.Equal(gotState.ManagerJoinTokenHash, []byte{1, 2, 3}) || !gotState.ManagerJoinTokenConsumed {
 		t.Fatalf("certified scale fields were lost over protobuf: %#v", gotState)
 	}
 
@@ -212,7 +225,7 @@ func TestCommitteeScaleFieldsRoundTrip(t *testing.T) {
 	gotTransition := wire.StateTransitionFromProto(&restoredTransition)
 	if gotTransition.PathFamily == nil || gotTransition.PathFamily.ID != "family-1" ||
 		gotTransition.Domain == nil || gotTransition.Domain.ID != "domain-1" ||
-		gotTransition.ManagerJoin == nil || gotTransition.ManagerJoin.ManagerID != "manager-4" {
+		!bytes.Equal(gotTransition.ManagerJoinTokenHash, []byte{4, 5, 6}) {
 		t.Fatalf("committee transition fields were lost over protobuf: %#v", gotTransition)
 	}
 }

@@ -14,9 +14,15 @@ Tagging `vX.Y.Z` triggers the release workflow to run tests and publish:
 
 Both images support `linux/amd64` and `linux/arm64`. The release version is injected into binaries, UI metadata, package metadata, and image labels.
 
+The CycloneDX SBOM is generated from the source tree, not from local build
+scratch directories. Generated artifacts such as `bin/`, `dist/`, `deploy/`,
+`tmp/`, `ui/node_modules/`, and the embedded web bundle are excluded from the
+source scan. `SHA256SUMS` names the exact artifacts for the tagged release
+rather than every file that happens to remain in a local `dist/` directory.
+
 ## Pre-tag checklist
 
-1. `main` CI is green: vet, Go unit/race tests, userspace E2E, UI build/tests, Linux package smoke test, Windows tests/MSI.
+1. `main` CI is green: vet, Go unit/race tests, userspace E2E, UI build/tests, OpenAPI lint, Linux package smoke test, Windows tests/MSI.
 2. Version, protocol compatibility, and migration notes are reviewed.
 3. Release notes list security changes, API additions, planned versus implemented features, upgrade rules, and rollback.
 4. Ansible digest variables are ready to update after publication.

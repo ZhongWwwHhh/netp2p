@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // tempForwardingFile returns a writable stand-in for the ip_forward sysctl so
@@ -94,12 +96,16 @@ func TestReconcileInstallsMasqueradeForwardingRules(t *testing.T) {
 	joined := strings.Join(reconciler.Commands(), "\n")
 	for _, want := range []string{
 		"net.ipv4.ip_forward=1",
+		"iptables -t nat -N NETP2P_SNAT",
 		"iptables -t nat -A NETP2P_SNAT -s 100.64.0.0/24 -d 10.10.0.0/16 -j MASQUERADE",
 		"iptables -A NETP2P_FORWARD -s 100.64.0.0/24 -d 10.10.0.0/16 -j ACCEPT",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in commands:\n%s", want, joined)
 		}
+	}
+	if strings.Contains(joined, "iptables -N NETP2P_SNAT") {
+		t.Fatalf("SNAT chain was created outside the nat table:\n%s", joined)
 	}
 }
 
@@ -117,6 +123,55 @@ func TestReconcileIsIdempotent(t *testing.T) {
 	}
 	if len(runner.lines()) != before {
 		t.Fatalf("idempotent reconcile ran extra commands: %v", runner.lines()[before:])
+	}
+}
+
+type blockingChainRunner struct {
+	entered     chan struct{}
+	release     chan struct{}
+	snatCreated atomic.Bool
+}
+
+func (runner *blockingChainRunner) run(name string, args ...string) error {
+	line := strings.Join(append([]string{name}, args...), " ")
+	if line == "iptables -N NETP2P_FORWARD" {
+		runner.entered <- struct{}{}
+		<-runner.release
+	}
+	if strings.Contains(line, "NETP2P_SNAT") && line != "iptables -t nat -N NETP2P_SNAT" && !runner.snatCreated.Load() {
+		return fmt.Errorf("iptables: Chain 'NETP2P_SNAT' does not exist")
+	}
+	if line == "iptables -t nat -N NETP2P_SNAT" {
+		runner.snatCreated.Store(true)
+	}
+	return nil
+}
+
+func TestConcurrentReconcileWaitsForChains(t *testing.T) {
+	runner := &blockingChainRunner{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	reconciler := New("100.64.0.0/24", runner.run)
+	reconciler.forwardingPath = tempForwardingFile(t)
+	route := Route{ID: "subnet", Destination: "10.10.0.0/16", Masquerade: true}
+	results := make(chan error, 2)
+
+	go func() { results <- reconciler.Reconcile([]Route{route}) }()
+	<-runner.entered
+	go func() { results <- reconciler.Reconcile([]Route{route}) }()
+
+	select {
+	case err := <-results:
+		t.Fatalf("reconcile completed before chain initialization: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(runner.release)
+	for i := 0; i < 2; i++ {
+		if err := <-results; err != nil {
+			t.Fatalf("reconcile %d: %v", i+1, err)
+		}
 	}
 }
 

@@ -204,8 +204,12 @@ type MigrationCandidate struct {
 type RoutingEpoch struct {
 	NetworkID        string           `json:"networkId"`
 	SnapshotHeight   uint64           `json:"snapshotHeight"`
+	SnapshotHash     []byte           `json:"snapshotHash"`
+	CommitteeEpoch   uint64           `json:"committeeEpoch"`
+	Round            uint64           `json:"round"`
 	CandidateSetHash []byte           `json:"candidateSetHash"`
 	Version          uint64           `json:"version"`
+	Sequence         uint64           `json:"sequence"`
 	GeneratedAt      time.Time        `json:"generatedAt"`
 	ExpiresAt        time.Time        `json:"expiresAt"`
 	Allocations      []PathAllocation `json:"allocations"`
@@ -341,22 +345,34 @@ func SignRoutingEpoch(epoch RoutingEpoch, managerID string, signer MessageSigner
 }
 
 func VerifyRoutingEpoch(signed SignedRoutingEpoch, verifier MessageVerifier, now time.Time) error {
-	if (signed.Epoch.ManagerID == "" && !signed.ThresholdSigned) || len(signed.Epoch.PlannerDigest) == 0 {
+	if !signed.ThresholdSigned {
+		return errors.New("routing epoch must be committee threshold signed")
+	}
+	if signed.Epoch.ManagerID == "" || len(signed.Epoch.PlannerDigest) == 0 ||
+		len(signed.Epoch.SnapshotHash) == 0 || signed.Epoch.Sequence == 0 {
 		return errors.New("routing epoch is incomplete")
 	}
-	if signed.ThresholdSigned && (signed.Threshold < 1 || len(signed.Signers) < signed.Threshold) {
+	if signed.Threshold < 1 || len(signed.Signers) < signed.Threshold {
 		return errors.New("routing epoch threshold is incomplete")
 	}
-	if signed.ThresholdSigned {
-		seen := make(map[string]struct{}, len(signed.Signers))
-		for _, managerID := range signed.Signers {
-			if managerID == "" {
-				return errors.New("routing epoch has an empty signer")
-			}
-			if _, exists := seen[managerID]; exists {
-				return errors.New("routing epoch has duplicate signers")
-			}
-			seen[managerID] = struct{}{}
+	if signed.Epoch.GeneratedAt.IsZero() || signed.Epoch.ExpiresAt.IsZero() ||
+		!signed.Epoch.ExpiresAt.After(signed.Epoch.GeneratedAt) {
+		return errors.New("routing epoch lifetime is invalid")
+	}
+	seen := make(map[string]struct{}, len(signed.Signers))
+	for _, managerID := range signed.Signers {
+		if managerID == "" {
+			return errors.New("routing epoch has an empty signer")
+		}
+		if _, exists := seen[managerID]; exists {
+			return errors.New("routing epoch has duplicate signers")
+		}
+		seen[managerID] = struct{}{}
+	}
+	for _, allocation := range signed.Epoch.Allocations {
+		if allocation.PathID == "" || allocation.Weight <= 0 ||
+			math.IsInf(allocation.Weight, 0) || math.IsNaN(allocation.Weight) {
+			return errors.New("routing epoch has an invalid allocation")
 		}
 	}
 	message, err := canonicalMessage(signed.Epoch)
@@ -405,11 +421,30 @@ func SignRoutingEpochShare(epoch RoutingEpoch, managerID string, keys *bls.KeySe
 	return SignedRoutingEpoch{Epoch: epoch, Signature: signature, Signers: []string{managerID}}, nil
 }
 
+func VerifyRoutingEpochShare(epoch RoutingEpoch, keys *bls.KeySet, index int, signature []byte) error {
+	if keys == nil {
+		return errors.New("threshold key set is required")
+	}
+	digest, err := routingEpochDigest(epoch)
+	if err != nil {
+		return err
+	}
+	epoch.PlannerDigest = digest
+	message, err := canonicalMessage(epoch)
+	if err != nil {
+		return err
+	}
+	if !bls.Verify(keys.PublicKeyShare(index), message, signature) {
+		return errors.New("invalid routing epoch share")
+	}
+	return nil
+}
+
 func AggregateRoutingEpochShares(epoch RoutingEpoch, shares map[int][]byte, signers map[int]string, keys *bls.KeySet) (SignedRoutingEpoch, error) {
 	if keys == nil {
 		return SignedRoutingEpoch{}, errors.New("threshold key set is required")
 	}
-	if len(shares) < keys.Threshold || len(signers) < keys.Threshold {
+	if len(shares) != len(signers) || len(shares) < keys.Threshold {
 		return SignedRoutingEpoch{}, errors.New("not enough routing epoch shares")
 	}
 	digest, err := routingEpochDigest(epoch)
@@ -417,16 +452,12 @@ func AggregateRoutingEpochShares(epoch RoutingEpoch, shares map[int][]byte, sign
 		return SignedRoutingEpoch{}, err
 	}
 	epoch.PlannerDigest = digest
-	message, err := canonicalMessage(epoch)
-	if err != nil {
-		return SignedRoutingEpoch{}, err
-	}
 	for index, signature := range shares {
 		if _, ok := signers[index]; !ok {
 			return SignedRoutingEpoch{}, errors.New("share has no attributed manager")
 		}
-		if !bls.Verify(keys.PublicKeyShare(index), message, signature) {
-			return SignedRoutingEpoch{}, errors.New("invalid routing epoch share")
+		if err := VerifyRoutingEpochShare(epoch, keys, index, signature); err != nil {
+			return SignedRoutingEpoch{}, err
 		}
 	}
 	aggregate, err := keys.Aggregate(shares)
@@ -731,6 +762,9 @@ func (config *PlannerConfig) applyDefaults() {
 type PlannerInput struct {
 	NetworkID      string
 	SnapshotHeight uint64
+	SnapshotHash   []byte
+	CommitteeEpoch uint64
+	Round          uint64
 	BaseVersion    uint64
 	Candidates     []PathCandidate
 	Demand         []DomainDemand
@@ -774,6 +808,9 @@ type planningDomain struct {
 func PlanRoutingEpoch(input PlannerInput) (PlannerResult, error) {
 	if input.NetworkID == "" {
 		return PlannerResult{}, errors.New("network id is required")
+	}
+	if len(input.SnapshotHash) == 0 {
+		return PlannerResult{}, errors.New("certified snapshot hash is required")
 	}
 	if len(input.Candidates) == 0 {
 		return PlannerResult{}, errors.New("routing epoch requires candidates")
@@ -846,7 +883,10 @@ func PlanRoutingEpoch(input PlannerInput) (PlannerResult, error) {
 	}
 	epoch := RoutingEpoch{
 		NetworkID: input.NetworkID, SnapshotHeight: input.SnapshotHeight,
+		SnapshotHash:   append([]byte(nil), input.SnapshotHash...),
+		CommitteeEpoch: input.CommitteeEpoch, Round: input.Round,
 		CandidateSetHash: candidateHash, Version: input.BaseVersion + 1,
+		Sequence:    input.BaseVersion + 1,
 		GeneratedAt: now, ExpiresAt: now.Add(config.TTL), Allocations: allocations,
 	}
 	digest, err := routingEpochDigest(epoch)
@@ -1122,16 +1162,21 @@ func familyAllows(domain RoutingDomainKey, family PathFamily) bool {
 	if len(family.FlowClasses) > 0 && !containsFlowClass(family.FlowClasses, domain.FlowClass) {
 		return false
 	}
-	if len(family.SourceManagerIDs) > 0 && domain.SourceManagerID != "" && !containsString(family.SourceManagerIDs, domain.SourceManagerID) {
+	if !scopeAllows(family.SourceManagerIDs, domain.SourceManagerID) {
 		return false
 	}
-	if len(family.SourceGroups) > 0 && domain.SourceGroupID != "" && domain.SourceGroupID != "*" && !containsString(family.SourceGroups, domain.SourceGroupID) {
+	if !scopeAllows(family.SourceGroups, domain.SourceGroupID) {
 		return false
 	}
-	if len(family.DestinationScopes) > 0 && domain.DestinationScope != "" && domain.DestinationScope != "*" && !containsString(family.DestinationScopes, domain.DestinationScope) {
+	if !scopeAllows(family.DestinationScopes, domain.DestinationScope) {
 		return false
 	}
 	return true
+}
+
+func scopeAllows(values []string, wanted string) bool {
+	return len(values) == 0 || wanted == "" || wanted == "*" ||
+		containsString(values, "*") || containsString(values, wanted)
 }
 
 func familyConstraints(family PathFamily, class path.FlowClass) path.Constraints {

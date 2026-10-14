@@ -518,7 +518,6 @@ export interface AuthStatus {
 export interface LoginResponse {
   identity: Identity;
   permissions: Record<string, Operation[]>;
-  sessionToken: string;
   expiresAt?: string;
 }
 

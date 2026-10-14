@@ -45,7 +45,7 @@ func TestBootstrapHTTPStressAndPathTraversal(t *testing.T) {
 		t.Skip("short mode skips the local HTTP stress run")
 	}
 	server := &Server{
-		bootstrap:      []byte(`{"ok":true}`),
+		bootstrap: []byte(`{"ok":true}`),
 		readinessFunc: func() ReadinessStatus {
 			return ReadinessStatus{Status: "ready", LedgerReady: true, QuorumSize: 1, CommitteeOnline: 1}
 		},

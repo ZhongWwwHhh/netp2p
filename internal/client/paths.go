@@ -1,8 +1,6 @@
 package client
 
 import (
-	"bytes"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"sync"
@@ -48,6 +46,8 @@ type PathSelectionStatus struct {
 	AssignmentID    string
 	PathID          string
 	Kind            model.PathKind
+	ManagerPeerID   string
+	RoutingDomainID string
 	Certified       bool
 	OK              bool
 	FlowClass       FlowClass
@@ -78,8 +78,6 @@ type pathSelector struct {
 	snapshotHeight uint64
 	syncErr        error
 	settings       model.NetworkSettings
-	epoch          *RoutingEpoch
-	epochVerifier  ed25519.PublicKey
 	flows          *flowTable
 	lastFlow       flowEntry
 	lastMigration  string
@@ -113,8 +111,6 @@ func (selector *pathSelector) reset() {
 	selector.snapshotHeight = 0
 	selector.syncErr = nil
 	selector.settings = model.NetworkSettings{}
-	selector.epoch = nil
-	selector.epochVerifier = nil
 	selector.flows = newFlowTable(defaultFlowTableCapacity)
 	selector.lastFlow = flowEntry{}
 	selector.lastMigration = ""
@@ -176,8 +172,6 @@ func (selector *pathSelector) syncSnapshot(snapshot model.SignedSnapshot) error 
 	if selector.stateSynced {
 		if snapshot.State.NetworkID != selector.networkID {
 			selector.flows = newFlowTable(defaultFlowTableCapacity)
-			selector.epoch = nil
-			selector.epochVerifier = nil
 			selector.stateSynced = false
 			selector.syncErr = fmt.Errorf("%w: network id changed from %q to %q",
 				ErrPathSyncFailed, selector.networkID, snapshot.State.NetworkID)
@@ -278,7 +272,7 @@ func (selector *pathSelector) selectWithStatus(source, destination peer.ID) (mod
 
 // selectFlowWithStatus is the data-plane entry point. Packets without a
 // transport flow keep the deterministic certified ordering; real flows are
-// pinned and assigned by weighted rendezvous.
+// pinned and assigned within the certified candidate set.
 func (selector *pathSelector) selectFlowWithStatus(
 	source, destination peer.ID, flow conntrack.Key, hasFlow bool, class FlowClass, size int,
 ) (model.RouteAssignment, model.PathSpec, PathSelectionStatus) {
@@ -318,11 +312,10 @@ func (selector *pathSelector) selectFlowWithStatus(
 		return model.RouteAssignment{}, model.PathSpec{}, failedSelection(PathSelectionNoUsablePath, ErrNoUsableCertifiedPath)
 	}
 
-	weighted := selector.weightsLocked(assignment, candidates, class)
 	existing, hasExisting := selector.flows.get(flow)
 	if hasExisting {
 		if path, ok := findPath(candidates, existing.pathID); ok {
-			reason, migrate := flowMigrationReason(existing, path, weighted)
+			reason, migrate := flowMigrationReason(existing, path)
 			if !migrate {
 				selector.flows.observeAt(flow, path.ID, class, size, false, selector.snapshotHeight)
 				selector.lastFlow = existing
@@ -345,11 +338,10 @@ func (selector *pathSelector) selectFlowWithStatus(
 		}
 		if len(migrationCandidates) > 0 {
 			candidates = migrationCandidates
-			weighted = selector.weightsLocked(assignment, candidates, class)
 		}
 	}
 
-	path, ok := weightedRendezvous(flow, weighted)
+	path, ok := certifiedPathRendezvous(flow, candidates)
 	if !ok {
 		return model.RouteAssignment{}, model.PathSpec{}, failedSelection(PathSelectionNoUsablePath, ErrNoUsableCertifiedPath)
 	}
@@ -433,24 +425,6 @@ func (selector *pathSelector) filterPathsLocked(assignment model.RouteAssignment
 	return result
 }
 
-func (selector *pathSelector) weightsLocked(assignment model.RouteAssignment, candidates []model.PathSpec, class FlowClass) []weightedPath {
-	result := make([]weightedPath, 0, len(candidates))
-	var epochWeights map[string]float64
-	if selector.epoch != nil {
-		epochWeights = selector.epoch.Weights[assignment.ID]
-	}
-	for _, path := range candidates {
-		weight := derivedPathWeight(path, class, selector.settings)
-		if epochWeights != nil {
-			if configured, exists := epochWeights[path.ID]; exists {
-				weight = configured
-			}
-		}
-		result = append(result, weightedPath{path: path, weight: weight})
-	}
-	return result
-}
-
 func findPath(paths []model.PathSpec, pathID string) (model.PathSpec, bool) {
 	for _, path := range paths {
 		if path.ID == pathID {
@@ -460,29 +434,15 @@ func findPath(paths []model.PathSpec, pathID string) (model.PathSpec, bool) {
 	return model.PathSpec{}, false
 }
 
-func flowMigrationReason(existing flowEntry, current model.PathSpec, candidates []weightedPath) (string, bool) {
+func flowMigrationReason(existing flowEntry, current model.PathSpec) (string, bool) {
+	// Local reliability state may move a flow to another certified path,
+	// but it never changes the set or priority of authorized paths.
 	if existing.class == FlowClassRealtime {
 		if realtimeSLAViolated(current) {
 			return "realtime-sla-violation", true
 		}
-		// Ordinary weight churn must not reorder realtime packets.
+		// Ordinary snapshot churn must not reorder realtime packets.
 		return "", false
-	}
-	if existing.bytes < elephantMigrationBytes {
-		return "", false
-	}
-	var currentWeight, alternativeWeight float64
-	for _, candidate := range candidates {
-		if candidate.path.ID == existing.pathID {
-			currentWeight = candidate.weight
-			continue
-		}
-		if candidate.weight > alternativeWeight {
-			alternativeWeight = candidate.weight
-		}
-	}
-	if currentWeight > 0 && alternativeWeight > currentWeight*2 && currentWeight < .25 {
-		return "elephant-rebalance", true
 	}
 	return "", false
 }
@@ -565,70 +525,28 @@ func (selector *pathSelector) cachedFlowClass(flow conntrack.Key) (FlowClass, bo
 }
 
 type flowSelectionDiagnostics struct {
-	ActiveFlows     int    `json:"activeFlows"`
-	Capacity        int    `json:"capacity"`
-	Evictions       uint64 `json:"evictions"`
-	Migrations      uint64 `json:"migrations"`
-	Bytes           uint64 `json:"bytes"`
-	Packets         uint64 `json:"packets"`
-	LastFlowClass   string `json:"lastFlowClass,omitempty"`
-	LastPathID      string `json:"lastPathId,omitempty"`
-	LastMigration   string `json:"lastMigrationReason,omitempty"`
-	RoutingEpochSeq uint64 `json:"routingEpochSequence,omitempty"`
+	ActiveFlows   int    `json:"activeFlows"`
+	Capacity      int    `json:"capacity"`
+	Evictions     uint64 `json:"evictions"`
+	Migrations    uint64 `json:"migrations"`
+	Bytes         uint64 `json:"bytes"`
+	Packets       uint64 `json:"packets"`
+	LastFlowClass string `json:"lastFlowClass,omitempty"`
+	LastPathID    string `json:"lastPathId,omitempty"`
+	LastMigration string `json:"lastMigrationReason,omitempty"`
 }
 
 func (selector *pathSelector) flowSelectionDiagnostics() flowSelectionDiagnostics {
 	selector.mu.Lock()
 	last := selector.lastFlow
 	lastMigration := selector.lastMigration
-	var epochSequence uint64
-	if selector.epoch != nil {
-		epochSequence = selector.epoch.Sequence
-	}
 	selector.mu.Unlock()
 	stats := selector.flows.stats()
 	return flowSelectionDiagnostics{
 		ActiveFlows: stats.Active, Capacity: stats.Capacity, Evictions: stats.Evictions,
 		Migrations: stats.Migrations, Bytes: stats.Bytes, Packets: stats.Packets,
 		LastFlowClass: string(last.class), LastPathID: last.pathID, LastMigration: lastMigration,
-		RoutingEpochSeq: epochSequence,
 	}
-}
-
-func (selector *pathSelector) applySignedRoutingEpoch(signed SignedRoutingEpoch, verifier ed25519.PublicKey) error {
-	epoch, err := VerifyRoutingEpoch(signed, verifier)
-	if err != nil {
-		return err
-	}
-	selector.mu.Lock()
-	defer selector.mu.Unlock()
-	if !selector.stateSynced {
-		return fmt.Errorf("%w: path selector is not synchronized", ErrPathSyncFailed)
-	}
-	if selector.epochVerifier == nil {
-		selector.epochVerifier = append([]byte(nil), verifier...)
-	} else if !bytes.Equal(selector.epochVerifier, verifier) {
-		return fmt.Errorf("%w: routing epoch verifier changed", ErrInvalidRoutingEpoch)
-	}
-	if epoch.NetworkID != selector.networkID {
-		return fmt.Errorf("%w: epoch network %q does not match %q", ErrInvalidRoutingEpoch, epoch.NetworkID, selector.networkID)
-	}
-	if selector.epoch != nil && epoch.Sequence <= selector.epoch.Sequence {
-		return fmt.Errorf("%w: sequence %d is not newer than %d", ErrStaleRoutingEpoch, epoch.Sequence, selector.epoch.Sequence)
-	}
-	for assignmentID, weights := range epoch.Weights {
-		assignment, exists := selector.assignments[assignmentID]
-		if !exists {
-			return fmt.Errorf("%w: unknown assignment %q", ErrInvalidRoutingEpoch, assignmentID)
-		}
-		for pathID := range weights {
-			if _, exists := findPath(assignment.Paths(), pathID); !exists {
-				return fmt.Errorf("%w: assignment %q does not contain path %q", ErrInvalidRoutingEpoch, assignmentID, pathID)
-			}
-		}
-	}
-	selector.epoch = &epoch
-	return nil
 }
 
 // lastGoodFor returns the persisted path for this assignment's destination when

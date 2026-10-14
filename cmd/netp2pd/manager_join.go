@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,7 +53,7 @@ func runManagerJoin(args []string) error {
 	if err != nil {
 		return err
 	}
-	bootstrap, err := connectTrustManagers(ctx, node, bundle.TrustManagers)
+	trustManagerPeers, err := connectTrustManagers(ctx, node, bundle.TrustManagers)
 	if err != nil {
 		_ = node.Close()
 		return err
@@ -67,7 +68,7 @@ func runManagerJoin(args []string) error {
 		Address: member.Address, ListenAddr: member.ListenAddr, PublicKey: member.PublicKey,
 		RequestedAt: time.Now().UTC().Format(time.RFC3339Nano), Status: model.ManagerJoinPending,
 	}
-	if _, err := manager.SubmitAdmin(ctx, node, bootstrap, bundle.JoinToken, model.StateTransition{
+	if _, err := submitManagerJoin(ctx, node, trustManagerPeers, bundle.JoinToken, model.StateTransition{
 		Type: bft.TransitionSubmitManagerJoin, ManagerJoin: &request,
 	}); err != nil {
 		_ = node.Close()
@@ -75,7 +76,7 @@ func runManagerJoin(args []string) error {
 	}
 	fmt.Printf("Manager %s submitted join request; waiting for administrator approval.\n", bundle.ManagerID)
 
-	approval, err := waitForManagerJoinApproval(ctx, node, bootstrap, bundle)
+	approval, err := waitForManagerJoinApproval(ctx, node, trustManagerPeers, bundle)
 	if err != nil {
 		_ = node.Close()
 		return err
@@ -84,7 +85,9 @@ func runManagerJoin(args []string) error {
 		_ = node.Close()
 		return err
 	}
-	activation, err := waitForManagerActivation(ctx, node, bootstrap, bundle)
+	activation, err := waitForManagerActivation(
+		ctx, node, trustManagerPeers, bundle, approval.State.CommitteeConfig.CommitteeEpoch+1,
+	)
 	if err != nil {
 		_ = node.Close()
 		return err
@@ -106,9 +109,9 @@ func runManagerJoin(args []string) error {
 	})
 }
 
-func connectTrustManagers(ctx context.Context, node *p2p.Node, members []model.CommitteeMember) (peer.ID, error) {
+func connectTrustManagers(ctx context.Context, node *p2p.Node, members []model.CommitteeMember) ([]peer.ID, error) {
 	var lastErr error
-	var bootstrap peer.ID
+	connected := make([]peer.ID, 0, len(members))
 	for _, member := range members {
 		info, err := peer.AddrInfoFromString(member.Address + "/p2p/" + member.PeerID)
 		if err != nil {
@@ -122,17 +125,37 @@ func connectTrustManagers(ctx context.Context, node *p2p.Node, members []model.C
 			lastErr = err
 			continue
 		}
-		if bootstrap == "" {
-			bootstrap = info.ID
-		}
+		connected = append(connected, info.ID)
 	}
-	if bootstrap != "" {
-		return bootstrap, nil
+	if len(connected) != 0 {
+		return connected, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no trust managers")
 	}
-	return "", lastErr
+	return nil, lastErr
+}
+
+func submitManagerJoin(
+	ctx context.Context, node *p2p.Node, managers []peer.ID, token string, transition model.StateTransition,
+) (model.SignedSnapshot, error) {
+	var lastErr error
+	for _, managerID := range managers {
+		requestContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+		snapshot, err := manager.SubmitAdmin(requestContext, node, managerID, token, transition)
+		cancel()
+		if err == nil {
+			return snapshot, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no trust managers")
+	}
+	return model.SignedSnapshot{}, lastErr
 }
 
 func queryJoinSnapshot(
@@ -158,13 +181,50 @@ func findManagerJoin(snapshot model.SignedSnapshot, managerID string) *model.Man
 	return nil
 }
 
+func queryJoinSnapshotFromAny(
+	ctx context.Context, node *p2p.Node, managers []peer.ID, token, query string,
+) (model.SignedSnapshot, error) {
+	snapshots := make([]model.SignedSnapshot, len(managers))
+	errors := make([]error, len(managers))
+	var waitGroup sync.WaitGroup
+	for index, managerID := range managers {
+		waitGroup.Add(1)
+		go func(index int, managerID peer.ID) {
+			defer waitGroup.Done()
+			queryContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			snapshots[index], errors[index] = queryJoinSnapshot(queryContext, node, managerID, token, query)
+		}(index, managerID)
+	}
+	waitGroup.Wait()
+
+	var latest model.SignedSnapshot
+	var lastErr error
+	for index := range managers {
+		if errors[index] != nil {
+			lastErr = errors[index]
+			continue
+		}
+		if snapshots[index].Height > latest.Height {
+			latest = snapshots[index]
+		}
+	}
+	if latest.Height > 0 {
+		return latest, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no trust managers")
+	}
+	return model.SignedSnapshot{}, lastErr
+}
+
 func waitForManagerJoinApproval(
-	ctx context.Context, node *p2p.Node, bootstrap peer.ID, bundle config.ManagerJoinBundle,
+	ctx context.Context, node *p2p.Node, managers []peer.ID, bundle config.ManagerJoinBundle,
 ) (model.SignedSnapshot, error) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		snapshot, err := queryJoinSnapshot(ctx, node, bootstrap, bundle.JoinToken, "snapshot")
+		snapshot, err := queryJoinSnapshotFromAny(ctx, node, managers, bundle.JoinToken, "snapshot")
 		if err == nil {
 			if request := findManagerJoin(snapshot, bundle.ManagerID); request != nil {
 				switch request.Status {
@@ -196,6 +256,11 @@ func runCandidateDKG(
 		return err
 	}
 	epoch := approval.State.CommitteeConfig.CommitteeEpoch + 1
+	memberIDs := make([]string, 0, len(target))
+	for _, member := range target {
+		memberIDs = append(memberIDs, member.ID)
+	}
+	ceremonyID := dkg.CeremonyID(bundle.NetworkID, epoch, memberIDs)
 	ceremony, err := newDKGCeremonyForCommittee(
 		node, target, bundle.NetworkID, epoch, params.QuorumSize, bundle.ManagerID,
 	)
@@ -203,6 +268,9 @@ func runCandidateDKG(
 		return err
 	}
 	node.Handle(p2p.DKGProtocol, ceremony.Handle)
+	if err := waitForCommitteeDKG(ctx, node, target, ceremonyID, bundle.ManagerID); err != nil {
+		return fmt.Errorf("candidate dkg readiness: %w", err)
+	}
 	result, err := ceremony.Run(ctx)
 	if err != nil {
 		return fmt.Errorf("candidate dkg ceremony: %w", err)
@@ -218,16 +286,17 @@ func runCandidateDKG(
 }
 
 func waitForManagerActivation(
-	ctx context.Context, node *p2p.Node, bootstrap peer.ID, bundle config.ManagerJoinBundle,
+	ctx context.Context, node *p2p.Node, managers []peer.ID, bundle config.ManagerJoinBundle,
+	expectedEpoch uint64,
 ) (model.SignedSnapshot, error) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		snapshot, err := queryJoinSnapshot(ctx, node, bootstrap, bundle.JoinToken, "manager-snapshot")
+		snapshot, err := queryJoinSnapshotFromAny(ctx, node, managers, bundle.JoinToken, "manager-snapshot")
 		if err == nil {
 			request := findManagerJoin(snapshot, bundle.ManagerID)
 			if request != nil && request.Status == model.ManagerJoinActivated &&
-				snapshot.Transition.Type == bft.TransitionActivateCommittee {
+				managerActivationComplete(snapshot, bundle.ManagerID, expectedEpoch) {
 				return snapshot, nil
 			}
 		}
@@ -239,20 +308,63 @@ func waitForManagerActivation(
 	}
 }
 
+func managerActivationComplete(snapshot model.SignedSnapshot, managerID string, expectedEpoch uint64) bool {
+	committee, config, ok := activatedCommittee(snapshot)
+	params, err := model.CommitteeParamsFromConfig(config)
+	if !ok || err != nil || len(config.GroupPublicKey) == 0 {
+		return false
+	}
+	if !snapshot.State.CommitteeConfig.Equal(config) || config.CommitteeEpoch != expectedEpoch {
+		return false
+	}
+	if len(committee) != params.Size {
+		return false
+	}
+	for _, member := range committee {
+		if member.ID == managerID {
+			return true
+		}
+	}
+	return false
+}
+
+// activatedCommittee distinguishes the committee that signed a snapshot from
+// the committee it activates. On the activation height itself the new members
+// are only in Transition.Committee; later snapshots carry them in Committee.
+func activatedCommittee(snapshot model.SignedSnapshot) ([]model.CommitteeMember, model.CommitteeConfig, bool) {
+	if snapshot.Transition.Type == bft.TransitionActivateCommittee {
+		if snapshot.Transition.CommitteeConfig == nil {
+			return nil, model.CommitteeConfig{}, false
+		}
+		return snapshot.Transition.Committee, *snapshot.Transition.CommitteeConfig, true
+	}
+	return snapshot.Committee, snapshot.CommitteeConfig, true
+}
+
 func persistActivatedManager(
 	dataDir string, bundle config.ManagerJoinBundle, activation model.SignedSnapshot,
 ) (string, string, error) {
-	params, err := model.CommitteeParamsFromConfig(activation.State.CommitteeConfig)
+	committee, committeeConfig, ok := activatedCommittee(activation)
+	params, err := model.CommitteeParamsFromConfig(committeeConfig)
 	if err != nil {
 		return "", "", err
 	}
-	if len(activation.Transition.Committee) != params.Size {
-		return "", "", fmt.Errorf("activation committee has %d members, want %d", len(activation.Transition.Committee), params.Size)
+	if !ok {
+		return "", "", fmt.Errorf("activation snapshot is missing its certified committee")
+	}
+	if len(committee) != params.Size {
+		return "", "", fmt.Errorf("activated committee has %d members, want %d", len(committee), params.Size)
+	}
+	if !activation.State.CommitteeConfig.Equal(committeeConfig) {
+		return "", "", fmt.Errorf("snapshot committee config does not match its certified state")
+	}
+	if !committeeContainsManager(committee, bundle.ManagerID) {
+		return "", "", fmt.Errorf("activated committee does not contain manager %s", bundle.ManagerID)
 	}
 	manifest := config.NetworkManifest{
 		Version: config.NetworkManifestVersion, NetworkID: activation.State.NetworkID,
 		OverlayCIDR: activation.State.OverlayCIDR, ProtocolVersion: version.ProtocolVersion,
-		CommitteeParams: params, Managers: activation.Transition.Committee,
+		CommitteeParams: params, Managers: committee,
 		Groups: activation.State.Groups, Policies: activation.State.Policies,
 		Routes: activation.State.Routes, Budgets: activation.State.Budgets,
 		Nameservers: activation.State.Nameservers, Zones: activation.State.Zones,
@@ -297,4 +409,13 @@ func persistActivatedManager(
 		return "", "", err
 	}
 	return manifestPath, managerBundlePath, nil
+}
+
+func committeeContainsManager(committee []model.CommitteeMember, managerID string) bool {
+	for _, member := range committee {
+		if member.ID == managerID {
+			return true
+		}
+	}
+	return false
 }

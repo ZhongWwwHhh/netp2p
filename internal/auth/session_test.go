@@ -23,6 +23,20 @@ func TestSessionManagerIssuesAndVerifies(t *testing.T) {
 	if !strings.HasPrefix(token, LocalSessionPrefix) {
 		t.Fatalf("token prefix = %q", token[:len(LocalSessionPrefix)])
 	}
+	sessionID, err := manager.SessionID(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessionID) < 16 {
+		t.Fatalf("session id = %q, want a random non-empty identifier", sessionID)
+	}
+	if _, err := manager.SessionID(token + "x"); err == nil {
+		t.Fatal("tampered token should not expose a session id")
+	}
+	externalID := ExternalSessionID("external-token")
+	if externalID == "" || externalID == ExternalSessionID("other-token") {
+		t.Fatalf("external session id = %q, want a stable token-specific hash", externalID)
+	}
 	if !expires.Equal(now.Add(time.Hour)) {
 		t.Fatalf("expires = %v, want %v", expires, now.Add(time.Hour))
 	}

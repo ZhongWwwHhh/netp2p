@@ -42,6 +42,7 @@ const (
 	CodeInvalidJWT           = "invalid_jwt"
 	CodeInvalidSetupKey      = "invalid_setup_key"
 	CodeRegistrationRequired = "registration_required"
+	CodeCommitteeUnavailable = "committee_unavailable"
 )
 
 type SyncRequest struct {

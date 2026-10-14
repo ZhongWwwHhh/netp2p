@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,12 +27,16 @@ func TestOIDCProxyCompletesPKCEFlow(t *testing.T) {
 	}
 	defer provider.Close()
 
-	proxy := newOIDCProxy(&BootstrapOIDC{
+	proxy, err := newOIDCProxy(&BootstrapOIDC{
 		Issuer: provider.Issuer, ClientID: "netp2p-web",
 		Scopes:                []string{"openid", "profile", "email"},
 		AuthorizationEndpoint: provider.Issuer + "/authorize",
 		TokenEndpoint:         provider.Issuer + "/token",
+		RedirectURI:           "https://manager.test/auth/callback",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if proxy == nil {
 		t.Fatal("proxy should be configured")
 	}
@@ -110,6 +115,42 @@ func TestOIDCProxyCompletesPKCEFlow(t *testing.T) {
 	}
 }
 
+func TestOIDCProxyRequiresExplicitExternalBase(t *testing.T) {
+	proxy, err := newOIDCProxy(&BootstrapOIDC{
+		Issuer: "https://issuer.example", ClientID: "netp2p-web",
+		AuthorizationEndpoint: "https://issuer.example/authorize",
+		TokenEndpoint:         "https://issuer.example/token",
+	})
+	if err == nil || proxy != nil {
+		t.Fatalf("missing redirect URI created proxy = %+v err = %v", proxy, err)
+	}
+}
+
+func TestOIDCProxyUsesConfiguredExternalBaseNotHostHeader(t *testing.T) {
+	proxy, err := newOIDCProxy(&BootstrapOIDC{
+		Issuer: "https://issuer.example", ClientID: "netp2p-web",
+		AuthorizationEndpoint: "https://issuer.example/authorize",
+		TokenEndpoint:         "https://issuer.example/token",
+		RedirectURI:           "https://console.example/auth/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRequest(http.MethodGet, "https://evil.example/auth/login", nil)
+	login.Host = "evil.example"
+	recorder := httptest.NewRecorder()
+	if !proxy.handle(recorder, login) {
+		t.Fatal("login path not handled")
+	}
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := location.Query().Get("redirect_uri"); got != "https://console.example/auth/callback" {
+		t.Fatalf("redirect_uri = %q, want configured external base", got)
+	}
+}
+
 func TestOIDCProxyRejectsUnsafeRedirects(t *testing.T) {
 	unsafe := []string{
 		"//evil.example", "/\\evil.example", "https://evil.example",
@@ -125,6 +166,30 @@ func TestOIDCProxyRejectsUnsafeRedirects(t *testing.T) {
 	}
 }
 
+func TestOIDCProxyCapsPendingAuthRequests(t *testing.T) {
+	proxy, err := newOIDCProxy(&BootstrapOIDC{
+		Issuer: "https://issuer.example", ClientID: "netp2p-web",
+		AuthorizationEndpoint: "https://issuer.example/authorize",
+		TokenEndpoint:         "https://issuer.example/token",
+		RedirectURI:           "https://console.example/auth/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for index := 0; index < maxPendingOIDCAuth; index++ {
+		proxy.requests[fmt.Sprintf("pending-%d", index)] = pendingAuth{created: now}
+	}
+	recorder := httptest.NewRecorder()
+	proxy.login(recorder, httptest.NewRequest(http.MethodGet, "https://console.example/auth/login", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("login status = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+	if len(proxy.requests) != maxPendingOIDCAuth {
+		t.Fatalf("pending auth count = %d, want capped count %d", len(proxy.requests), maxPendingOIDCAuth)
+	}
+}
+
 func TestOIDCProxyUsesSecureStateCookieAndSessionCookie(t *testing.T) {
 	provider, err := oidctest.New("127.0.0.1:0", oidctest.Options{
 		AutoApprove: true,
@@ -135,12 +200,16 @@ func TestOIDCProxyUsesSecureStateCookieAndSessionCookie(t *testing.T) {
 	}
 	defer provider.Close()
 
-	proxy := newOIDCProxy(&BootstrapOIDC{
+	proxy, err := newOIDCProxy(&BootstrapOIDC{
 		Issuer: provider.Issuer, ClientID: "netp2p-web", Audience: "netp2p-web-audience",
 		Scopes:                []string{"openid", "profile", "email"},
 		AuthorizationEndpoint: provider.Issuer + "/authorize",
 		TokenEndpoint:         provider.Issuer + "/token",
+		RedirectURI:           "https://manager.test/auth/callback",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if proxy == nil {
 		t.Fatal("proxy should be configured")
 	}

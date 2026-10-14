@@ -1,0 +1,60 @@
+# Isolated security-test stack. Relative paths are intentionally rooted at
+# scripts/ so the generated seed and status files stay under tmp/security-e2e.
+services:
+  mock-idp:
+    image: netp2p-security-test:latest
+    entrypoint: ["netp2p-mockidp"]
+    command: ["--listen", "0.0.0.0:9999", "--issuer", "http://mock-idp:9999",
+      "--subject", "sso-user-1", "--email", "sso-user@example.com", "--name", "SSO User",
+      "--groups", "eng"]
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9999"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  manager-1:
+    image: netp2p-security-test:latest
+    environment:
+      NETP2P_MANAGER_ID: manager-1
+    command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json",
+      "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--web-listen", "0.0.0.0:8080",
+      "--metrics-listen", "0.0.0.0:9100"]
+    volumes: ["../tmp/security-e2e:/config:ro"]
+    ports: ["14001:4001/udp", "18080:8080", "19100:9100"]
+  manager-2:
+    image: netp2p-security-test:latest
+    environment:
+      NETP2P_MANAGER_ID: manager-2
+    command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json",
+      "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--web-listen", "0.0.0.0:8080"]
+    volumes: ["../tmp/security-e2e:/config:ro"]
+    ports: ["18081:8080"]
+  manager-3:
+    image: netp2p-security-test:latest
+    environment:
+      NETP2P_MANAGER_ID: manager-3
+    command: ["--role", "manager", "--data-dir", "/data", "--config", "/config/state.json",
+      "--listen", "/ip4/0.0.0.0/udp/4001/quic-v1", "--web-listen", "0.0.0.0:8080"]
+    volumes: ["../tmp/security-e2e:/config:ro"]
+    ports: ["18082:8080"]
+  client-a:
+    image: netp2p-security-test:latest
+    depends_on: [manager-1]
+    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
+      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
+      "--setup-key", "setup-key-a", "--packet-listen", "127.0.0.1:51820",
+      "--status-file", "/status/client-a.json"]
+    volumes: ["../tmp/security-e2e/run:/status"]
+  client-b:
+    image: netp2p-security-test:latest
+    depends_on: [manager-1]
+    command: ["--role", "client", "--data-dir", "/data", "--listen", "/ip4/0.0.0.0/udp/5001/quic-v1",
+      "--manager", "/dns4/manager-1/udp/4001/quic-v1/p2p/${MANAGER1_PEER_ID}",
+      "--setup-key", "setup-key-b", "--packet-listen", "127.0.0.1:51820",
+      "--status-file", "/status/client-b.json"]
+    volumes: ["../tmp/security-e2e/run:/status"]
+  admin-cli:
+    image: netp2p-security-test:latest
+    entrypoint: ["sleep", "infinity"]
+    init: true
+    volumes: ["../tmp/security-e2e:/config:ro"]

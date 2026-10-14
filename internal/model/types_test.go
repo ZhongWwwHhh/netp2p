@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSetupKeyHashUsesArgon2id(t *testing.T) {
@@ -19,6 +20,51 @@ func TestSetupKeyHashUsesArgon2id(t *testing.T) {
 	}
 	if !bytes.Equal(hash, SetupKeyHash("setup-key-secret")) {
 		t.Fatal("setup-key verifier must be deterministic")
+	}
+}
+
+func TestPathFamilyNormalizedPreservesManagerHopOrder(t *testing.T) {
+	family := PathFamily{ManagerHops: []string{"manager-z", "manager-a", "manager-z"}}
+	normalized := family.Normalized()
+	if got := strings.Join(normalized.ManagerHops, ","); got != "manager-z,manager-a" {
+		t.Fatalf("normalized manager hops = %q; direction and order must be preserved", got)
+	}
+}
+
+func TestArgon2DerivationIsBounded(t *testing.T) {
+	for range Argon2Concurrency {
+		select {
+		case argon2Slots <- struct{}{}:
+		default:
+			t.Fatal("argon2 slot unexpectedly unavailable")
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = SetupKeyHash("bounded-argon2-test")
+	}()
+	select {
+	case <-done:
+		t.Fatal("Argon2 derivation ran while all global slots were occupied")
+	case <-time.After(20 * time.Millisecond):
+	}
+	select {
+	case <-argon2Slots:
+	default:
+		t.Fatal("expected an occupied Argon2 slot to release")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Argon2 derivation did not finish after a slot was released")
+	}
+	for {
+		select {
+		case <-argon2Slots:
+		default:
+			return
+		}
 	}
 }
 
@@ -49,16 +95,18 @@ func TestClientSnapshotRedactsSecretsAndHashes(t *testing.T) {
 	user := User{ID: "user-1", Email: "user@example.com", PasswordVerifier: []byte("password-verifier")}
 	snapshot := SignedSnapshot{
 		State: NetworkState{
-			SetupKeys:       []SetupKey{record},
-			Users:           []User{user},
-			EngineCommittee: []CommitteeMember{{ID: "engine", KeySeed: 41}},
+			SetupKeys:            []SetupKey{record},
+			Users:                []User{user},
+			ManagerJoinTokenHash: []byte("manager-join-verifier"),
+			EngineCommittee:      []CommitteeMember{{ID: "engine", KeySeed: 41}},
 		},
 		Committee: []CommitteeMember{{ID: "committee", KeySeed: 42}},
 		Transition: StateTransition{
-			SetupKey:  "setup-key-secret",
-			Record:    &record,
-			User:      &user,
-			Committee: []CommitteeMember{{ID: "transition", KeySeed: 43}},
+			SetupKey:             "setup-key-secret",
+			ManagerJoinTokenHash: []byte("manager-join-verifier"),
+			Record:               &record,
+			User:                 &user,
+			Committee:            []CommitteeMember{{ID: "transition", KeySeed: 43}},
 		},
 	}
 
@@ -72,6 +120,7 @@ func TestClientSnapshotRedactsSecretsAndHashes(t *testing.T) {
 		"setup-key-secret", "setup-", "verifier",
 		`"token"`, `"tokenPrefix"`, `"tokenHash"`, `"keySeed"`,
 		"password-verifier", `"passwordVerifier"`,
+		"manager-join-verifier", `"managerJoinTokenHash"`,
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("client snapshot leaked %q: %s", forbidden, body)

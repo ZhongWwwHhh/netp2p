@@ -115,6 +115,7 @@ func TestTransitionPermissionMapping(t *testing.T) {
 		{bft.TransitionUpdateDNS, ModuleDNS, OpUpdate},
 		{bft.TransitionRemoveZone, ModuleDNS, OpDelete},
 		{bft.TransitionUpdateSettings, ModuleSettings, OpUpdate},
+		{bft.TransitionRequestCommitteeShrink, ModuleSettings, OpUpdate},
 		{bft.TransitionRegisterUser, ModuleUsers, OpCreate},
 		{bft.TransitionUpdateUserRole, ModuleUsers, OpUpdate},
 		{bft.TransitionRemoveUser, ModuleUsers, OpDelete},

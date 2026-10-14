@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/netp2p/netp2p/internal/bft"
@@ -127,6 +128,16 @@ CREATE TABLE IF NOT EXISTS auth_events (
 );
 
 CREATE INDEX IF NOT EXISTS auth_events_recorded_idx ON auth_events(recorded_at);
+
+CREATE TABLE IF NOT EXISTS web_sessions (
+	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL,
+	issued_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	revoked_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS web_sessions_user_idx ON web_sessions(user_id);
 `
 
 const (
@@ -137,7 +148,7 @@ const (
 
 type LedgerRetention struct {
 	MaxAge      time.Duration
-	MaxBytes    int64
+	MaxBytes    int64 // Applies to retained history payload bytes, not the SQLite file size.
 	TargetBytes int64
 	MinHeights  int
 }
@@ -170,15 +181,18 @@ func (policy LedgerRetention) Validate() error {
 type LedgerPruneResult struct {
 	RemovedSnapshots  int   `json:"removedSnapshots"`
 	RetainedSnapshots int   `json:"retainedSnapshots"`
+	HistoryBytes      int64 `json:"historyBytes"`
 	DatabaseBytes     int64 `json:"databaseBytes"`
 }
 
 // Store is a durable SQLite ledger and certified-state projection. A single
 // connection serializes writers and keeps SQLite transaction semantics simple.
 type Store struct {
-	db        *sql.DB
-	path      string
-	retention LedgerRetention
+	db             *sql.DB
+	path           string
+	retention      LedgerRetention
+	commitErrorMu  sync.RWMutex
+	commitErrorSub func(error)
 }
 
 // Open creates or opens the database with WAL and full fsync durability.
@@ -266,9 +280,39 @@ func (store *Store) InstallCommitListener(engine *bft.Engine) {
 	})
 }
 
+// SetCommitErrorCallback subscribes to durable ledger write failures. The
+// manager uses it to export a Prometheus counter without coupling the store to
+// the metrics package.
+func (store *Store) SetCommitErrorCallback(callback func(error)) {
+	if store == nil {
+		return
+	}
+	store.commitErrorMu.Lock()
+	defer store.commitErrorMu.Unlock()
+	store.commitErrorSub = callback
+}
+
+func (store *Store) reportCommitError(err error) {
+	if store == nil || err == nil {
+		return
+	}
+	store.commitErrorMu.RLock()
+	callback := store.commitErrorSub
+	store.commitErrorMu.RUnlock()
+	if callback != nil {
+		callback(err)
+	}
+}
+
 // RecordCommit atomically records a certified decision and refreshes the
 // queryable projections derived from its state.
-func (store *Store) RecordCommit(snapshot model.SignedSnapshot) error {
+func (store *Store) RecordCommit(snapshot model.SignedSnapshot) (err error) {
+	success := false
+	defer func() {
+		if !success {
+			store.reportCommitError(err)
+		}
+	}()
 	if store == nil || store.db == nil {
 		return fmt.Errorf("store is closed")
 	}
@@ -319,13 +363,13 @@ func (store *Store) RecordCommit(snapshot model.SignedSnapshot) error {
 		return fmt.Errorf("insert transition: %w", err)
 	}
 
-	if err := refreshUsers(tx, snapshot, certifiedAt); err != nil {
+	if err = refreshUsers(tx, snapshot, certifiedAt); err != nil {
 		return err
 	}
-	if err := refreshSetupKeyVerifiers(tx, snapshot, certifiedAt); err != nil {
+	if err = refreshSetupKeyVerifiers(tx, snapshot, certifiedAt); err != nil {
 		return err
 	}
-	if err := refreshSessions(tx, snapshot, certifiedAt); err != nil {
+	if err = refreshSessions(tx, snapshot, certifiedAt); err != nil {
 		return err
 	}
 	_, err = tx.Exec(`
@@ -337,12 +381,10 @@ func (store *Store) RecordCommit(snapshot model.SignedSnapshot) error {
 	if err != nil {
 		return fmt.Errorf("insert audit event: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit snapshot transaction: %w", err)
 	}
-	if _, err := store.PruneLedger(time.Now().UTC()); err != nil {
-		return fmt.Errorf("apply ledger retention: %w", err)
-	}
+	success = true
 	return nil
 }
 
@@ -463,7 +505,7 @@ func (store *Store) PruneLedger(now time.Time) (LedgerPruneResult, error) {
 	if count == 0 {
 		return LedgerPruneResult{}, nil
 	}
-	databaseBytes, err := store.databaseSize()
+	historyRows, historyBytes, err := store.historyRows()
 	if err != nil {
 		return LedgerPruneResult{}, err
 	}
@@ -492,44 +534,16 @@ func (store *Store) PruneLedger(now time.Time) (LedgerPruneResult, error) {
 		return LedgerPruneResult{}, fmt.Errorf("close aged ledger rows: %w", err)
 	}
 
-	if databaseBytes >= policy.MaxBytes {
-		sizeRows, err := store.db.Query(`
-			SELECT height, LENGTH(snapshot_json) FROM certified_snapshots
-			ORDER BY height`)
-		if err != nil {
-			return LedgerPruneResult{}, fmt.Errorf("query ledger sizes: %w", err)
-		}
-		var total int64
-		type row struct {
-			height uint64
-			size   int64
-		}
-		rows := make([]row, 0, count)
-		for sizeRows.Next() {
-			var item row
-			if err := sizeRows.Scan(&item.height, &item.size); err != nil {
-				_ = sizeRows.Close()
-				return LedgerPruneResult{}, fmt.Errorf("scan ledger size: %w", err)
-			}
-			total += item.size
-			rows = append(rows, item)
-		}
-		if err := sizeRows.Err(); err != nil {
-			_ = sizeRows.Close()
-			return LedgerPruneResult{}, fmt.Errorf("iterate ledger sizes: %w", err)
-		}
-		if err := sizeRows.Close(); err != nil {
-			return LedgerPruneResult{}, fmt.Errorf("close ledger sizes: %w", err)
-		}
-		for _, item := range rows {
-			if total <= policy.TargetBytes {
+	if historyBytes >= policy.MaxBytes {
+		for _, item := range historyRows {
+			if historyBytes <= policy.TargetBytes {
 				break
 			}
 			if item.height == uint64(latest) {
 				continue
 			}
 			remove[item.height] = struct{}{}
-			total -= item.size
+			historyBytes -= item.bytes
 		}
 	}
 
@@ -550,9 +564,14 @@ func (store *Store) PruneLedger(now time.Time) (LedgerPruneResult, error) {
 		retained++
 	}
 	if len(remove) == 0 {
+		databaseBytes, err := store.databaseSize()
+		if err != nil {
+			return LedgerPruneResult{}, err
+		}
 		return LedgerPruneResult{
 			RemovedSnapshots:  0,
 			RetainedSnapshots: count,
+			HistoryBytes:      historyBytes,
 			DatabaseBytes:     databaseBytes,
 		}, nil
 	}
@@ -585,6 +604,11 @@ func (store *Store) PruneLedger(now time.Time) (LedgerPruneResult, error) {
 	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return LedgerPruneResult{}, fmt.Errorf("checkpoint ledger after prune: %w", err)
 	}
+	historyRows, historyBytes, err = store.historyRows()
+	if err != nil {
+		return LedgerPruneResult{}, err
+	}
+	var databaseBytes int64
 	databaseBytes, err = store.databaseSize()
 	if err != nil {
 		return LedgerPruneResult{}, err
@@ -592,12 +616,60 @@ func (store *Store) PruneLedger(now time.Time) (LedgerPruneResult, error) {
 	result := LedgerPruneResult{
 		RemovedSnapshots:  len(remove),
 		RetainedSnapshots: count - len(remove),
+		HistoryBytes:      historyBytes,
 		DatabaseBytes:     databaseBytes,
 	}
-	if databaseBytes > policy.MaxBytes {
-		return result, fmt.Errorf("ledger remains %d bytes after pruning, exceeding %d bytes", databaseBytes, policy.MaxBytes)
+	if historyBytes > policy.MaxBytes {
+		return result, fmt.Errorf("ledger history remains %d bytes after pruning, exceeding %d bytes", historyBytes, policy.MaxBytes)
 	}
 	return result, nil
+}
+
+func (store *Store) historyRows() ([]ledgerHistoryRow, int64, error) {
+	rows, err := store.db.Query(`
+		SELECT cs.height,
+		       LENGTH(cs.snapshot_json)
+		     + COALESCE(ts.payload_bytes, 0)
+		     + COALESCE(dl.hash_bytes, 0)
+		     + COALESCE(ae.details_bytes, 0)
+		FROM certified_snapshots AS cs
+		LEFT JOIN (
+			SELECT height, SUM(LENGTH(payload_json)) AS payload_bytes
+			FROM transitions GROUP BY height
+		) AS ts ON ts.height = cs.height
+		LEFT JOIN (
+			SELECT height, SUM(LENGTH(transition_hash)) AS hash_bytes
+			FROM decision_log GROUP BY height
+		) AS dl ON dl.height = cs.height
+		LEFT JOIN (
+			SELECT height, SUM(LENGTH(details_json)) AS details_bytes
+			FROM audit_events GROUP BY height
+		) AS ae ON ae.height = cs.height
+		ORDER BY cs.height`)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query ledger history sizes: %w", err)
+	}
+	defer rows.Close()
+
+	history := make([]ledgerHistoryRow, 0, 16)
+	var total int64
+	for rows.Next() {
+		var item ledgerHistoryRow
+		if err := rows.Scan(&item.height, &item.bytes); err != nil {
+			return nil, 0, fmt.Errorf("scan ledger history size: %w", err)
+		}
+		history = append(history, item)
+		total += item.bytes
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate ledger history sizes: %w", err)
+	}
+	return history, total, nil
+}
+
+type ledgerHistoryRow struct {
+	height uint64
+	bytes  int64
 }
 
 func (store *Store) databaseSize() (int64, error) {
@@ -789,6 +861,16 @@ type AuthEvent struct {
 	RecordedAt    string `json:"recordedAt"`
 }
 
+// WebSession is a server-side browser-session record. The signed token or OIDC
+// bearer remains with the browser, while this row carries revocation state.
+type WebSession struct {
+	ID        string `json:"id"`
+	UserID    string `json:"userId"`
+	IssuedAt  string `json:"issuedAt"`
+	ExpiresAt string `json:"expiresAt"`
+	RevokedAt string `json:"revokedAt,omitempty"`
+}
+
 // AuthLock returns the local login-failure projection for a user.
 func (store *Store) AuthLock(userID string) (AuthLockState, error) {
 	if store == nil || store.db == nil {
@@ -930,6 +1012,194 @@ func (store *Store) AuthEvents(limit int) ([]AuthEvent, error) {
 		return nil, fmt.Errorf("iterate auth events: %w", err)
 	}
 	return events, nil
+}
+
+// RecordWebSession persists a newly issued web session. IDs are generated by
+// the session manager or derived from a token hash, so a duplicate is treated
+// as a collision rather than as new state.
+func (store *Store) RecordWebSession(session WebSession) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("store is closed")
+	}
+	if session.ID == "" || session.UserID == "" || session.IssuedAt == "" || session.ExpiresAt == "" {
+		return fmt.Errorf("web session id, user, issue time and expiry are required")
+	}
+	if _, err := store.db.Exec(`
+		INSERT INTO web_sessions (id, user_id, issued_at, expires_at, revoked_at)
+		VALUES (?, ?, ?, ?, '') ON CONFLICT(id) DO NOTHING`,
+		session.ID, session.UserID, session.IssuedAt, session.ExpiresAt,
+	); err != nil {
+		return fmt.Errorf("insert web session: %w", err)
+	}
+	return nil
+}
+
+// WebSessions returns every browser-session record, including revoked
+// tombstones. Committee members exchange this projection so a cookie issued by
+// one manager remains valid and revocable on every other manager.
+func (store *Store) WebSessions() ([]WebSession, error) {
+	return store.WebSessionsAfter("", 0)
+}
+
+// WebSessionsAfter returns one ordered page of browser-session records. The
+// gossip protocol pages this projection so a large console user base cannot
+// exceed the control-plane frame limit.
+func (store *Store) WebSessionsAfter(cursor string, limit int) ([]WebSession, error) {
+	if store == nil || store.db == nil {
+		return nil, fmt.Errorf("store is closed")
+	}
+	query := `
+		SELECT id, user_id, issued_at, expires_at, revoked_at
+		FROM web_sessions WHERE id>? ORDER BY id`
+	args := []any{cursor}
+	if limit > 0 {
+		if limit > 1000 {
+			limit = 1000
+		}
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := store.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query web sessions: %w", err)
+	}
+	defer rows.Close()
+	sessions := make([]WebSession, 0)
+	for rows.Next() {
+		var session WebSession
+		if err := rows.Scan(
+			&session.ID, &session.UserID, &session.IssuedAt,
+			&session.ExpiresAt, &session.RevokedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan web session: %w", err)
+		}
+		sessions = append(sessions, session)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate web sessions: %w", err)
+	}
+	return sessions, nil
+}
+
+// MergeWebSessions applies a session projection received from another committee
+// member. Revocation is monotonic: a tombstone can never be resurrected by a
+// stale active record. Expired rows are pruned in the same transaction.
+func (store *Store) MergeWebSessions(sessions []WebSession, now time.Time) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("store is closed")
+	}
+	if len(sessions) > 100000 {
+		return fmt.Errorf("too many web sessions: %d", len(sessions))
+	}
+	nowText := now.UTC().Format(time.RFC3339Nano)
+	tx, err := store.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin web session merge: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, session := range sessions {
+		if session.ID == "" || session.UserID == "" {
+			return fmt.Errorf("web session id and user are required")
+		}
+		issuedAt, err := time.Parse(time.RFC3339Nano, session.IssuedAt)
+		if err != nil {
+			return fmt.Errorf("web session %s has invalid issue time: %w", session.ID, err)
+		}
+		expiresAt, err := time.Parse(time.RFC3339Nano, session.ExpiresAt)
+		if err != nil || !expiresAt.After(issuedAt) {
+			return fmt.Errorf("web session %s has invalid expiry", session.ID)
+		}
+		if session.RevokedAt != "" {
+			revokedAt, err := time.Parse(time.RFC3339Nano, session.RevokedAt)
+			if err != nil || revokedAt.Before(issuedAt) {
+				return fmt.Errorf("web session %s has invalid revocation time", session.ID)
+			}
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO web_sessions (id, user_id, issued_at, expires_at, revoked_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				user_id=excluded.user_id,
+				issued_at=excluded.issued_at,
+				expires_at=excluded.expires_at,
+				revoked_at=CASE
+					WHEN web_sessions.revoked_at<>'' THEN web_sessions.revoked_at
+					ELSE excluded.revoked_at
+				END
+			WHERE web_sessions.user_id=excluded.user_id`,
+			session.ID, session.UserID, session.IssuedAt, session.ExpiresAt, session.RevokedAt,
+		); err != nil {
+			return fmt.Errorf("merge web session: %w", err)
+		}
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM web_sessions WHERE julianday(expires_at)<julianday(?)`, nowText,
+	); err != nil {
+		return fmt.Errorf("prune expired web sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit web session merge: %w", err)
+	}
+	return nil
+}
+
+// WebSession returns the persisted state for one server-side session ID.
+func (store *Store) WebSession(id string) (WebSession, bool, error) {
+	if store == nil || store.db == nil {
+		return WebSession{}, false, fmt.Errorf("store is closed")
+	}
+	if id == "" {
+		return WebSession{}, false, fmt.Errorf("web session id is required")
+	}
+	var session WebSession
+	err := store.db.QueryRow(`
+		SELECT id, user_id, issued_at, expires_at, revoked_at
+		FROM web_sessions WHERE id=?`, id,
+	).Scan(&session.ID, &session.UserID, &session.IssuedAt, &session.ExpiresAt, &session.RevokedAt)
+	if err == sql.ErrNoRows {
+		return WebSession{}, false, nil
+	}
+	if err != nil {
+		return WebSession{}, false, fmt.Errorf("query web session: %w", err)
+	}
+	return session, true, nil
+}
+
+// RevokeWebSession revokes one browser session. Logout uses this even when the
+// client presents the token in the Authorization header rather than a cookie.
+func (store *Store) RevokeWebSession(id string, now time.Time) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("store is closed")
+	}
+	if id == "" {
+		return fmt.Errorf("web session id is required")
+	}
+	if _, err := store.db.Exec(`
+		UPDATE web_sessions SET revoked_at=? WHERE id=? AND revoked_at=''`,
+		now.UTC().Format(time.RFC3339Nano), id,
+	); err != nil {
+		return fmt.Errorf("revoke web session: %w", err)
+	}
+	return nil
+}
+
+// RevokeUserWebSessions invalidates every active session for a user after a
+// credential, role, blocking, or owner-reset change.
+func (store *Store) RevokeUserWebSessions(userID string, now time.Time) error {
+	if store == nil || store.db == nil {
+		return fmt.Errorf("store is closed")
+	}
+	if userID == "" {
+		return fmt.Errorf("user id is required")
+	}
+	if _, err := store.db.Exec(`
+		UPDATE web_sessions SET revoked_at=? WHERE user_id=? AND revoked_at=''`,
+		now.UTC().Format(time.RFC3339Nano), userID,
+	); err != nil {
+		return fmt.Errorf("revoke user web sessions: %w", err)
+	}
+	return nil
 }
 
 type actorFieldsResult struct {

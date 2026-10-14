@@ -8,7 +8,9 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -43,6 +45,10 @@ type Client struct {
 	lastManagerError string
 	pathState        PathSelectionState
 	pathError        string
+	pathID           string
+	pathKind         model.PathKind
+	pathManager      string
+	routingDomainID  string
 	outboundDrop     string
 	sink             packet.PacketSink
 	snapshot         model.SignedSnapshot
@@ -62,6 +68,7 @@ type Client struct {
 	pingWaiters     map[uint16]chan packet.IPv4Packet
 	stateStore      *clientStateStore
 	synthesizeICMP  bool
+	scaleSequence   atomic.Uint64
 	routesReady     bool
 	posture         []string
 	exitReconciler  *exitnode.Reconciler
@@ -469,6 +476,7 @@ func (client *Client) connect(ctx context.Context) error {
 			client.connectionState = ClientStateNeedsLogin
 		}
 		client.mu.Unlock()
+		client.connectOtherManagers(ctx, candidate.ID)
 		return nil
 	}
 	if lastErr == nil {
@@ -483,6 +491,24 @@ func (client *Client) connect(ctx context.Context) error {
 	}
 	client.mu.Unlock()
 	return lastErr
+}
+
+// connectOtherManagers keeps live transport paths to every manager in the
+// certified committee. The active manager carries control-plane traffic, while
+// any forwarding manager may need to dial this client back for a multi-hop
+// data-plane frame.
+func (client *Client) connectOtherManagers(ctx context.Context, active peer.ID) {
+	client.mu.RLock()
+	candidates := append([]peer.AddrInfo(nil), client.managers...)
+	client.mu.RUnlock()
+	for _, candidate := range candidates {
+		if candidate.ID == active {
+			continue
+		}
+		connectContext, cancel := context.WithTimeout(ctx, connectTimeout)
+		_ = client.node.Host.Connect(connectContext, candidate)
+		cancel()
+	}
 }
 
 func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.PeerRecord) {
@@ -509,6 +535,7 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	localPeerID := client.node.Host.ID()
 	overlayIPs := client.peerOverlayIPsLocked()
 	client.mu.Unlock()
+	client.learnCommitteeManagers(snapshot)
 	client.persistSnapshot(snapshot, self)
 	client.rememberPeers(snapshot, localPeerID)
 	client.reconcileRoutesWhenReady(overlayIPs)
@@ -518,6 +545,70 @@ func (client *Client) applySnapshot(snapshot model.SignedSnapshot, self model.Pe
 	client.paths.replaceAssignments(snapshot.State.Assignments)
 	client.forwarding.Replace(snapshot.State)
 	go client.runAdmissionProbe(snapshot, self.PeerID)
+}
+
+// learnCommitteeManagers merges manager endpoints from a validated snapshot.
+// A bootstrap endpoint is only a discovery hint; after login the signed
+// committee manifest is the authoritative manager list.
+func (client *Client) learnCommitteeManagers(snapshot model.SignedSnapshot) {
+	type learnedManager struct {
+		info     peer.AddrInfo
+		endpoint string
+	}
+	learned := make([]learnedManager, 0, len(snapshot.Committee))
+	for _, member := range snapshot.Committee {
+		if member.PeerID == "" || member.Address == "" {
+			continue
+		}
+		endpoint := member.Address
+		if !strings.Contains(endpoint, "/p2p/") {
+			endpoint += "/p2p/" + member.PeerID
+		}
+		info, err := peer.AddrInfoFromString(endpoint)
+		if err != nil || info.ID.String() != member.PeerID {
+			continue
+		}
+		learned = append(learned, learnedManager{info: *info, endpoint: endpoint})
+	}
+	if len(learned) == 0 {
+		return
+	}
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	known := make(map[string]struct{}, len(client.managers))
+	managers := append([]peer.AddrInfo(nil), client.managers...)
+	addresses := append([]string(nil), client.managerAddresses...)
+	for _, manager := range managers {
+		known[manager.ID.String()] = struct{}{}
+	}
+	for _, manager := range learned {
+		if _, exists := known[manager.info.ID.String()]; exists {
+			continue
+		}
+		known[manager.info.ID.String()] = struct{}{}
+		managers = append(managers, manager.info)
+		addresses = append(addresses, manager.endpoint)
+	}
+	if len(managers) == 0 {
+		return
+	}
+
+	active := client.manager.ID
+	activeIndex := -1
+	for index, manager := range managers {
+		if manager.ID == active {
+			activeIndex = index
+			break
+		}
+	}
+	if activeIndex < 0 {
+		client.manager, client.activeManager, _ = selectManagerByRendezvous(managers, client.node.Host.ID().String())
+	} else {
+		client.activeManager = activeIndex
+	}
+	client.managers = managers
+	client.managerAddresses = addresses
 }
 
 func (client *Client) queueAdmissions(reports []netproto.AdmissionReport) {

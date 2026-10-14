@@ -20,6 +20,8 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 	collector.RecordSyncRequest()
 	collector.RecordSyncError()
 	collector.RecordSyncTimeout()
+	collector.RecordStoreWriteFailure()
+	collector.RecordScalePathSelection("family-multi", "multi_hop", 2)
 	collector.SetBFTView(3, 1)
 	collector.SetBFTHeightLag(4, 6)
 	collector.RecordBFTRoundTimeout()
@@ -42,6 +44,9 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 	}
 	if !strings.Contains(body, "netp2p_forward_queue_depth 2") {
 		t.Fatalf("forward queue depth missing from exposition:\n%s", body)
+	}
+	if !strings.Contains(body, `netp2p_forward_scale_path_selections_total{kind="multi_hop",manager_hops="2",path_family="family-multi"} 1`) {
+		t.Fatalf("scale path selection metric missing from exposition:\n%s", body)
 	}
 	if !strings.Contains(body, "netp2p_dns_failures_total 1") {
 		t.Fatalf("dns failure counter missing from exposition:\n%s", body)
@@ -73,6 +78,9 @@ func TestHandlerExposesRegisteredMetrics(t *testing.T) {
 	if !strings.Contains(body, "netp2p_bft_catchup_success_total 1") ||
 		!strings.Contains(body, "netp2p_bft_catchup_failures_total 2") {
 		t.Fatalf("BFT catch-up metrics missing from exposition:\n%s", body)
+	}
+	if !strings.Contains(body, "netp2p_store_write_failures_total 1") {
+		t.Fatalf("store write failure counter missing from exposition:\n%s", body)
 	}
 	if !strings.Contains(body, "go_goroutines") {
 		t.Fatalf("go goroutine metric missing from exposition:\n%s", body)
@@ -114,10 +122,47 @@ func TestBFTCommitHelpers(t *testing.T) {
 	nilCollector.RecordSyncRequest()
 	nilCollector.RecordSyncError()
 	nilCollector.RecordSyncTimeout()
+	nilCollector.RecordStoreWriteFailure()
 	nilCollector.SetBFTView(1, 1)
 	nilCollector.SetBFTHeightLag(1, 2)
 	nilCollector.RecordBFTRoundTimeout()
 	nilCollector.RecordBFTSubmit("accepted", 1, false)
+}
+
+func TestRoutingEpochHelpers(t *testing.T) {
+	collector := New()
+
+	collector.SetRoutingEpoch(42, 90*time.Second, 2048)
+	if got := gaugeValue(t, collector.RoutingEpochPresent); got != 1 {
+		t.Fatalf("routing epoch present = %v, want 1", got)
+	}
+	if got := gaugeValue(t, collector.RoutingEpochSequence); got != 42 {
+		t.Fatalf("routing epoch sequence = %v, want 42", got)
+	}
+	if got := gaugeValue(t, collector.RoutingEpochAge); got != 90 {
+		t.Fatalf("routing epoch age = %v, want 90", got)
+	}
+	if got := gaugeValue(t, collector.RoutingEpochSize); got != 2048 {
+		t.Fatalf("routing epoch size = %v, want 2048", got)
+	}
+
+	collector.ClearRoutingEpoch()
+	if got := gaugeValue(t, collector.RoutingEpochPresent); got != 0 {
+		t.Fatalf("cleared routing epoch present = %v, want 0", got)
+	}
+	if got := gaugeValue(t, collector.RoutingEpochAge); got != 0 {
+		t.Fatalf("cleared routing epoch age = %v, want 0", got)
+	}
+
+	collector.RecordRoutingEpochInvalid()
+	if got := counterValue(t, collector.RoutingEpochInvalid); got != 1 {
+		t.Fatalf("routing epoch invalid counter = %v, want 1", got)
+	}
+
+	var nilCollector *Metrics
+	nilCollector.SetRoutingEpoch(1, time.Second, 1)
+	nilCollector.ClearRoutingEpoch()
+	nilCollector.RecordRoutingEpochInvalid()
 }
 
 func gaugeValue(t *testing.T, gauge prometheus.Gauge) float64 {

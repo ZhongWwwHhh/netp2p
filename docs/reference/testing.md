@@ -67,7 +67,7 @@ Run package tests on clean hosts or containers, not only a development machine w
 
 ## Security and API checks
 
-Cover every new route with authentication, RBAC, invalid-input, oversize-body, and redaction tests. Snapshot and log tests must prove that password verifiers, setup-key plaintext, admin tokens, private shares, and session tokens are absent from client-visible data. For OpenAPI changes, validate syntax and verify implemented examples against actual routes.
+Cover every new route with authentication, RBAC, invalid-input, oversize-body, and redaction tests. Snapshot and log tests must prove that password verifiers, setup-key plaintext, admin tokens, private shares, and session tokens are absent from client-visible data. For OpenAPI changes, run `npx --yes @redocly/cli@1.34.2 lint api/openapi.yaml` and verify implemented examples against actual routes.
 
 ## Production validation
 

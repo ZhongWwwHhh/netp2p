@@ -1,8 +1,9 @@
 import { apiClient, type ApiClient } from '../api';
 import type { AuthStatus, Bootstrap, Identity, LoginResponse, Operation, SessionInfo } from '../types';
 
-// Single source of truth for the browser's libp2p connection to a manager.
-// Every authenticated page reads certified state through this client.
+// Single source of truth for the browser's authenticated manager API client.
+// Normal sessions use an HttpOnly cookie; only the break-glass admin token is
+// kept in memory as a Bearer credential.
 export const session = $state<{
   bootstrap: Bootstrap | null;
   authStatus: AuthStatus | null;
@@ -50,9 +51,7 @@ export async function resumeSession(): Promise<boolean> {
   try {
     const response = await fetch('/api/v1/auth/session', { credentials: 'same-origin' });
     if (!response.ok) return false;
-    const payload = await response.json() as LoginResponse;
-    if (!payload.sessionToken) return false;
-    return await connect(payload.sessionToken);
+    return await connect();
   } catch {
     return false;
   }
@@ -104,7 +103,7 @@ export async function bootstrapOwner(
   }
 }
 
-export async function connect(token: string): Promise<boolean> {
+export async function connect(token = ''): Promise<boolean> {
   if (!session.bootstrap) return false;
   session.connecting = true;
   session.error = '';
@@ -114,8 +113,8 @@ export async function connect(token: string): Promise<boolean> {
       await session.client.stop();
       session.client = null;
     }
-    next = await apiClient(session.bootstrap);
-    next.setToken(token);
+    next = await apiClient();
+    if (token) next.setToken(token);
     const info: SessionInfo = await next.session();
     session.client = next;
     session.token = token;
@@ -143,13 +142,13 @@ export async function disconnect(): Promise<void> {
 }
 
 export async function logout(): Promise<void> {
-  if (session.token) {
-    await fetch('/api/v1/auth/logout', {
-      method: 'POST',
-      headers: { authorization: `Bearer ${session.token}` },
-      credentials: 'same-origin',
-    }).catch(() => undefined);
-  }
+  const headers: Record<string, string> = {};
+  if (session.token) headers.authorization = `Bearer ${session.token}`;
+  await fetch('/api/v1/auth/logout', {
+    method: 'POST',
+    headers,
+    credentials: 'same-origin',
+  }).catch(() => undefined);
   await disconnect();
 }
 

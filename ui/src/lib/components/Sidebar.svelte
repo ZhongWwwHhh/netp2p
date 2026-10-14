@@ -14,6 +14,8 @@
       return accumulator;
     }, []),
   );
+
+  let { onNavigate }: { onNavigate?: () => void } = $props();
 </script>
 
 <aside class="flex h-full w-64 shrink-0 flex-col border-r border-slate-200 bg-white">
@@ -26,7 +28,7 @@
     {#each groups as group (group.name)}
       <p class="nav-group">{group.name}</p>
       {#each group.items as route (route.path)}
-        <button class={`nav-link w-full ${router.path === route.path ? 'nav-link-active' : ''}`} onclick={() => navigate(route.path)}>
+        <button class={`nav-link w-full ${router.path === route.path ? 'nav-link-active' : ''}`} onclick={() => { navigate(route.path); onNavigate?.(); }}>
           {route.title}
         </button>
       {/each}

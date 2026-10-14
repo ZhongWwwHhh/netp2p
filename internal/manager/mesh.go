@@ -31,9 +31,13 @@ type CommitteeMesh struct {
 	mu              sync.Mutex
 	submitMu        sync.Mutex
 	probeMu         sync.Mutex
+	readinessMu     sync.Mutex
 	subscribers     map[chan model.SignedSnapshot]struct{}
 	probeGeneration uint64
 	probeResponses  map[peer.ID]committeeProbe
+	readinessCache  CommitteeReadiness
+	readinessErr    error
+	readinessAt     time.Time
 	metrics         *metrics.Metrics
 	refreshes       map[peer.ID]chan struct{}
 }
@@ -51,7 +55,10 @@ type CommitteeReadiness struct {
 	Rounds     map[uint64]int
 }
 
-const committeeProbeTimeout = 500 * time.Millisecond
+const (
+	committeeProbeTimeout      = 500 * time.Millisecond
+	committeeReadinessCacheTTL = 2 * time.Second
+)
 
 var ErrCommitteeUnavailable = errors.New("committee unavailable")
 
@@ -204,6 +211,22 @@ func (mesh *CommitteeMesh) ensureCommitteeAvailable() (CommitteeReadiness, error
 		}
 	}
 	return readiness, nil
+}
+
+// ensureCommitteeAvailableCached is used by client-facing preflight checks. A
+// short cache prevents bounded login retries from turning into a probe storm,
+// while keeping recovery latency well below the client retry deadline.
+func (mesh *CommitteeMesh) ensureCommitteeAvailableCached() (CommitteeReadiness, error) {
+	mesh.readinessMu.Lock()
+	defer mesh.readinessMu.Unlock()
+	if time.Since(mesh.readinessAt) < committeeReadinessCacheTTL {
+		return mesh.readinessCache, mesh.readinessErr
+	}
+	readiness, err := mesh.ensureCommitteeAvailable()
+	mesh.readinessCache = readiness
+	mesh.readinessErr = err
+	mesh.readinessAt = time.Now()
+	return readiness, err
 }
 
 func (mesh *CommitteeMesh) markProbeResponse(remote peer.ID, generation uint64, round uint64) {
@@ -412,7 +435,10 @@ func (mesh *CommitteeMesh) handleStateUpdate(stream network.Stream) {
 		if message.Snapshot == nil {
 			return
 		}
-		mesh.adoptSnapshot(*message.Snapshot)
+		if err := mesh.adoptSnapshot(*message.Snapshot); err != nil {
+			log.Printf("committee snapshot rejected at height %d from %s: %v",
+				message.Snapshot.Height, remote, err)
+		}
 	case "forward":
 		if message.Transition == nil {
 			return
@@ -710,7 +736,7 @@ func (mesh *CommitteeMesh) broadcast(message model.CommitteeEnvelope) {
 		go func(peerID peer.ID) {
 			defer waitGroup.Done()
 			if err := mesh.send(peerID, message); err != nil {
-				log.Printf("committee send failed: %v", err)
+				log.Printf("committee send to %s failed: %v", peerID, err)
 			}
 		}(peerID)
 	}

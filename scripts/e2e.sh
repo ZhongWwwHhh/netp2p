@@ -46,6 +46,12 @@ done
 log() { printf '\n=== %s ===\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
+mkdir -p "$RUN_DIR"
+exec 9>"$RUN_DIR/e2e.lock"
+if ! flock -n 9; then
+  fail "another e2e run already owns $RUN_DIR/e2e.lock"
+fi
+
 status_field() {
   python3 - "$1" "$2" <<'PY'
 import json, sys
@@ -53,9 +59,29 @@ print(json.load(open(sys.argv[1]))[sys.argv[2]])
 PY
 }
 
+metric_value() {
+  curl -fsS "$METRICS_URL" 2>/dev/null | awk -v key="$1" '$1 == key { print $2; exit }'
+}
+
+wait_metric_above() {
+  local key=$1 before=$2 value attempt
+  for attempt in $(seq 1 50); do
+    value="$(metric_value "$key" || true)"
+    value="${value:-0}"
+    if awk -v before="$before" -v value="$value" 'BEGIN { exit !(value > before) }'; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 wait_status() {
   local file=$1 name=$2
-  for _ in $(seq 1 90); do
+  # Windows Docker's first run after image creation can take longer than the
+  # client's bounded login retries before the committee becomes dialable.
+  for _ in $(seq 1 180); do
     if [ -s "$file" ]; then return 0; fi
     sleep 1
   done
@@ -127,6 +153,8 @@ cleanup() {
 trap cleanup EXIT
 
 log "generate deterministic seed"
+"${COMPOSE[@]}" --profile quorum --profile tun --profile exit --profile multihop --profile quota --profile chaos \
+  down -v --remove-orphans >/dev/null 2>&1 || true
 mkdir -p "$RUN_DIR"
 rm -f "$RUN_DIR"/*.json
 go run ./cmd/netp2pd --role seedgen --config deploy/state.json
@@ -285,12 +313,15 @@ JSON
   echo "OK: subnet target reachable through the exit node"
 
   log "EXIT: the gateway must masquerade overlay sources"
-  "${DOCKER[@]}" exec netp2p-client-exit-tun-1 iptables -t nat -S POSTROUTING | grep -q MASQUERADE \
-    || fail "exit node did not install a MASQUERADE rule"
+  "${DOCKER[@]}" exec netp2p-client-exit-tun-1 sh -c \
+    'iptables -t nat -C POSTROUTING -s 100.64.0.0/24 -j NETP2P_SNAT && iptables -t nat -S NETP2P_SNAT | grep -q MASQUERADE' \
+    || fail "exit node did not install a POSTROUTING jump and MASQUERADE rule"
   echo "OK: gateway installed a MASQUERADE rule"
 fi
 
 log "3-of-3 writes must block while one manager is down"
+"${COMPOSE[@]}" --profile quorum rm -sf client-c >/dev/null 2>&1 || true
+rm -f "$RUN_DIR/client-c.json"
 "${COMPOSE[@]}" stop manager-3 >/dev/null
 "${COMPOSE[@]}" --profile quorum up -d client-c
 sleep 8
@@ -344,34 +375,196 @@ json.dump(settings, sys.stdout)
 
 if [ "$WITH_MULTIHOP" = "1" ]; then
   log "MULTIHOP: force via-manager paths with two manager hops"
-  fetch_settings '{"directPathEnabled": false, "viaManagerEnabled": true, "maxManagerHops": 2}' \
+  fetch_settings '{"directPathEnabled": false, "viaManagerEnabled": true, "maxManagerHops": 2, "defaultFlowClass": "latency"}' \
     > deploy/multihop-settings.json
   admin_transition update-settings /config/multihop-settings.json || fail "update-settings failed"
   echo "OK: certified settings disable direct paths and enable via-manager paths"
 
-  multihop_ok=0
-  # Probe/scheduler intervals mean the first via-manager assignment can take a
-  # couple of ticks to appear; poll well past that.
+  cat > deploy/multihop-udp-a-to-b-policy.json <<'JSON'
+{
+  "id": "allow-a-to-b-udp",
+  "sourceGroups": ["clients-a"],
+  "destinationGroups": ["clients-b"],
+  "services": [{"protocol": "udp", "startPort": 18081, "endPort": 18081}],
+  "effect": "allow",
+  "direction": "unidirectional"
+}
+JSON
+  admin_transition upsert-policy /config/multihop-udp-a-to-b-policy.json || fail "upsert A-to-B UDP policy failed"
+  cat > deploy/multihop-udp-b-to-a-policy.json <<'JSON'
+{
+  "id": "allow-b-to-a-udp",
+  "sourceGroups": ["clients-b"],
+  "destinationGroups": ["clients-a"],
+  "services": [{"protocol": "udp", "startPort": 18081, "endPort": 18081}],
+  "effect": "allow",
+  "direction": "unidirectional"
+}
+JSON
+  admin_transition upsert-policy /config/multihop-udp-b-to-a-policy.json || fail "upsert B-to-A UDP policy failed"
+  echo "OK: certified UDP policy allows real datagrams in both directions"
+
+  routing_state_ok=0
+  rm -f deploy/multihop-snapshot.json.tmp
   for _ in $(seq 1 90); do
-    if python3 - "$RUN_DIR/client-a-tun.json" <<'PY'
+    if admin_query show-snapshot > deploy/multihop-snapshot.json.tmp 2>/dev/null; then
+      mv -f deploy/multihop-snapshot.json.tmp deploy/multihop-snapshot.json
+    fi
+    if python3 - deploy/multihop-snapshot.json 2>/dev/null <<'PY'
 import json, sys
-status = json.load(open(sys.argv[1]))
-kinds = {path.get("kind") for path in status.get("assignments", [])}
-sys.exit(0 if kinds & {"via_manager", "multi_hop"} else 1)
+snapshot = json.load(open(sys.argv[1]))
+state = snapshot.get("state", {})
+settings = state.get("settings", {})
+committee = snapshot.get("committee", [])
+families = state.get("pathFamilies", [])
+domains = state.get("routingDomains", [])
+assert not settings.get("directPathEnabled")
+assert settings.get("viaManagerEnabled") is True
+assert settings.get("maxManagerHops") == 2
+assert settings.get("defaultFlowClass") == "latency"
+assert len(committee) == 3 and all(m.get("forwardingEnabled") for m in committee)
+assert any(f.get("kind") == "multi_hop" and len(f.get("managerHops", [])) == 2 for f in families)
+assert domains and all(d.get("pathFamilyIds") for d in domains)
+def has_udp_domain(source_group, destination_group):
+    for domain in domains:
+        key = domain.get("key", {})
+        if key.get("sourceGroupId") != source_group:
+            continue
+        if key.get("destinationScope") != f"group:{destination_group}":
+            continue
+        if any(service.get("protocol") == "udp" for service in domain.get("services", [])):
+            return True
+    return False
+assert has_udp_domain("clients-a", "clients-b")
+assert has_udp_domain("clients-b", "clients-a")
 PY
-    then multihop_ok=1; break; fi
+    then routing_state_ok=1; break; fi
     sleep 1
   done
-  [ "$multihop_ok" = "1" ] || fail "client-a-tun never received a via-manager assignment"
-  echo "OK: planner produced a via-manager assignment under the new settings"
+  [ "$routing_state_ok" = "1" ] || fail "global planner never certified multi-hop families and routing domains"
+  echo "OK: certified state contains forwarding managers, routing domains, and two-hop families"
+  python3 - "$RUN_DIR/client-a-tun.json" "$RUN_DIR/client-b-tun.json" <<'PY'
+import json, sys
+for path in sys.argv[1:]:
+    status = json.load(open(path))
+    failover = status.get("managerFailover", {})
+    assert failover.get("configured") == 3, (path, failover)
+PY
+  echo "OK: TUN clients learned all three certified manager endpoints from the signed manifest"
 
-  if "${DOCKER[@]}" exec netp2p-client-a-tun-1 ping -c 2 -W 4 "$B_TUN_IP" >/dev/null 2>&1; then
-    echo "OK: kernel traffic still reaches client-b-tun through the manager"
-  else
-    fail "client-a-tun could not reach $B_TUN_IP after forcing via-manager paths"
+  forward_before="$(metric_value netp2p_forward_forwarded_total || true)"
+  forward_before="${forward_before:-0}"
+  multihop_ok=0
+  for _ in $(seq 1 90); do
+    if "${DOCKER[@]}" exec netp2p-client-a-tun-1 ping -c 2 -W 4 "$B_TUN_IP" >/dev/null 2>&1; then
+      if python3 - "$RUN_DIR/client-a-tun.json" "$MANAGER1_PEER_ID" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1]))
+diagnostics = status.get("pathDiagnostics", {})
+assert status.get("state") == "ready"
+assert diagnostics.get("lastPathId") == "global-scale"
+assert diagnostics.get("lastKind") in ("via_manager", "multi_hop")
+assert diagnostics.get("lastManagerPeerId") == sys.argv[2]
+assert diagnostics.get("lastRoutingDomainId")
+PY
+      then multihop_ok=1; break; fi
+    fi
+    sleep 1
+  done
+  [ "$multihop_ok" = "1" ] || fail "client-a-tun never sent a certified global-scale packet"
+  forward_after="$(metric_value netp2p_forward_forwarded_total || true)"
+  forward_after="${forward_after:-0}"
+  awk -v before="$forward_before" -v after="$forward_after" 'BEGIN { exit !(after > before) }' \
+    || fail "manager forwarding counter did not advance (before=$forward_before after=$forward_after)"
+  echo "OK: real kernel ICMP used global-scale and advanced manager forwarding (before=$forward_before after=$forward_after)"
+
+  # Weighted rendezvous selects per TCP flow. A spread of source ports proves
+  # the planner can actually select a certified two-manager family, not merely
+  # publish one in certified state.
+  "${DOCKER[@]}" exec -d netp2p-client-b-tun-1 sh -c 'while true; do nc -l 18080 >/dev/null 2>&1; done'
+  for _ in $(seq 1 80); do
+    "${DOCKER[@]}" exec netp2p-client-a-tun-1 nc -z -w 2 "$B_TUN_IP" 18080 >/dev/null 2>&1 || true
+  done
+  curl -fsS "$METRICS_URL" > deploy/multihop-metrics.txt
+  python3 - deploy/multihop-snapshot.json deploy/multihop-metrics.txt <<'PY' \
+    || fail "no real TCP flow selected a certified two-manager path family"
+import json, re, sys
+snapshot = json.load(open(sys.argv[1]))
+families = {f.get("id") for f in snapshot.get("state", {}).get("pathFamilies", [])}
+selected = 0.0
+for line in open(sys.argv[2], encoding="utf-8"):
+    if not line.startswith("netp2p_forward_scale_path_selections_total{"):
+        continue
+    labels = dict(re.findall(r'(\w+)="([^"]*)"', line))
+    if labels.get("kind") == "multi_hop" and labels.get("manager_hops") == "2":
+        assert labels.get("path_family") in families, labels
+        selected += float(line.rsplit(None, 1)[1])
+assert selected > 0, "no two-manager family was selected"
+print(f"OK: {selected:g} scale envelopes selected certified two-manager families")
+PY
+
+  log "MULTIHOP: idle stream closure must not lose the first UDP datagram"
+  # The frame transport closes an idle inbound stream after one minute. This
+  # delay makes the E2E exercise the exact production failure mode rather than
+  # relying on retries to hide a lost first packet.
+  sleep 65
+  udp_forward_before="$(metric_value netp2p_forward_forwarded_total || true)"
+  udp_forward_before="${udp_forward_before:-0}"
+  udp_drop_before="$(metric_value netp2p_forward_dropped_total || true)"
+  udp_drop_before="${udp_drop_before:-0}"
+  "${DOCKER[@]}" exec -d netp2p-client-b-tun-1 sh -c \
+    'rm -f /tmp/netp2p-udp-a-to-b; timeout 20 nc -l -u -p 18081 > /tmp/netp2p-udp-a-to-b'
+  if ! "${COMPOSE[@]}" exec -T client-a-tun sh -c \
+    'printf netp2p-udp-a-to-b | nc -u -w 2 "$1" 18081' sh "$B_TUN_IP" >/dev/null; then
+    fail "A->B first UDP datagram after idle was not sent"
   fi
-  forwarded="$(curl -fsS "$METRICS_URL" 2>/dev/null | grep '^netp2p_forward_forwarded_total' || true)"
-  echo "OK: manager forwarding metrics: ${forwarded:-<none>}"
+  if ! "${COMPOSE[@]}" exec -T client-b-tun sh -c \
+    'test "$(cat /tmp/netp2p-udp-a-to-b 2>/dev/null)" = netp2p-udp-a-to-b'; then
+    fail "A->B first UDP datagram after idle was not delivered over global-scale"
+  fi
+  udp_forward_after="$(wait_metric_above netp2p_forward_forwarded_total "$udp_forward_before")" \
+    || fail "first idle UDP forwarding counter did not advance (before=$udp_forward_before)"
+  udp_drop_after="$(metric_value netp2p_forward_dropped_total || true)"
+  udp_drop_after="${udp_drop_after:-0}"
+  [ "$udp_drop_after" = "$udp_drop_before" ] \
+    || fail "first idle UDP increased drops (before=$udp_drop_before after=$udp_drop_after)"
+  echo "OK: first UDP datagram after idle stream closure was delivered and acknowledged (forwarded=$udp_forward_after)"
+  python3 - "$RUN_DIR/client-a-tun.json" "$MANAGER1_PEER_ID" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1]))
+diagnostics = status.get("pathDiagnostics", {})
+assert diagnostics.get("lastPathId") == "global-scale"
+assert diagnostics.get("lastKind") in ("via_manager", "multi_hop")
+assert diagnostics.get("lastManagerPeerId") == sys.argv[2]
+PY
+
+  "${DOCKER[@]}" exec -d netp2p-client-a-tun-1 sh -c \
+    'rm -f /tmp/netp2p-udp-b-to-a; timeout 20 nc -l -u -p 18081 > /tmp/netp2p-udp-b-to-a'
+  udp_b_to_a=0
+  for _ in $(seq 1 20); do
+    "${COMPOSE[@]}" exec -T client-b-tun sh -c \
+      'printf netp2p-udp-b-to-a | nc -u -w 2 "$1" 18081' sh "$A_TUN_IP" >/dev/null 2>&1 || true
+    if "${DOCKER[@]}" exec netp2p-client-a-tun-1 sh -c \
+      'test "$(cat /tmp/netp2p-udp-b-to-a 2>/dev/null)" = netp2p-udp-b-to-a'; then
+      udp_b_to_a=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$udp_b_to_a" = "1" ] || fail "B->A real UDP datagram was not delivered over global-scale"
+  python3 - "$RUN_DIR/client-b-tun.json" "$MANAGER1_PEER_ID" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1]))
+diagnostics = status.get("pathDiagnostics", {})
+assert diagnostics.get("lastPathId") == "global-scale"
+assert diagnostics.get("lastKind") in ("via_manager", "multi_hop")
+assert diagnostics.get("lastManagerPeerId") == sys.argv[2]
+PY
+  udp_forward_after="$(metric_value netp2p_forward_forwarded_total || true)"
+  udp_forward_after="${udp_forward_after:-0}"
+  awk -v before="$udp_forward_before" -v after="$udp_forward_after" 'BEGIN { exit !(after > before) }' \
+    || fail "UDP forwarding counter did not advance (before=$udp_forward_before after=$udp_forward_after)"
+  echo "OK: real UDP datagrams traversed global-scale in both directions (before=$udp_forward_before after=$udp_forward_after)"
 fi
 
 if [ "$WITH_QUOTA" = "1" ]; then

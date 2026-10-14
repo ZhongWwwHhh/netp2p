@@ -584,8 +584,9 @@ func runPacketStorm(ctx context.Context, options Options) (PacketStormResult, er
 	var received atomic.Uint64
 	destinationTransport := transport.NewWithEnvelope(ctx, destination.Host, p2p.FrameProtocol, func(peer.ID, []byte) {
 		received.Add(1)
-	}, func(peer.ID, []byte) {
+	}, func(peer.ID, []byte) error {
 		received.Add(1)
+		return nil
 	})
 	sourceTransport := transport.NewWithEnvelope(ctx, source.Host, p2p.FrameProtocol, nil, nil)
 	defer destinationTransport.Close()
@@ -768,26 +769,28 @@ func runQuotaExhaustion(ctx context.Context, options Options) (QuotaResult, erro
 	destinationTable := forward.NewTable(state, destinationID.String(), func(peer.ID, forward.Envelope) error {
 		return nil
 	})
-	managerTransport := transport.NewWithEnvelope(ctx, managerNode.Host, p2p.FrameProtocol, nil, func(remote peer.ID, wire []byte) {
+	managerTransport := transport.NewWithEnvelope(ctx, managerNode.Host, p2p.FrameProtocol, nil, func(remote peer.ID, wire []byte) error {
 		managerReceived.Add(1)
 		envelope, err := forward.DecodeEnvelope(wire)
 		if err != nil {
-			return
+			return nil
 		}
 		if _, err := managerForwardTable.Accept(remote, envelope); err != nil {
 			if errors.Is(err, forward.ErrQuotaExceeded) {
 				quotaBlocked.Add(1)
 			}
 		}
+		return nil
 	})
-	destinationTransport := transport.NewWithEnvelope(ctx, destination.Host, p2p.FrameProtocol, nil, func(remote peer.ID, wire []byte) {
+	destinationTransport := transport.NewWithEnvelope(ctx, destination.Host, p2p.FrameProtocol, nil, func(remote peer.ID, wire []byte) error {
 		envelope, err := forward.DecodeEnvelope(wire)
 		if err != nil {
-			return
+			return nil
 		}
 		if delivered, err := destinationTable.Accept(remote, envelope); err == nil && delivered {
 			destinationReceived.Add(1)
 		}
+		return nil
 	})
 	managerForwardTable = forward.NewTable(state, managerID.String(), func(remote peer.ID, envelope forward.Envelope) error {
 		wire, err := forward.EncodeEnvelope(envelope)

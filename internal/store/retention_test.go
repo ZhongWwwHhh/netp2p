@@ -49,7 +49,7 @@ func TestLedgerRetentionPrunesBySizeToLatestCheckpoint(t *testing.T) {
 	defer store.Close()
 	recordRetentionSnapshots(t, store, 3)
 
-	limit, err := store.databaseSize()
+	_, limit, err := store.historyRows()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,8 +66,8 @@ func TestLedgerRetentionPrunesBySizeToLatestCheckpoint(t *testing.T) {
 	if result.RemovedSnapshots != 2 || result.RetainedSnapshots != 1 {
 		t.Fatalf("size prune result = %+v", result)
 	}
-	if result.DatabaseBytes > limit {
-		t.Fatalf("database size after prune = %d, want <= %d", result.DatabaseBytes, limit)
+	if result.HistoryBytes > limit {
+		t.Fatalf("history bytes after prune = %d, want <= %d", result.HistoryBytes, limit)
 	}
 	assertCount(t, store.db, "certified_snapshots", 1)
 	assertCount(t, store.db, "decision_log", 1)

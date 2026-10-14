@@ -147,7 +147,7 @@
       <FormField label="Server addresses">
         <div class="space-y-2">
           <div class="flex gap-2">
-            <input class="input" bind:value={serverDraft} placeholder="1.1.1.1" onkeydown={(event) => event.key === 'Enter' && (event.preventDefault(), addServer())} />
+            <input class="input" bind:value={serverDraft} placeholder="203.0.113.53" onkeydown={(event) => event.key === 'Enter' && (event.preventDefault(), addServer())} />
             <button class="btn-secondary" onclick={addServer}>Add</button>
           </div>
           <div class="flex flex-wrap gap-1">
