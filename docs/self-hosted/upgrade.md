@@ -56,7 +56,7 @@ can strand a manager on the old version. Always use an atomic all-stop/all-start
 Never roll one manager at a time for a committee upgrade.
 
 For releases that change RoutingEpoch signing, upgrade managers and clients in
-the same maintenance window. NetP2P v0.3.8 replaces the legacy single-manager
+the same maintenance window. NetP2P v0.3.9 replaces the legacy single-manager
 Ed25519 routing epoch with committee threshold signatures; older clients must
 not remain on the removed signing path after the managers are activated.
 

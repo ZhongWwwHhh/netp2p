@@ -25,7 +25,7 @@ $env:GOARCH = "amd64"
 $env:CGO_ENABLED = "0"
 $ldflags = "-s -w -X github.com/netp2p/netp2p/internal/version.Version=$Version"
 # go-winres tool version, independent of the NetP2P product version.
-$winresVersion = "v0.3.6"
+$winresVersion = "v0.3.3"
 $goBin = go env GOBIN
 if (-not $goBin) {
   $goBin = Join-Path (go env GOPATH) "bin"
